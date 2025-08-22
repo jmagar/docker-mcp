@@ -1,0 +1,33 @@
+# FastMCP Docker SSH Manager Configuration Example
+
+hosts:
+  production-1:
+    hostname: 192.168.1.10
+    user: dockeruser
+    identity_file: ~/.ssh/docker_host_key
+    description: "Production Docker host"
+    tags: ["production", "web"]
+    compose_path: "/mnt/user/compose"  # Optional: Path for persistent compose files (auto-discovered if not set)
+    
+  staging-1:
+    hostname: 192.168.1.20  
+    user: dockeruser
+    identity_file: ~/.ssh/docker_host_key
+    description: "Staging environment"
+    tags: ["staging"]
+    compose_path: "/home/docker/compose"  # Custom compose file location
+    
+  development:
+    hostname: localhost
+    user: ${USER}
+    description: "Local development"
+    tags: ["development", "local"]
+    # compose_path auto-discovered if not specified
+
+# Server settings are configured via .env file
+# - FASTMCP_HOST (default: 0.0.0.0)
+# - FASTMCP_PORT (default: 8000) 
+# - LOG_LEVEL (default: INFO)
+
+# Docker contexts handle all connection management automatically
+# Compose files are stored persistently on each host for full lifecycle management

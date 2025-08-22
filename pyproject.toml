@@ -1,0 +1,156 @@
+[project]
+name = "docker-mcp"
+version = "0.1.0"
+description = "FastMCP Docker SSH Manager - Remote Docker management via SSH"
+authors = [
+    {name = "Docker MCP Team"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.11.3",
+    "docker>=7.1.0",
+    "pydantic>=2.11.7",
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0.2",
+    "structlog>=25.4.0",
+    "httpx>=0.28.1",
+    "asyncio-mqtt>=0.16.2",
+    "python-dotenv>=1.1.1",
+    "watchfiles>=0.24.0",
+]
+readme = "README.md"
+license = {text = "MIT"}
+
+[project.scripts]
+docker-mcp = "docker_mcp.server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "pytest-watch>=4.2.0",
+    "ruff>=0.8.0",
+    "mypy>=1.8.0",
+    "pre-commit>=3.6.0",
+    "bandit>=1.7.6",
+    "safety>=3.0.0",
+    # Type stubs
+    "types-PyYAML>=6.0.0",
+    "types-requests>=2.31.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Ruff configuration
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+cache-dir = ".cache/ruff"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "C90", "I", "N", "UP", "S", "B", "A", "COM", "DJ", "PLE", "PLW"]
+ignore = ["E501", "S101", "COM812", "ISC001"]  # Line too long, assert usage, trailing comma conflicts
+
+[tool.ruff.lint.isort]
+known-first-party = ["docker_mcp"]
+force-single-line = false
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S104"]  # Allow asserts in tests, Docker 0.0.0.0 bindings
+"docker_mcp/core/docker_context.py" = ["S603"]  # Legitimate subprocess calls for Docker
+"docker_mcp/core/compose_manager.py" = ["S603"]  # Legitimate subprocess calls for SSH/SCP
+"docker_mcp/tools/stacks.py" = ["S603"]  # Legitimate subprocess calls for SSH
+"docker_mcp/server.py" = ["S104"]  # Docker port mapping 0.0.0.0 bindings
+"docker_mcp/tools/containers.py" = ["S104"]  # Docker port mapping 0.0.0.0 bindings
+"docker_mcp/services/container.py" = ["S104"]  # Docker port mapping 0.0.0.0 bindings
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# MyPy configuration
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_return_any = false
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unreachable = false
+show_error_context = true
+show_column_numbers = true
+cache_dir = ".cache/mypy"
+ignore_errors = false
+disable_error_code = ["misc", "no-untyped-call", "no-untyped-def"]
+
+# Module-specific settings
+[[tool.mypy.overrides]]
+module = [
+    "docker.*",
+    "asyncio_mqtt.*", 
+    "watchfiles.*",
+    "fastmcp.*",
+    "mcp.*",
+    "structlog.*",
+    "pydantic.*",
+    "pydantic_settings.*",
+    "dotenv.*",
+    "python_dotenv.*"
+]
+ignore_missing_imports = true
+
+# Disable strict mode for our modules initially
+[[tool.mypy.overrides]]
+module = ["docker_mcp.*"]
+disable_error_code = ["misc", "var-annotated", "no-untyped-def", "attr-defined", "assignment"]
+
+# Pytest configuration
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+cache_dir = ".cache/pytest"
+addopts = "--cov=docker_mcp --cov-report=term-missing --cov-report=html:.cache/coverage_html"
+timeout = 60  # Default timeout of 60 seconds per test
+timeout_method = "thread"  # Use thread method to ensure cleanup runs
+timeout_func_only = false  # Apply timeout to fixtures as well
+markers = [
+    "slow: marks tests as slow (taking >10 seconds)",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "requires_docker: marks tests that require Docker host connectivity",
+    "timeout: override default timeout for specific tests"
+]
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["docker_mcp"]
+omit = ["*/tests/*", "*/venv/*", "*/__pycache__/*"]
+data_file = ".cache/coverage/.coverage"
+
+[tool.coverage.html]
+directory = ".cache/coverage_html"
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.1.0",
+    "pytest-cov>=6.2.1",
+    "pytest-stub>=1.1.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-timeout>=2.3.0",
+    "types-pyyaml>=6.0.12.20250809",
+    "types-requests>=2.32.4.20250809",
+]
+

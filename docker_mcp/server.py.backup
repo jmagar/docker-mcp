@@ -1,0 +1,511 @@
+"""FastMCP Docker SSH Manager server."""
+
+import argparse
+import asyncio
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import structlog
+from fastmcp import FastMCP
+
+try:
+    # Try relative imports first (when used as module)
+    from .core.config import load_config, DockerMCPConfig
+    from .core.ssh import SSHConnectionManager
+    from .core.docker_context import DockerContextManager
+    from .middleware.logging import logging_middleware, timing_middleware, error_handling_middleware
+    from .tools.containers import ContainerTools
+    from .tools.logs import LogTools
+    from .tools.stacks import StackTools
+except ImportError:
+    # Fallback to absolute imports (when run as script)
+    from docker_mcp.core.config import load_config, DockerMCPConfig
+    from docker_mcp.core.ssh import SSHConnectionManager
+    from docker_mcp.core.docker_context import DockerContextManager
+    from docker_mcp.middleware.logging import logging_middleware, timing_middleware, error_handling_middleware
+    from docker_mcp.tools.containers import ContainerTools
+    from docker_mcp.tools.logs import LogTools
+    from docker_mcp.tools.stacks import StackTools
+
+
+# Configure structured logging
+def setup_logging(log_level: str = "INFO") -> None:
+    """Setup structured logging with context."""
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=getattr(logging, log_level.upper()),
+    )
+    
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.processors.JSONRenderer()
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+
+class DockerMCPServer:
+    """FastMCP Docker SSH Manager server."""
+    
+    def __init__(self, config: DockerMCPConfig):
+        self.config = config
+        self.logger = structlog.get_logger()
+        
+        # Initialize managers
+        self.ssh_manager = SSHConnectionManager(config)
+        self.context_manager = DockerContextManager(config)
+        
+        # Initialize tool classes
+        self.container_tools = ContainerTools(config, self.context_manager)
+        self.log_tools = LogTools(config, self.context_manager)
+        self.stack_tools = StackTools(config, self.context_manager, self.ssh_manager)
+        
+        # Create FastMCP server
+        self.app = FastMCP("Docker SSH Manager")
+        
+        # Add middleware
+        self.app.add_middleware(error_handling_middleware)
+        self.app.add_middleware(logging_middleware)
+        self.app.add_middleware(timing_middleware)
+        
+        # Register tools
+        self._register_tools()
+        
+        self.logger.info("Docker MCP Server initialized", 
+                        hosts=list(config.hosts.keys()),
+                        server_config=config.server.model_dump())
+    
+    def _register_tools(self) -> None:
+        """Register all MCP tools with the server."""
+        
+        # Register host management tools
+        self.app.add_tool(self.add_docker_host)
+        self.app.add_tool(self.list_docker_hosts)
+        self.app.add_tool(self.remove_docker_host)
+        self.app.add_tool(self.test_docker_host)
+        
+        # Register container management tools
+        self.app.add_tool(self.list_containers)
+        self.app.add_tool(self.get_container_info)
+        self.app.add_tool(self.start_container)
+        self.app.add_tool(self.stop_container)
+        self.app.add_tool(self.restart_container)
+        
+        # Register log management tools
+        self.app.add_tool(self.get_container_logs)
+        self.app.add_tool(self.stream_container_logs)
+        
+        # Register stack management tools
+        self.app.add_tool(self.list_compose_stacks)
+        self.app.add_tool(self.deploy_compose_stack)
+        self.app.add_tool(self.stop_compose_stack)
+        
+    # Host Management Tools
+    async def add_docker_host(
+        self,
+        host_id: str,
+        ssh_host: str, 
+        ssh_user: str,
+        ssh_port: int = 22,
+        ssh_key_path: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        test_connection: bool = True
+    ) -> dict[str, Any]:
+        """Add a new Docker host for management.
+            
+            Args:
+                host_id: Unique identifier for the host
+                ssh_host: SSH hostname or IP address
+                ssh_user: SSH username
+                ssh_port: SSH port (default: 22)
+                ssh_key_path: Path to SSH private key
+                description: Human-readable description
+                tags: Tags for host categorization
+                test_connection: Test SSH connection before adding
+                
+            Returns:
+                Operation result
+            """
+            try:
+                # Import here to avoid circular imports
+                try:
+                    from .core.config import DockerHost
+                except ImportError:
+                    from docker_mcp.core.config import DockerHost
+                
+                host_config = DockerHost(
+                    hostname=ssh_host,
+                    user=ssh_user,
+                    port=ssh_port,
+                    identity_file=ssh_key_path,
+                    description=description,
+                    tags=tags or [],
+                    enabled=True
+                )
+                
+                # Test connection if requested
+                if test_connection:
+                    # Temporarily add to config for testing
+                    config.hosts[host_id] = host_config
+                    connection_test = await ssh_manager.test_connection(host_id)
+                    
+                    if not connection_test:
+                        # Remove from config if test failed
+                        del config.hosts[host_id]
+                        return {
+                            "success": False,
+                            "error": f"Failed to connect to {ssh_host}",
+                            "host_id": host_id
+                        }
+                else:
+                    # Add to config without testing
+                    config.hosts[host_id] = host_config
+                
+                logger.info("Docker host added", 
+                           host_id=host_id, 
+                           hostname=ssh_host,
+                           tested=test_connection)
+                
+                return {
+                    "success": True,
+                    "message": f"Host {host_id} added successfully",
+                    "host_id": host_id,
+                    "hostname": ssh_host,
+                    "connection_tested": test_connection
+                }
+                
+            except Exception as e:
+                logger.error("Failed to add host", 
+                            host_id=host_id, 
+                            error=str(e))
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "host_id": host_id
+                }
+        
+        @self.app.tool
+        async def list_docker_hosts() -> dict[str, Any]:
+            """List all configured Docker hosts.
+            
+            Returns:
+                List of host configurations
+            """
+            try:
+                hosts = []
+                for host_id, host_config in config.hosts.items():
+                    # Test connection status
+                    connected = await ssh_manager.test_connection(host_id)
+                    
+                    hosts.append({
+                        "host_id": host_id,
+                        "hostname": host_config.hostname,
+                        "user": host_config.user,
+                        "port": host_config.port,
+                        "description": host_config.description,
+                        "tags": host_config.tags,
+                        "enabled": host_config.enabled,
+                        "connected": connected
+                    })
+                
+                logger.info("Listed Docker hosts", count=len(hosts))
+                return {
+                    "success": True,
+                    "hosts": hosts,
+                    "total_count": len(hosts),
+                    "connected_count": sum(1 for h in hosts if h["connected"])
+                }
+                
+            except Exception as e:
+                logger.error("Failed to list hosts", error=str(e))
+                return {
+                    "success": False,
+                    "error": str(e)
+                }
+        
+        # Wrap tool methods as standalone functions
+        @self.app.tool
+        async def list_containers(host_id: str, all_containers: bool = False) -> list[dict[str, Any]]:
+            """List containers on a Docker host."""
+            return await container_tools.list_containers(host_id, all_containers)
+        
+        @self.app.tool
+        async def start_container(host_id: str, container_id: str) -> dict[str, Any]:
+            """Start a container on a Docker host."""
+            return await container_tools.start_container(host_id, container_id)
+        
+        @self.app.tool
+        async def stop_container(host_id: str, container_id: str, timeout: int = 10) -> dict[str, Any]:
+            """Stop a container on a Docker host."""
+            return await container_tools.stop_container(host_id, container_id, timeout)
+        
+        @self.app.tool
+        async def restart_container(host_id: str, container_id: str, timeout: int = 10) -> dict[str, Any]:
+            """Restart a container on a Docker host."""
+            return await container_tools.restart_container(host_id, container_id, timeout)
+        
+        @self.app.tool
+        async def get_container_stats(host_id: str, container_id: str) -> dict[str, Any]:
+            """Get resource statistics for a container."""
+            return await container_tools.get_container_stats(host_id, container_id)
+        
+        @self.app.tool
+        async def get_container_logs(
+            host_id: str, 
+            container_id: str, 
+            lines: int = 100, 
+            since: str | None = None,
+            timestamps: bool = False
+        ) -> dict[str, Any]:
+            """Get logs from a container."""
+            return await log_tools.get_container_logs(host_id, container_id, lines, since, timestamps)
+        
+        @self.app.tool
+        async def stream_container_logs_setup(
+            host_id: str,
+            container_id: str,
+            follow: bool = True,
+            tail: int = 100,
+            since: str | None = None,
+            timestamps: bool = False
+        ) -> dict[str, Any]:
+            """Setup real-time log streaming for a container."""
+            return await log_tools.stream_container_logs_setup(host_id, container_id, follow, tail, since, timestamps)
+        
+        @self.app.tool
+        async def get_service_logs(
+            host_id: str,
+            service_name: str,
+            lines: int = 100,
+            since: str | None = None,
+            timestamps: bool = False
+        ) -> dict[str, Any]:
+            """Get logs from a Docker Compose service."""
+            return await log_tools.get_service_logs(host_id, service_name, lines, since, timestamps)
+        
+        @self.app.tool
+        async def deploy_stack(
+            host_id: str,
+            stack_name: str,
+            compose_content: str,
+            environment: dict[str, str] | None = None,
+            pull_images: bool = True,
+            recreate: bool = False
+        ) -> dict[str, Any]:
+            """Deploy a Docker Compose stack to a remote host."""
+            return await stack_tools.deploy_stack(host_id, stack_name, compose_content, environment, pull_images, recreate)
+        
+        @self.app.tool
+        async def list_stacks(host_id: str) -> dict[str, Any]:
+            """List Docker Compose stacks on a host."""
+            return await stack_tools.list_stacks(host_id)
+        
+        @self.app.tool
+        async def stop_stack(host_id: str, stack_name: str) -> dict[str, Any]:
+            """Stop a Docker Compose stack."""
+            return await stack_tools.stop_stack(host_id, stack_name)
+        
+        @self.app.tool
+        async def remove_stack(host_id: str, stack_name: str, remove_volumes: bool = False) -> dict[str, Any]:
+            """Remove a Docker Compose stack."""
+            return await stack_tools.remove_stack(host_id, stack_name, remove_volumes)
+        
+        # Register prompts
+        try:
+            from .prompts.deployment import (
+                compose_optimization_prompt,
+                troubleshooting_prompt,
+                deployment_checklist_prompt,
+                security_audit_prompt
+            )
+        except ImportError:
+            from docker_mcp.prompts.deployment import (
+                compose_optimization_prompt,
+                troubleshooting_prompt,
+                deployment_checklist_prompt,
+                security_audit_prompt
+            )
+        
+        # Register prompt functions
+        @self.app.prompt 
+        async def compose_optimization(
+            compose_content: str, 
+            host_id: str,
+            host_resources: dict[str, Any] | None = None
+        ) -> str:
+            """Generate a prompt for optimizing Docker Compose files."""
+            return compose_optimization_prompt(compose_content, host_id, host_resources)
+        
+        @self.app.prompt
+        async def troubleshooting(
+            error_message: str,
+            host_id: str,
+            container_id: str | None = None,
+            stack_name: str | None = None,
+            recent_logs: list[str] | None = None,
+            system_info: dict[str, Any] | None = None
+        ) -> str:
+            """Generate a troubleshooting prompt for Docker deployment issues."""
+            return troubleshooting_prompt(error_message, host_id, container_id, stack_name, recent_logs, system_info)
+        
+        @self.app.prompt
+        async def deployment_checklist(
+            stack_name: str,
+            environment: str,
+            services: list[str],
+            host_id: str
+        ) -> str:
+            """Generate a deployment checklist prompt."""
+            return deployment_checklist_prompt(stack_name, environment, services, host_id)
+        
+        @self.app.prompt
+        async def security_audit(
+            compose_content: str,
+            host_environment: str = "production"
+        ) -> str:
+            """Generate a security audit prompt for Docker Compose configurations."""
+            return security_audit_prompt(compose_content, host_environment)
+    
+    def run(self) -> None:
+        """Run the FastMCP server."""
+        try:
+            self.logger.info("Starting Docker MCP Server", 
+                           host=self.config.server.host,
+                           port=self.config.server.port)
+            
+            # FastMCP.run() is synchronous and handles its own event loop
+            self.app.run(
+                transport="streamable-http",
+                host=self.config.server.host,
+                port=self.config.server.port
+            )
+            
+        except Exception as e:
+            self.logger.error("Server startup failed", error=str(e))
+            raise
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    # Load .env file to get defaults
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    # Get defaults from environment variables
+    default_host = os.getenv("FASTMCP_HOST", "0.0.0.0")
+    default_port = int(os.getenv("FASTMCP_PORT", "8000"))
+    default_log_level = os.getenv("LOG_LEVEL", "INFO")
+    
+    parser = argparse.ArgumentParser(
+        description="FastMCP Docker SSH Manager",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python server.py                              # Use default config
+  python server.py --config config/prod.yml     # Use specific config
+  python server.py --log-level DEBUG           # Enable debug logging
+  python server.py --host 127.0.0.1 --port 8080 # Custom server settings
+        """
+    )
+    
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to YAML configuration file"
+    )
+    
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=default_host,
+        help=f"Server bind address (default: {default_host})"
+    )
+    
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=default_port,
+        help=f"Server port (default: {default_port})"
+    )
+    
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default=default_log_level,
+        help=f"Logging level (default: {default_log_level})"
+    )
+    
+    parser.add_argument(
+        "--validate-config",
+        action="store_true",
+        help="Validate configuration and exit"
+    )
+    
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+    
+    # Setup logging
+    setup_logging(args.log_level)
+    logger = structlog.get_logger()
+    
+    try:
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Override server settings from command line (only if different from env defaults)
+        if args.host != os.getenv("FASTMCP_HOST", "0.0.0.0"):
+            config.server.host = args.host
+        if args.port != int(os.getenv("FASTMCP_PORT", "8000")):
+            config.server.port = args.port
+        
+        # Validate configuration
+        if args.validate_config:
+            logger.info("Configuration validation successful")
+            print("✅ Configuration is valid")
+            return
+        
+        # Create and run server
+        server = DockerMCPServer(config)
+        server.run()
+        
+    except KeyboardInterrupt:
+        logger.info("Server shutdown requested")
+    except Exception as e:
+        logger.error("Server error", error=str(e))
+        sys.exit(1)
+
+
+# Create a default app instance for FastMCP dev command
+def create_app():
+    """Create a default FastMCP app instance."""
+    config = load_config()
+    server = DockerMCPServer(config)
+    return server.app
+
+# Standard variable names for FastMCP dev (only create when not running as main)
+app = None
+if __name__ != "__main__":
+    app = create_app()
+
+if __name__ == "__main__":
+    main()
