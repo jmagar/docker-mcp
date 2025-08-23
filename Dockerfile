@@ -1,13 +1,15 @@
 # Multi-stage build for FastMCP Docker Context Manager
 FROM python:3.11-slim as builder
 
-# Install build dependencies and uv in one layer
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir uv
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy uv from official image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 # Set working directory for build
 WORKDIR /build
