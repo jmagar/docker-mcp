@@ -1,5 +1,5 @@
 # Multi-stage build for FastMCP Docker Context Manager
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -17,11 +17,14 @@ WORKDIR /build
 # Copy only dependency files first (better caching)
 COPY pyproject.toml uv.lock README.md ./
 
-# Install dependencies with uv sync
-RUN uv sync --frozen --no-dev
+# Install dependencies without installing the project itself
+RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy source code after dependencies (better layer caching)
 COPY docker_mcp/ ./docker_mcp/
+
+# Now install the project itself
+RUN uv sync --frozen --no-dev
 
 # Production stage
 FROM python:3.11-slim
