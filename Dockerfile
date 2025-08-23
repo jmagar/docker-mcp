@@ -8,9 +8,6 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv for fast Python package management
-RUN pip install uv
-
 # Set working directory for build
 WORKDIR /build
 
@@ -18,9 +15,13 @@ WORKDIR /build
 COPY pyproject.toml ./
 COPY README.md ./
 
-# Install Python dependencies
-RUN uv venv /opt/venv && \
-    /opt/venv/bin/pip install -e .
+# Copy source code for installation
+COPY docker_mcp/ ./docker_mcp/
+
+# Create virtual environment and install dependencies
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --upgrade pip && \
+    /opt/venv/bin/pip install .
 
 # Production stage
 FROM python:3.11-slim
