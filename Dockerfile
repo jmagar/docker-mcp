@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Install uv for fast Python package management
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.cargo/bin:$PATH"
+
 # Set working directory for build
 WORKDIR /build
 
@@ -18,10 +22,10 @@ COPY README.md ./
 # Copy source code for installation
 COPY docker_mcp/ ./docker_mcp/
 
-# Create virtual environment and install dependencies
-RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --upgrade pip && \
-    /opt/venv/bin/pip install .
+# Create virtual environment and install dependencies with uv
+RUN uv venv /opt/venv && \
+    . /opt/venv/bin/activate && \
+    uv pip install .
 
 # Production stage
 FROM python:3.11-slim
