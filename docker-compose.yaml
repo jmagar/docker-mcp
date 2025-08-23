@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   docker-mcp:
     image: ghcr.io/jmagar/docker-mcp:latest

@@ -136,8 +136,8 @@ jobs:
           # Check if container is still running
           docker ps | grep test-container
           
-          # Check logs for errors
-          docker logs test-container 2>&1 | grep -i error && exit 1 || true
+          # Check logs for actual errors (not just the word "error" in log levels)
+          docker logs test-container 2>&1 | grep -E '"level":\s*"error"' && exit 1 || true
           
           # Clean up
           docker stop test-container
