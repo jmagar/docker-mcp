@@ -375,6 +375,24 @@ EOF
     echo
 }
 
+find_available_port() {
+    local start_port="${1:-8000}"
+    local max_port=$((start_port + 100))
+    
+    for port in $(seq $start_port $max_port); do
+        # Check if port is in use
+        if ! lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1 && \
+           ! netstat -tuln 2>/dev/null | grep -q ":$port " && \
+           ! ss -tuln 2>/dev/null | grep -q ":$port "; then
+            echo "$port"
+            return 0
+        fi
+    done
+    
+    # If no port found in range, return error
+    return 1
+}
+
 download_compose_file() {
     echo -e "${BLUE}Downloading docker-compose.yaml...${NC}"
     echo
@@ -387,6 +405,38 @@ download_compose_file() {
         sed -i.bak "s|./config|${CONFIG_DIR}|g" "$compose_file"
         sed -i.bak "s|./data|${DATA_DIR}|g" "$compose_file"
         rm -f "${compose_file}.bak"
+        
+        # Check if port 8000 is available
+        local desired_port=8000
+        if lsof -Pi :$desired_port -sTCP:LISTEN -t >/dev/null 2>&1 || \
+           netstat -tuln 2>/dev/null | grep -q ":$desired_port " || \
+           ss -tuln 2>/dev/null | grep -q ":$desired_port "; then
+            print_warning "Port $desired_port is already in use"
+            print_info "Finding an available port..."
+            
+            if available_port=$(find_available_port $desired_port); then
+                print_success "Found available port: $available_port"
+                
+                # Update docker-compose.yaml with new port
+                sed -i.bak "s|\"8000:8000\"|\"${available_port}:8000\"|g" "$compose_file"
+                sed -i.bak "s|FASTMCP_PORT: \"8000\"|FASTMCP_PORT: \"8000\"|g" "$compose_file"
+                rm -f "${compose_file}.bak"
+                
+                # Store the port for later use
+                echo "FASTMCP_PORT=${available_port}" > "${DOCKER_MCP_DIR}/.env"
+                desired_port=$available_port
+            else
+                print_error "Could not find an available port in range 8000-8100"
+                print_info "Please manually edit the port in ${compose_file}"
+                desired_port=8000  # Use default for display purposes
+            fi
+        else
+            print_success "Port $desired_port is available"
+            echo "FASTMCP_PORT=${desired_port}" > "${DOCKER_MCP_DIR}/.env"
+        fi
+        
+        # Export for use in other functions
+        export FASTMCP_PORT=$desired_port
         
         print_success "Downloaded docker-compose.yaml to ${compose_file}"
     else
@@ -439,7 +489,7 @@ print_completion() {
     echo "  Docker Compose: ${DOCKER_MCP_DIR}/docker-compose.yaml"
     echo
     echo "Service is running at:"
-    echo "  http://localhost:8000"
+    echo "  http://localhost:${FASTMCP_PORT:-8000}"
     echo
     echo "Useful commands:"
     echo "  View logs:    cd ${DOCKER_MCP_DIR} && docker-compose logs -f"
@@ -451,7 +501,7 @@ print_completion() {
     echo '  {'
     echo '    "mcpServers": {'
     echo '      "docker-mcp": {'
-    echo '        "url": "http://localhost:8000"'
+    echo "        \"url\": \"http://localhost:${FASTMCP_PORT:-8000}\""
     echo '      }'
     echo '    }'
     echo '  }'

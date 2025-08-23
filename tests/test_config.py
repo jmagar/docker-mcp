@@ -52,7 +52,7 @@ server:
                 del os.environ[var]
 
         # Mock load_dotenv to prevent loading .env file
-        with patch("docker_mcp.core.config.load_dotenv"):
+        with patch("docker_mcp.core.config_loader.load_dotenv"):
             config = load_config(config_path)
 
         # Restore environment variables
