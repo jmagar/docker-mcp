@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     
     ports:
-      - "8000:8000"
+      - "8011:8000"
     
     volumes:
       # Docker MCP SSH keys only - mounted read-only for security
@@ -18,7 +18,7 @@ services:
       - docker-mcp-data:/app/data
       
       # Optional: Mount Docker socket if managing local Docker
-      # - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     
     environment:
       # Server configuration
@@ -77,10 +77,6 @@ services:
 volumes:
   docker-mcp-data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/data
 
 networks:
   default:

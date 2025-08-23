@@ -10,6 +10,8 @@ hosts:
     tags: ["production", "web"]       # Optional: Tags for categorization
     compose_path: "/mnt/user/compose" # Optional: Path for persistent compose files (auto-discovered if not set)
     appdata_path: "/mnt/user/appdata" # Optional: Path for container data volumes (default: /opt/docker-appdata)
+    zfs_capable: true                 # Optional: Whether host has ZFS available (default: false)
+    zfs_dataset: "tank/appdata"       # Optional: ZFS dataset for appdata (required if zfs_capable: true)
     enabled: true                     # Optional: Whether host is active (default: true)
     
   staging-1:
@@ -21,6 +23,7 @@ hosts:
     tags: ["staging", "test"]
     compose_path: "/home/docker/compose"
     appdata_path: "/home/docker/appdata"
+    zfs_capable: false                # Host doesn't have ZFS (will use rsync for migrations)
     enabled: true
     
   development:
@@ -50,6 +53,8 @@ hosts:
 # - tags: List of tags for categorization (optional)
 # - compose_path: Path where compose files are stored (optional, auto-discovered)
 # - appdata_path: Path where container data volumes are stored (optional, default: /opt/docker-appdata)
+# - zfs_capable: Whether host has ZFS filesystem support (optional, default: false)
+# - zfs_dataset: ZFS dataset name for appdata (optional, required if zfs_capable: true)
 # - enabled: Whether host is active (optional, default: true)
 
 # Server settings are configured via .env file
@@ -59,3 +64,9 @@ hosts:
 
 # Docker contexts handle all connection management automatically
 # Compose files are stored persistently on each host for full lifecycle management
+
+# Migration Support:
+# - Stack migration automatically chooses optimal transfer method
+# - ZFS send/receive: Used when both source and target hosts have zfs_capable: true
+# - Rsync transfer: Fallback method for hosts without ZFS or mixed environments
+# - Data integrity protection: Containers are stopped before migration to prevent corruption

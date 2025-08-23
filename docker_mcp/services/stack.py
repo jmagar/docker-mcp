@@ -4,6 +4,7 @@ Stack Management Service
 Business logic for Docker Compose stack operations with formatted output.
 """
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -12,7 +13,7 @@ from mcp.types import TextContent
 
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
-from ..core.migration_utils import MigrationUtils
+from ..core.migration import MigrationManager
 from ..tools.stacks import StackTools
 
 
@@ -23,7 +24,7 @@ class StackService:
         self.config = config
         self.context_manager = context_manager
         self.stack_tools = StackTools(config, context_manager)
-        self.migration_utils = MigrationUtils()
+        self.migration_manager = MigrationManager()
         self.logger = structlog.get_logger()
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
@@ -308,7 +309,7 @@ class StackService:
             
             # Step 2: Parse volumes from compose
             migration_steps.append("🔍 Analyzing volume configuration...")
-            volumes_info = await self.migration_utils.parse_compose_volumes(compose_content)
+            volumes_info = await self.migration_manager.parse_compose_volumes(compose_content)
             
             # Step 3: Stop source stack (default behavior) and verify all containers are down
             if not skip_stop_source and not dry_run:
@@ -371,7 +372,7 @@ class StackService:
             
             # Step 4: Get volume locations and create archive
             migration_steps.append("📦 Creating volume archives...")
-            volume_paths = await self.migration_utils.get_volume_locations(
+            volume_paths = await self.migration_manager.get_volume_locations(
                 ssh_cmd_source, volumes_info["named_volumes"]
             )
             
@@ -379,7 +380,7 @@ class StackService:
             all_paths = list(volume_paths.values()) + volumes_info["bind_mounts"]
             
             if all_paths and not dry_run:
-                archive_path = await self.migration_utils.create_volume_archive(
+                archive_path = await self.migration_manager.archive_utils.create_archive(
                     ssh_cmd_source, all_paths, f"{stack_name}_migration"
                 )
                 migration_steps.append(f"✅ Archive created: {archive_path}")
@@ -397,14 +398,14 @@ class StackService:
             
             # Step 5: Prepare target directories
             migration_steps.append(f"📁 Preparing target directories on {target_host_id}...")
-            target_stack_dir = await self.migration_utils.prepare_target_directories(
+            target_stack_dir = await self.migration_manager.prepare_target_directories(
                 self._build_ssh_cmd(target_host), target_appdata, stack_name
             )
             
             # Step 6: Transfer archive to target
             if all_paths and not dry_run:
                 migration_steps.append("🚀 Transferring data to target host...")
-                transfer_result = await self.migration_utils.transfer_with_rsync(
+                transfer_result = await self.migration_manager.rsync_transfer.transfer(
                     source_host, target_host, archive_path, f"/tmp/{stack_name}_migration.tar.gz",
                     compress=True, delete=False, dry_run=dry_run
                 )
@@ -420,7 +421,7 @@ class StackService:
             
             # Step 7: Update compose file for target paths
             migration_steps.append("📝 Updating compose configuration for target...")
-            updated_compose = self.migration_utils.update_compose_for_migration(
+            updated_compose = self.migration_manager.update_compose_for_migration(
                 compose_content, volume_paths, target_stack_dir
             )
             

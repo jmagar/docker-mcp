@@ -1,11 +1,7 @@
-"""Migration utilities for Docker stack and volume transfer."""
+"""Migration orchestration and Docker stack transfer coordination."""
 
 import asyncio
-import json
-import re
 import subprocess
-from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -13,6 +9,7 @@ import yaml  # type: ignore[import-untyped]
 
 from .config_loader import DockerHost
 from .exceptions import DockerMCPError
+from .transfer import ArchiveUtils, RsyncTransfer, ZFSTransfer
 
 logger = structlog.get_logger()
 
@@ -22,45 +19,16 @@ class MigrationError(DockerMCPError):
     pass
 
 
-class MigrationUtils:
-    """Utilities for migrating Docker stacks between hosts."""
-    
-    # Default exclusion patterns for archiving
-    DEFAULT_EXCLUSIONS = [
-        "node_modules/",
-        ".git/",
-        "__pycache__/",
-        "*.pyc",
-        ".pytest_cache/",
-        "*.log",
-        "*.tmp",
-        "*.temp",
-        "cache/",
-        "temp/",
-        "tmp/",
-        ".cache/",
-        "*.swp",
-        "*.swo",
-        ".DS_Store",
-        "Thumbs.db",
-        "*.pid",
-        "*.lock",
-        ".venv/",
-        "venv/",
-        "env/",
-        "dist/",
-        "build/",
-        ".next/",
-        ".nuxt/",
-        "coverage/",
-        ".coverage",
-        "*.bak",
-        "*.backup",
-        "*.old",
-    ]
+class MigrationManager:
+    """Orchestrates Docker stack migrations between hosts."""
     
     def __init__(self):
-        self.logger = logger.bind(component="migration_utils")
+        self.logger = logger.bind(component="migration_manager")
+        
+        # Initialize transfer methods
+        self.archive_utils = ArchiveUtils()
+        self.rsync_transfer = RsyncTransfer()
+        self.zfs_transfer = ZFSTransfer()
     
     async def parse_compose_volumes(self, compose_content: str) -> dict[str, Any]:
         """Parse Docker Compose file to extract volume information.
@@ -156,184 +124,6 @@ class MigrationUtils:
                 "destination": parts[1] if len(parts) > 1 else "",
                 "mode": parts[2] if len(parts) > 2 else "rw",
             }
-    
-    async def create_volume_archive(
-        self,
-        ssh_cmd: list[str],
-        volume_paths: list[str],
-        archive_name: str,
-        temp_dir: str = "/tmp",
-        exclusions: list[str] | None = None,
-    ) -> str:
-        """Create tar.gz archive of volume data on remote host.
-        
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            volume_paths: List of paths to archive
-            archive_name: Name for the archive file
-            temp_dir: Temporary directory for archive creation
-            exclusions: Additional exclusion patterns
-            
-        Returns:
-            Path to created archive on remote host
-        """
-        if not volume_paths:
-            raise MigrationError("No volumes to archive")
-        
-        # Combine default and custom exclusions
-        all_exclusions = self.DEFAULT_EXCLUSIONS.copy()
-        if exclusions:
-            all_exclusions.extend(exclusions)
-        
-        # Build exclusion flags for tar
-        exclude_flags = []
-        for pattern in all_exclusions:
-            exclude_flags.extend(["--exclude", pattern])
-        
-        # Create timestamped archive name
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        archive_file = f"{temp_dir}/{archive_name}_{timestamp}.tar.gz"
-        
-        # Build tar command
-        tar_cmd = ["tar", "czf", archive_file] + exclude_flags + volume_paths
-        
-        # Execute tar command on remote host
-        remote_cmd = " ".join(tar_cmd)
-        full_cmd = ssh_cmd + [remote_cmd]
-        
-        self.logger.info(
-            "Creating volume archive",
-            archive_file=archive_file,
-            paths=volume_paths,
-            exclusions=len(all_exclusions),
-        )
-        
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                full_cmd, check=False, capture_output=True, text=True
-            ),
-        )
-        
-        if result.returncode != 0:
-            raise MigrationError(f"Failed to create archive: {result.stderr}")
-        
-        return archive_file
-    
-    async def transfer_with_rsync(
-        self,
-        source_host: DockerHost,
-        target_host: DockerHost,
-        source_path: str,
-        target_path: str,
-        compress: bool = True,
-        delete: bool = False,
-        dry_run: bool = False,
-    ) -> dict[str, Any]:
-        """Transfer files between hosts using rsync.
-        
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            source_path: Path on source host
-            target_path: Path on target host
-            compress: Use compression during transfer
-            delete: Delete files on target not in source
-            dry_run: Perform dry run only
-            
-        Returns:
-            Transfer result with statistics
-        """
-        # Build rsync command
-        rsync_cmd = ["rsync", "-avP"]
-        
-        if compress:
-            rsync_cmd.append("-z")
-        if delete:
-            rsync_cmd.append("--delete")
-        if dry_run:
-            rsync_cmd.append("--dry-run")
-        
-        # Add SSH options for source
-        if source_host.identity_file:
-            ssh_opts = f"-e 'ssh -i {source_host.identity_file}'"
-            rsync_cmd.append(ssh_opts)
-        
-        # Build source and target URLs
-        source_url = f"{source_host.user}@{source_host.hostname}:{source_path}"
-        target_url = f"{target_host.user}@{target_host.hostname}:{target_path}"
-        
-        rsync_cmd.extend([source_url, target_url])
-        
-        self.logger.info(
-            "Starting rsync transfer",
-            source=source_url,
-            target=target_url,
-            compress=compress,
-            delete=delete,
-            dry_run=dry_run,
-        )
-        
-        # Execute rsync
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                rsync_cmd, check=False, capture_output=True, text=True
-            ),
-        )
-        
-        if result.returncode != 0:
-            raise MigrationError(f"Rsync failed: {result.stderr}")
-        
-        # Parse rsync output for statistics
-        stats = self._parse_rsync_stats(result.stdout)
-        
-        return {
-            "success": True,
-            "source": source_url,
-            "target": target_url,
-            "stats": stats,
-            "dry_run": dry_run,
-            "output": result.stdout,
-        }
-    
-    def _parse_rsync_stats(self, output: str) -> dict[str, Any]:
-        """Parse rsync output for transfer statistics.
-        
-        Args:
-            output: Rsync command output
-            
-        Returns:
-            Dictionary with transfer statistics
-        """
-        stats = {
-            "files_transferred": 0,
-            "total_size": 0,
-            "transfer_rate": "",
-            "speedup": 1.0,
-        }
-        
-        # Parse rsync summary statistics
-        for line in output.split("\n"):
-            if "Number of files transferred:" in line:
-                match = re.search(r"(\d+)", line)
-                if match:
-                    stats["files_transferred"] = int(match.group(1))
-            elif "Total transferred file size:" in line:
-                match = re.search(r"([\d,]+) bytes", line)
-                if match:
-                    stats["total_size"] = int(match.group(1).replace(",", ""))
-            elif "sent" in line and "received" in line:
-                # Parse transfer rate from summary line
-                match = re.search(r"(\d+\.?\d*) (\w+/sec)", line)
-                if match:
-                    stats["transfer_rate"] = f"{match.group(1)} {match.group(2)}"
-            elif "speedup is" in line:
-                match = re.search(r"speedup is (\d+\.?\d*)", line)
-                if match:
-                    stats["speedup"] = float(match.group(1))
-        
-        return stats
     
     async def get_volume_locations(
         self,
@@ -520,3 +310,121 @@ class MigrationUtils:
                 )
         
         return updated_content
+    
+    async def choose_transfer_method(
+        self,
+        source_host: DockerHost,
+        target_host: DockerHost
+    ) -> tuple[str, Any]:
+        """Choose the optimal transfer method based on host capabilities.
+        
+        Args:
+            source_host: Source host configuration
+            target_host: Target host configuration
+            
+        Returns:
+            Tuple of (transfer_type: str, transfer_instance)
+        """
+        # Check if both hosts have ZFS capability configured
+        if (source_host.zfs_capable and target_host.zfs_capable and 
+            source_host.zfs_dataset and target_host.zfs_dataset):
+            
+            # Validate ZFS is actually available
+            source_valid, _ = await self.zfs_transfer.validate_requirements(source_host)
+            target_valid, _ = await self.zfs_transfer.validate_requirements(target_host)
+            
+            if source_valid and target_valid:
+                self.logger.info("Using ZFS send/receive for optimal transfer")
+                return "zfs", self.zfs_transfer
+        
+        # Fall back to rsync transfer
+        self.logger.info("Using rsync transfer (ZFS not available on both hosts)")
+        return "rsync", self.rsync_transfer
+    
+    async def transfer_data(
+        self,
+        source_host: DockerHost,
+        target_host: DockerHost,
+        source_paths: list[str],
+        target_path: str,
+        stack_name: str,
+        dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Transfer data between hosts using the optimal method.
+        
+        Args:
+            source_host: Source host configuration
+            target_host: Target host configuration
+            source_paths: List of paths to transfer from source
+            target_path: Target path on destination
+            stack_name: Stack name for organization
+            dry_run: Whether this is a dry run
+            
+        Returns:
+            Transfer result dictionary
+        """
+        if not source_paths:
+            return {"success": True, "message": "No data to transfer", "transfer_type": "none"}
+        
+        # Choose transfer method
+        transfer_type, transfer_instance = await self.choose_transfer_method(source_host, target_host)
+        
+        if transfer_type == "zfs":
+            # ZFS transfer works on datasets, not individual paths
+            # Use the configured datasets
+            return await transfer_instance.transfer(
+                source_host=source_host,
+                target_host=target_host,
+                source_path=source_host.appdata_path or "/opt/docker-appdata",
+                target_path=target_host.appdata_path or "/opt/docker-appdata",
+                source_dataset=source_host.zfs_dataset,
+                target_dataset=target_host.zfs_dataset,
+            )
+        else:
+            # Rsync transfer - need to create archive first
+            if dry_run:
+                return {"success": True, "message": "Dry run - would transfer via rsync", "transfer_type": "rsync"}
+            
+            # Create archive on source
+            ssh_cmd_source = self._build_ssh_cmd(source_host)
+            archive_path = await self.archive_utils.create_archive(
+                ssh_cmd_source, source_paths, f"{stack_name}_migration"
+            )
+            
+            # Transfer archive to target
+            transfer_result = await transfer_instance.transfer(
+                source_host=source_host,
+                target_host=target_host,
+                source_path=archive_path,
+                target_path=f"/tmp/{stack_name}_migration.tar.gz"
+            )
+            
+            if transfer_result["success"]:
+                # Extract on target
+                ssh_cmd_target = self._build_ssh_cmd(target_host)
+                extracted = await self.archive_utils.extract_archive(
+                    ssh_cmd_target, 
+                    f"/tmp/{stack_name}_migration.tar.gz",
+                    target_path
+                )
+                
+                if extracted:
+                    # Cleanup archive on target
+                    await self.archive_utils.cleanup_archive(
+                        ssh_cmd_target, f"/tmp/{stack_name}_migration.tar.gz"
+                    )
+            
+            # Cleanup archive on source
+            await self.archive_utils.cleanup_archive(ssh_cmd_source, archive_path)
+            
+            return transfer_result
+    
+    def _build_ssh_cmd(self, host: DockerHost) -> list[str]:
+        """Build SSH command for a host."""
+        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
+        if host.identity_file:
+            ssh_cmd.extend(["-i", host.identity_file])
+        if host.port != 22:
+            ssh_cmd.extend(["-p", str(host.port)])
+        ssh_cmd.append(f"{host.user}@{host.hostname}")
+        return ssh_cmd

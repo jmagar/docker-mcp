@@ -25,6 +25,8 @@ class DockerHost(BaseModel):
     docker_context: str | None = None
     compose_path: str | None = None  # Path where compose files are stored on this host
     appdata_path: str | None = None  # Path where container data volumes are stored
+    zfs_capable: bool = False  # Whether this host has ZFS available
+    zfs_dataset: str | None = None  # ZFS dataset path for appdata (e.g., "tank/appdata")
     enabled: bool = True
 
 

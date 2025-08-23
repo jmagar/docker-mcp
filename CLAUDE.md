@@ -33,6 +33,63 @@ class DockerMCPServer:
 - **Tools**: Direct Docker/SSH operations, data structures
 - **Models**: Pydantic validation and type safety
 
+## Transfer Architecture Pattern
+
+### Modular Transfer System
+Migration operations use a pluggable transfer architecture for optimal performance and compatibility:
+
+```python
+# Abstract base for all transfer methods
+class BaseTransfer(ABC):
+    @abstractmethod
+    async def transfer(self, source_host, target_host, source_path, target_path, **kwargs)
+    @abstractmethod
+    async def validate_requirements(self, host)
+    @abstractmethod
+    def get_transfer_type(self) -> str
+
+# Concrete implementations
+class ZFSTransfer(BaseTransfer):      # Block-level ZFS send/receive
+class RsyncTransfer(BaseTransfer):    # Universal rsync compatibility
+class ArchiveUtils:                   # Tar/gzip with intelligent exclusions
+```
+
+### Automatic Method Selection
+```python
+# Migration manager chooses optimal transfer method
+class MigrationManager:
+    async def choose_transfer_method(self, source_host, target_host):
+        if source_host.zfs_capable and target_host.zfs_capable:
+            return "zfs", self.zfs_transfer
+        return "rsync", self.rsync_transfer
+```
+
+**Transfer Method Priority:**
+1. **ZFS send/receive** - When both hosts have `zfs_capable: true`
+2. **Rsync fallback** - Universal compatibility for mixed environments
+
+### ZFS Integration Patterns
+
+```python
+# ZFS capability detection
+class ZFSTransfer:
+    async def detect_zfs_capability(self, host, appdata_path):
+        # Verify ZFS availability and dataset existence
+        zfs_check = await self._run_ssh_command(host, ["zfs", "list", dataset])
+        return zfs_check.returncode == 0
+    
+    async def create_snapshot(self, host, dataset, snapshot_name):
+        # Create atomic snapshot for consistent backups
+        cmd = ["zfs", "snapshot", f"{dataset}@{snapshot_name}"]
+        return await self._run_ssh_command(host, cmd)
+```
+
+**ZFS Benefits:**
+- Block-level transfers (faster for large datasets)
+- Atomic snapshots (crash-consistent backups)
+- Property preservation (permissions, timestamps, metadata)
+- Incremental send/receive support (future enhancement)
+
 ## Common Development Commands
 
 ```bash
@@ -45,6 +102,11 @@ uv run pytest                             # Run all tests
 uv run pytest -k "not slow"              # Skip slow tests (port scanning)
 uv run pytest -m integration             # Integration tests only
 uv run pytest --cov=docker_mcp           # With coverage
+
+# Transfer module testing
+uv run pytest tests/test_migration.py    # Migration and transfer tests
+uv run pytest -k "migration"             # All migration-related tests
+uv run pytest -k "transfer"              # Transfer module tests
 
 # Code quality
 uv run ruff format .                      # Format code
@@ -93,6 +155,44 @@ def _validate_docker_command(self, command: str) -> None:
 - SSH operations marked with `# nosec B603` for legitimate subprocess calls
 - Structured logging for all operations with host_id context
 
+### Migration Safety Patterns
+
+```python
+# ALWAYS stop containers by default (data integrity protection)
+async def migrate_stack(
+    self,
+    source_host_id: str,
+    target_host_id: str,
+    stack_name: str,
+    skip_stop_source: bool = False,  # Must explicitly skip stopping (DANGEROUS)
+    # ... other params
+):
+    # Container verification before archiving
+    if not skip_stop_source and not dry_run:
+        # 1. Stop the stack
+        stop_result = await self.stack_tools.manage_stack(source_host_id, stack_name, "down")
+        
+        # 2. Verify ALL containers are actually stopped
+        verify_cmd = ["docker", "ps", "--filter", f"label=com.docker.compose.project={stack_name}"]
+        if running_containers := check_result.stdout.strip():
+            raise MigrationError(f"Containers still running: {running_containers}")
+        
+        # 3. Wait for filesystem sync
+        await asyncio.sleep(2)
+    
+    # 4. Archive integrity verification
+    verify_cmd = ["tar", "tzf", archive_path, ">/dev/null", "2>&1", "&&", "echo", "OK"]
+    if "FAILED" in verify_result.stdout:
+        raise MigrationError("Archive integrity check failed")
+```
+
+**Safety Principles:**
+- **Default to Safe**: Containers stopped by default unless explicitly skipped
+- **Verify State**: Confirm containers are completely stopped before archiving
+- **Data Integrity**: Archive verification before transfer
+- **Atomic Operations**: Use snapshots and atomic transfers where possible
+- **Rollback Capability**: Maintain source until target is verified
+
 ## Configuration Hierarchy
 
 1. Command line arguments (`--config`)
@@ -100,6 +200,29 @@ def _validate_docker_command(self, command: str) -> None:
 3. User config (`~/.config/docker-mcp/hosts.yml`)
 4. Docker context discovery (automatic)
 5. Environment variables (legacy)
+
+### ZFS Configuration
+
+```yaml
+hosts:
+  production-1:
+    hostname: server.example.com
+    user: dockeruser
+    appdata_path: "/tank/appdata"        # ZFS dataset mount point
+    zfs_capable: true                    # Enable ZFS transfers
+    zfs_dataset: "tank/appdata"          # ZFS dataset for send/receive
+    
+  legacy-host:
+    hostname: old-server.example.com
+    user: dockeruser  
+    appdata_path: "/opt/appdata"         # Standard filesystem
+    zfs_capable: false                   # Will use rsync fallback
+```
+
+**ZFS Auto-Detection:**
+- System automatically detects ZFS availability if `zfs_capable: true`
+- Falls back to rsync if ZFS detection fails
+- Migration chooses optimal method based on both source AND target capabilities
 
 ## Testing Conventions
 
@@ -123,3 +246,42 @@ async def test_list_containers(client: Client, test_host_id: str):
 - **Pydantic Models**: All data structures with `Field(default_factory=list)`
 - **Structured Logging**: `structlog` with context (host_id, operation)
 - **Async/Await**: All I/O operations must be async
+
+### Transfer Module Development
+
+When adding new transfer methods, follow this pattern:
+
+```python
+from docker_mcp.core.transfer.base import BaseTransfer
+
+class NewTransfer(BaseTransfer):
+    async def transfer(self, source_host, target_host, source_path, target_path, **kwargs):
+        """Implement the transfer logic"""
+        # Validate requirements first
+        await self.validate_requirements(source_host)
+        await self.validate_requirements(target_host)
+        
+        # Perform transfer with error handling
+        try:
+            # Transfer implementation here
+            return {"success": True, "stats": {...}}
+        except Exception as e:
+            raise TransferError(f"Transfer failed: {str(e)}")
+    
+    async def validate_requirements(self, host):
+        """Check if host supports this transfer method"""
+        # Implementation-specific validation
+        
+    def get_transfer_type(self) -> str:
+        return "new_method"  # Unique identifier
+```
+
+**Register in migration.py:**
+```python
+# Add to MigrationManager.__init__()
+self.new_transfer = NewTransfer()
+
+# Add to choose_transfer_method()
+if source_host.supports_new_method and target_host.supports_new_method:
+    return "new_method", self.new_transfer
+```
