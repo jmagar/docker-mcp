@@ -8,7 +8,7 @@ from typing import Any
 
 import structlog
 
-from ..core.config import DockerHost, DockerMCPConfig
+from ..core.config_loader import DockerHost, DockerMCPConfig
 
 
 class HostService:
@@ -28,6 +28,8 @@ class HostService:
         description: str = "",
         tags: list[str] | None = None,
         test_connection: bool = True,
+        compose_path: str | None = None,
+        enabled: bool = True,
     ) -> dict[str, Any]:
         """Add a new Docker host for management.
 
@@ -40,6 +42,8 @@ class HostService:
             description: Human-readable description
             tags: Tags for host categorization
             test_connection: Test SSH connection before adding
+            compose_path: Path where compose files are stored on this host
+            enabled: Whether the host is enabled for use
 
         Returns:
             Operation result
@@ -52,7 +56,8 @@ class HostService:
                 identity_file=ssh_key_path,
                 description=description,
                 tags=tags or [],
-                enabled=True,
+                compose_path=compose_path,
+                enabled=enabled,
             )
 
             # Test connection if requested

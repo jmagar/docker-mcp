@@ -11,7 +11,7 @@ from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
 from ..core.compose_manager import ComposeManager
-from ..core.config import DockerMCPConfig, save_config
+from ..core.config_loader import DockerMCPConfig, save_config
 from ..core.docker_context import DockerContextManager
 from ..core.ssh_config_parser import SSHConfigParser
 

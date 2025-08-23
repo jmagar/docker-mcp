@@ -5,7 +5,7 @@ from typing import Any
 
 import structlog
 
-from ..core.config import DockerMCPConfig
+from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
 from ..models.container import ContainerLogs, LogStreamRequest

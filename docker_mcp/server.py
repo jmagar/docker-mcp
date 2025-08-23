@@ -15,7 +15,7 @@ from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
 
 try:
-    from .core.config import DockerMCPConfig, load_config
+    from .core.config_loader import DockerMCPConfig, load_config
     from .core.docker_context import DockerContextManager
     from .core.file_watcher import HotReloadManager
     from .core.logging_config import setup_logging, get_server_logger
@@ -28,7 +28,7 @@ try:
     from .services import ConfigService, ContainerService, HostService, StackService
     from .tools.logs import LogTools
 except ImportError:
-    from docker_mcp.core.config import DockerMCPConfig, load_config
+    from docker_mcp.core.config_loader import DockerMCPConfig, load_config
     from docker_mcp.core.docker_context import DockerContextManager
     from docker_mcp.core.file_watcher import HotReloadManager
     from docker_mcp.core.logging_config import setup_logging, get_server_logger
@@ -127,29 +127,373 @@ class DockerMCPServer:
             logging="dual output (console + files)"
         )
 
-        # Register tools using the correct FastMCP pattern
-        # Host management tools
-        self.app.tool(self.add_docker_host)
-        self.app.tool(self.list_docker_hosts)
+        # Register consolidated tools (3 tools replace 13 individual tools)
+        self.app.tool(self.docker_hosts)      # Consolidates: add_docker_host, list_docker_hosts, list_host_ports, update_host_config, import_ssh_config
+        self.app.tool(self.docker_container)  # Consolidates: list_containers, get_container_info, manage_container, get_container_logs  
+        self.app.tool(self.docker_compose)    # Consolidates: deploy_stack, manage_stack, list_stacks, discover_compose_paths + NEW: logs capability
 
-        # Container management tools
-        self.app.tool(self.list_containers)
-        self.app.tool(self.get_container_info)
-        self.app.tool(self.manage_container)  # Unified container actions
-        self.app.tool(self.list_host_ports)  # Port listing and conflict detection
+    # Consolidated Tools Implementation
+    
+    async def docker_hosts(
+        self, 
+        action: str,
+        host_id: str = "",
+        ssh_host: str = "",
+        ssh_user: str = "",
+        ssh_port: int = 22,
+        ssh_key_path: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        test_connection: bool = True,
+        include_stopped: bool = False,
+        compose_path: str | None = None,
+        enabled: bool = True,
+        ssh_config_path: str | None = None,
+        selected_hosts: str | None = None,
+        compose_path_overrides: dict[str, str] | None = None,
+        auto_confirm: bool = False
+    ) -> dict[str, Any]:
+        """Consolidated Docker hosts management tool.
+        
+        Actions:
+        - list: List all configured Docker hosts  
+        - add: Add a new Docker host (requires: host_id, ssh_host, ssh_user; optional: ssh_port, ssh_key_path, description, tags, compose_path, enabled)
+        - ports: List port mappings for a host (requires: host_id)
+        - compose_path: Update host compose path (requires: host_id, compose_path)
+        - import_ssh: Import hosts from SSH config
+        """
+        # Validate action parameter
+        valid_actions = ["list", "add", "ports", "compose_path", "import_ssh"]
+        if action not in valid_actions:
+            return {
+                "success": False,
+                "error": f"Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}"
+            }
+            
+        try:
+            # Route to appropriate handler with validation
+            if action == "list":
+                return await self.list_docker_hosts()
+                
+            elif action == "add":
+                # Validate required parameters for add action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for add action"}
+                if not ssh_host:
+                    return {"success": False, "error": "ssh_host is required for add action"}
+                if not ssh_user:
+                    return {"success": False, "error": "ssh_user is required for add action"}
+                    
+                # Validate port range
+                if not (1 <= ssh_port <= 65535):
+                    return {"success": False, "error": f"ssh_port must be between 1 and 65535, got {ssh_port}"}
+                    
+                return await self.add_docker_host(
+                    host_id, ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, test_connection, compose_path, enabled
+                )
+                
+            elif action == "ports":
+                # Validate required parameters for ports action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for ports action"}
+                    
+                result = await self.list_host_ports(host_id, include_stopped)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'content') and hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": str(result.content)}
+                return result
+                
+            elif action == "compose_path":
+                # Validate required parameters for compose_path action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for compose_path action"}
+                if not compose_path:
+                    return {"success": False, "error": "compose_path is required for compose_path action"}
+                    
+                result = await self.update_host_config(host_id, compose_path)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'content') and hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": str(result.content)}
+                return result
+                
+            elif action == "import_ssh":
+                result = await self.import_ssh_config(
+                    ssh_config_path, selected_hosts, compose_path_overrides, auto_confirm
+                )
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'content') and hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": str(result.content)}
+                return result
+                
+        except Exception as e:
+            self.logger.error("docker_hosts tool error", action=action, error=str(e))
+            return {
+                "success": False, 
+                "error": f"Tool execution failed: {str(e)}",
+                "action": action
+            }
 
-        # Stack management tools
-        self.app.tool(self.deploy_stack)
-        self.app.tool(self.manage_stack)  # Unified stack management
-        self.app.tool(self.list_stacks)
+    async def docker_container(
+        self,
+        action: str,
+        host_id: str = "",
+        container_id: str = "",
+        all_containers: bool = False,
+        limit: int = 20,
+        offset: int = 0,
+        force: bool = False,
+        timeout: int = 10,
+        lines: int = 100,
+        follow: bool = False
+    ) -> dict[str, Any]:
+        """Consolidated Docker container management tool.
+        
+        Actions:
+        - list: List containers on a host (requires: host_id)
+        - info: Get container information (requires: host_id, container_id)
+        - start/stop/restart/build: Manage container (requires: host_id, container_id)
+        - logs: Get container logs (requires: host_id, container_id)
+        """
+        # Validate action parameter
+        valid_actions = ["list", "info", "start", "stop", "restart", "build", "logs", "pull"]
+        if action not in valid_actions:
+            return {
+                "success": False,
+                "error": f"Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}"
+            }
+            
+        try:
+            # Route to appropriate handler with validation
+            if action == "list":
+                # Validate required parameters for list action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for list action"}
+                    
+                # Validate pagination parameters
+                if limit < 1 or limit > 100:
+                    return {"success": False, "error": "limit must be between 1 and 100"}
+                if offset < 0:
+                    return {"success": False, "error": "offset must be >= 0"}
+                    
+                result = await self.list_containers(host_id, all_containers, limit, offset)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "No structured content"}
+                return result
+                
+            elif action == "info":
+                # Validate required parameters for info action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for info action"}
+                if not container_id:
+                    return {"success": False, "error": "container_id is required for info action"}
+                    
+                result = await self.get_container_info(host_id, container_id)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "No structured content"}
+                return result
+                
+            elif action in ["start", "stop", "restart", "build"]:
+                # Validate required parameters for container management actions
+                if not host_id:
+                    return {"success": False, "error": f"host_id is required for {action} action"}
+                if not container_id:
+                    return {"success": False, "error": f"container_id is required for {action} action"}
+                    
+                # Validate timeout parameter
+                if timeout < 1 or timeout > 300:
+                    return {"success": False, "error": "timeout must be between 1 and 300 seconds"}
+                    
+                result = await self.manage_container(host_id, container_id, action, force, timeout)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "No structured content"}
+                return result
+                
+            elif action == "logs":
+                # Validate required parameters for logs action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for logs action"}
+                if not container_id:
+                    return {"success": False, "error": "container_id is required for logs action"}
+                    
+                # Validate lines parameter
+                if lines < 1 or lines > 1000:
+                    return {"success": False, "error": "lines must be between 1 and 1000"}
+                    
+                return await self.get_container_logs(host_id, container_id, lines, follow)
+                
+            elif action == "pull":
+                # Validate required parameters for pull action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for pull action"}
+                if not container_id:
+                    return {"success": False, "error": "container_id is required for pull action (image name)"}
+                
+                # For pull, container_id is actually the image name
+                result = await self.pull_image(host_id, container_id)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "No structured content"}
+                return result
+                
+        except Exception as e:
+            self.logger.error("docker_container tool error", action=action, host_id=host_id, container_id=container_id, error=str(e))
+            return {
+                "success": False, 
+                "error": f"Tool execution failed: {str(e)}",
+                "action": action,
+                "host_id": host_id,
+                "container_id": container_id
+            }
 
-        # Log management tools
-        self.app.tool(self.get_container_logs)
-
-        # Configuration management tools
-        self.app.tool(self.update_host_config)
-        self.app.tool(self.discover_compose_paths)
-        self.app.tool(self.import_ssh_config)
+    async def docker_compose(
+        self,
+        action: str,
+        host_id: str = "",
+        stack_name: str = "",
+        compose_content: str = "",
+        environment: dict[str, str] | None = None,
+        pull_images: bool = True,
+        recreate: bool = False,
+        options: dict[str, Any] | None = None,
+        lines: int = 100,
+        follow: bool = False
+    ) -> dict[str, Any]:
+        """Consolidated Docker Compose stack management tool.
+        
+        Actions:
+        - list: List stacks on a host (requires: host_id)
+        - deploy: Deploy a stack (requires: host_id, stack_name, compose_content)
+        - up/down/restart/build: Manage stack lifecycle (requires: host_id, stack_name)
+        - discover: Discover compose paths on a host (requires: host_id)
+        - logs: Get stack logs (requires: host_id, stack_name) [NEW CAPABILITY]
+        """
+        # Validate action parameter
+        valid_actions = ["list", "deploy", "up", "down", "restart", "build", "pull", "discover", "logs"]
+        if action not in valid_actions:
+            return {
+                "success": False,
+                "error": f"Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}"
+            }
+            
+        try:
+            # Route to appropriate handler with validation
+            if action == "list":
+                # Validate required parameters for list action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for list action"}
+                    
+                result = await self.list_stacks(host_id)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "No structured content"}
+                return result
+                
+            elif action == "deploy":
+                # Validate required parameters for deploy action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for deploy action"}
+                if not stack_name:
+                    return {"success": False, "error": "stack_name is required for deploy action"}
+                if not compose_content:
+                    return {"success": False, "error": "compose_content is required for deploy action"}
+                    
+                # Validate stack name format (basic validation)
+                if not stack_name.replace("-", "").replace("_", "").isalnum():
+                    return {"success": False, "error": "stack_name must contain only alphanumeric characters, hyphens, and underscores"}
+                    
+                result = await self.deploy_stack(
+                    host_id, stack_name, compose_content, environment, pull_images, recreate
+                )
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "No structured content"}
+                return result
+                
+            elif action in ["up", "down", "restart", "build", "pull"]:
+                # Validate required parameters for stack management actions
+                if not host_id:
+                    return {"success": False, "error": f"host_id is required for {action} action"}
+                if not stack_name:
+                    return {"success": False, "error": f"stack_name is required for {action} action"}
+                    
+                result = await self.manage_stack(host_id, stack_name, action, options)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "No structured content"}
+                return result
+                
+            elif action == "discover":
+                # Validate required parameters for discover action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for discover action"}
+                    
+                result = await self.discover_compose_paths(host_id)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "No structured content"}
+                return result
+                
+            elif action == "logs":
+                # NEW CAPABILITY: Stack logs
+                # Validate required parameters for logs action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for logs action"}
+                if not stack_name:
+                    return {"success": False, "error": "stack_name is required for logs action"}
+                    
+                # Validate lines parameter
+                if lines < 1 or lines > 1000:
+                    return {"success": False, "error": "lines must be between 1 and 1000"}
+                    
+                # Implement stack logs using docker-compose logs command
+                try:
+                    if host_id not in self.config.hosts:
+                        return {"success": False, "error": f"Host {host_id} not found"}
+                    
+                    # Use stack service to execute docker-compose logs command
+                    logs_options = {
+                        "tail": str(lines),
+                        "follow": follow
+                    }
+                    
+                    result = await self.stack_service.manage_stack(host_id, stack_name, "logs", logs_options)
+                    
+                    # Format the result for logs
+                    if hasattr(result, 'structured_content') and result.structured_content:
+                        logs_data = result.structured_content
+                        # Extract logs from the result
+                        if "output" in logs_data:
+                            logs_lines = logs_data["output"].split('\n') if logs_data["output"] else []
+                            return {
+                                "success": True,
+                                "host_id": host_id,
+                                "stack_name": stack_name,
+                                "logs": logs_lines,
+                                "lines_requested": lines,
+                                "lines_returned": len(logs_lines),
+                                "follow": follow
+                            }
+                        else:
+                            return logs_data
+                    else:
+                        return {"success": False, "error": "Failed to retrieve stack logs"}
+                        
+                except Exception as e:
+                    self.logger.error("docker_compose logs error", host_id=host_id, stack_name=stack_name, error=str(e))
+                    return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
+                
+        except Exception as e:
+            self.logger.error("docker_compose tool error", action=action, host_id=host_id, stack_name=stack_name, error=str(e))
+            return {
+                "success": False, 
+                "error": f"Tool execution failed: {str(e)}",
+                "action": action,
+                "host_id": host_id,
+                "stack_name": stack_name
+            }
 
     async def add_docker_host(
         self,
@@ -161,10 +505,12 @@ class DockerMCPServer:
         description: str = "",
         tags: list[str] | None = None,
         test_connection: bool = True,
+        compose_path: str | None = None,
+        enabled: bool = True,
     ) -> dict[str, Any]:
         """Add a new Docker host for management."""
         return await self.host_service.add_docker_host(
-            host_id, ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, test_connection
+            host_id, ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, test_connection, compose_path, enabled
         )
 
     async def list_docker_hosts(self) -> dict[str, Any]:
@@ -242,6 +588,10 @@ class DockerMCPServer:
     ) -> ToolResult:
         """Unified container action management."""
         return await self.container_service.manage_container(host_id, container_id, action, force, timeout)
+
+    async def pull_image(self, host_id: str, image_name: str) -> ToolResult:
+        """Pull a Docker image on a remote host."""
+        return await self.container_service.pull_image(host_id, image_name)
 
     async def list_host_ports(self, host_id: str, include_stopped: bool = False) -> ToolResult:
         """List all ports currently in use by containers on a Docker host."""

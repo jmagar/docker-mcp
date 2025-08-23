@@ -62,14 +62,14 @@ async def test_deploy_stack(self, client, test_host_id):
     
     try:
         # Deploy stack
-        result = await client.call_tool("deploy_stack", {...})
+        result = await client.call_tool("docker_compose", {"action": "deploy", {...})
         tracker.add_stack(test_host_id, stack_name)
         # Test assertions
         
     finally:
         # Cleanup always runs
         try:
-            await client.call_tool("manage_stack", {
+            await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": stack_name,
                 "action": "down"

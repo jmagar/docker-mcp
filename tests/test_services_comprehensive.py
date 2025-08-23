@@ -13,7 +13,7 @@ from docker_mcp.services.container import ContainerService
 from docker_mcp.services.stack import StackService
 from docker_mcp.services.host import HostService
 from docker_mcp.services.config import ConfigService
-from docker_mcp.core.config import DockerMCPConfig
+from docker_mcp.core.config_loader import DockerMCPConfig
 from docker_mcp.core.docker_context import DockerContextManager
 
 

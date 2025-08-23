@@ -93,7 +93,8 @@ async def cleanup_test_containers(client: Client, host_id: str, pattern: str = "
     
     try:
         # List all containers on the host
-        result = await client.call_tool("list_containers", {
+        result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": host_id,
             "all_containers": True,
             "limit": 100
@@ -126,7 +127,7 @@ async def cleanup_test_containers(client: Client, host_id: str, pattern: str = "
             try:
                 # Stop if running
                 if container.get("is_running"):
-                    stop_result = await client.call_tool("manage_container", {
+                    stop_result = await client.call_tool("docker_container", {
                         "host_id": host_id,
                         "container_id": container_id,
                         "action": "stop",
@@ -182,7 +183,8 @@ async def cleanup_test_stacks(client: Client, host_id: str, pattern: str = "test
     
     try:
         # List all stacks on the host
-        result = await client.call_tool("list_stacks", {
+        result = await client.call_tool("docker_compose", {
+            "action": "list",
             "host_id": host_id
         })
         
@@ -209,7 +211,7 @@ async def cleanup_test_stacks(client: Client, host_id: str, pattern: str = "test
             
             try:
                 # Remove stack with volumes
-                down_result = await client.call_tool("manage_stack", {
+                down_result = await client.call_tool("docker_compose", {
                     "host_id": host_id,
                     "stack_name": stack_name,
                     "action": "down"
@@ -265,7 +267,8 @@ async def verify_cleanup(client: Client, host_id: str, resources: List[str]) -> 
     
     try:
         # Check containers
-        container_result = await client.call_tool("list_containers", {
+        container_result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": host_id,
             "all_containers": True,
             "limit": 100
@@ -283,7 +286,8 @@ async def verify_cleanup(client: Client, host_id: str, resources: List[str]) -> 
                     })
         
         # Check stacks
-        stack_result = await client.call_tool("list_stacks", {
+        stack_result = await client.call_tool("docker_compose", {
+            "action": "list",
             "host_id": host_id
         })
         
@@ -399,7 +403,7 @@ def with_cleanup(host_id: str):
                 if host_id in tracker.stacks:
                     for stack_name in tracker.stacks[host_id][:]:  # Copy list to avoid modification during iteration
                         try:
-                            await client.call_tool("manage_stack", {
+                            await client.call_tool("docker_compose", {
                                 "host_id": host_id,
                                 "stack_name": stack_name,
                                 "action": "down"
@@ -411,7 +415,7 @@ def with_cleanup(host_id: str):
                 if host_id in tracker.containers:
                     for container_name in tracker.containers[host_id][:]:
                         try:
-                            await client.call_tool("manage_container", {
+                            await client.call_tool("docker_container", {
                                 "host_id": host_id,
                                 "container_id": container_name,
                                 "action": "stop"

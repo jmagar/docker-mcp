@@ -14,7 +14,7 @@ from typing import AsyncGenerator
 import pytest
 from fastmcp import Client
 
-from docker_mcp.core.config import DockerHost, DockerMCPConfig, load_config, save_config
+from docker_mcp.core.config_loader import DockerHost, DockerMCPConfig, load_config, save_config
 from docker_mcp.core.exceptions import DockerContextError, ConfigurationError
 from docker_mcp.models.container import ContainerInfo, ContainerStats
 from docker_mcp.server import DockerMCPServer
@@ -50,7 +50,7 @@ class TestBasicIntegrationWorkflows:
     async def test_host_listing_workflow(self, simple_client: Client):
         """Test basic host listing to exercise services layer."""
         # Test host listing tool
-        result = await simple_client.call_tool("list_docker_hosts", {})
+        result = await simple_client.call_tool("docker_hosts", {"action": "list"})
         
         assert result.data["success"] is True
         assert "hosts" in result.data
@@ -76,13 +76,28 @@ class TestBasicIntegrationWorkflows:
                          "abc123         nginx     nginx     1h ago    Up 1h    80/tcp  web"
             }
             
-            containers_result = await simple_client.call_tool("list_containers", {
+            containers_result = await simple_client.call_tool("docker_container", {
+                "action": "list",
                 "host_id": test_host_id,
                 "limit": 10
             })
             
             # Should handle gracefully even if mocking doesn't work perfectly
             assert "success" in containers_result.data
+            
+            # Test container pull with mocking
+            mock_docker.return_value = {
+                "output": "latest: Pulling from library/nginx\nPull complete\nStatus: Downloaded newer image for nginx:latest"
+            }
+            
+            pull_result = await simple_client.call_tool("docker_container", {
+                "action": "pull",
+                "host_id": test_host_id,
+                "container_id": "nginx:latest"
+            })
+            
+            # Should handle pull operation gracefully
+            assert "success" in pull_result.data
 
     @pytest.mark.asyncio
     async def test_configuration_operations(self, simple_client: Client):
@@ -130,23 +145,58 @@ server:
             # Clean up
             Path(temp_config_path).unlink(missing_ok=True)
 
+    @pytest.mark.asyncio 
+    async def test_stack_operations_basic(self, simple_client: Client):
+        """Test basic stack operations without complex mocking."""
+        test_host_id = "test-host"
+        
+        # Test docker_compose pull with invalid host (should return error)
+        pull_result = await simple_client.call_tool("docker_compose", {
+            "action": "pull", 
+            "host_id": test_host_id,
+            "stack_name": "test-stack"
+        })
+        
+        # Should handle gracefully even if host doesn't exist
+        assert "success" in pull_result.data
+
     @pytest.mark.asyncio
     async def test_error_handling_workflow(self, simple_client: Client):
         """Test error handling across multiple layers."""
         # Test invalid host
-        result = await simple_client.call_tool("list_containers", {
+        result = await simple_client.call_tool("docker_container", {
+            "action": "list",
             "host_id": "nonexistent-host"
         })
         assert result.data["success"] is False
         assert "error" in result.data
         
         # Test invalid parameters
-        result = await simple_client.call_tool("list_containers", {
+        result = await simple_client.call_tool("docker_container", {
+            "action": "list",
             "host_id": "test-host",
             "limit": 0  # Edge case
         })
         # Should handle gracefully
         assert "success" in result.data
+        
+        # Test invalid action
+        result = await simple_client.call_tool("docker_container", {
+            "action": "invalid_action",
+            "host_id": "test-host"
+        })
+        assert result.data.get('success', False) is False
+        assert 'error' in result.data
+        assert "Invalid action" in result.data['error']
+        
+        # Test pull action validation - missing container_id/image_name
+        result = await simple_client.call_tool("docker_container", {
+            "action": "pull",
+            "host_id": "test-host",
+            "container_id": ""  # Empty image name
+        })
+        assert result.data.get('success', False) is False
+        assert 'error' in result.data
 
     @pytest.mark.asyncio
     async def test_model_validation_integration(self):
@@ -267,7 +317,7 @@ server:
         async with Client(simple_server.app) as client:
             # Make multiple requests to exercise middleware
             for i in range(3):
-                result = await client.call_tool("list_docker_hosts", {})
+                result = await client.call_tool("docker_hosts", {"action": "list"})
                 assert result.data["success"] is True
                 
             # Test that middleware handled the requests
@@ -321,7 +371,7 @@ server:
             # Create multiple concurrent requests
             tasks = []
             for i in range(3):
-                task = simple_client.call_tool("list_docker_hosts", {})
+                task = simple_client.call_tool("docker_hosts", {"action": "list"})
                 tasks.append(task)
             
             # Execute concurrently

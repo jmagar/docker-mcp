@@ -4,7 +4,7 @@ from pathlib import Path
 
 import structlog
 
-from .config import DockerHost
+from .config_loader import DockerHost
 
 logger = structlog.get_logger()
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest  # type: ignore[import-not-found]
 
-from docker_mcp.core.config import DockerHost, DockerMCPConfig, load_config
+from docker_mcp.core.config_loader import DockerHost, DockerMCPConfig, load_config
 
 
 def test_default_config():

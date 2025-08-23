@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from docker_mcp.core.config import DockerHost, DockerMCPConfig
+from docker_mcp.core.config_loader import DockerHost, DockerMCPConfig
 from docker_mcp.core.exceptions import ConfigurationError
 from docker_mcp.core.file_watcher import ConfigFileWatcher, HotReloadManager
 

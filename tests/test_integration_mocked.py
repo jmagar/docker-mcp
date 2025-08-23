@@ -14,7 +14,7 @@ from typing import AsyncGenerator
 import pytest
 from fastmcp import Client
 
-from docker_mcp.core.config import DockerHost, DockerMCPConfig, load_config, save_config
+from docker_mcp.core.config_loader import DockerHost, DockerMCPConfig, load_config, save_config
 from docker_mcp.core.exceptions import DockerContextError, ConfigurationError
 from docker_mcp.models.container import ContainerInfo, ContainerStats
 from docker_mcp.server import DockerMCPServer
@@ -55,7 +55,7 @@ class TestCompleteWorkflowIntegration:
     async def test_complete_host_discovery_workflow(self, integration_client: Client):
         """Test complete host discovery and validation workflow."""
         # Step 1: List available hosts
-        hosts_result = await integration_client.call_tool("list_docker_hosts", {})
+        hosts_result = await integration_client.call_tool("docker_hosts", {"action": "list"})
         assert hosts_result.data["success"] is True
         assert "hosts" in hosts_result.data
         assert len(hosts_result.data["hosts"]) >= 1
@@ -105,7 +105,7 @@ class TestCompleteWorkflowIntegration:
                          "def456ghi789   redis:alpine    redis-server  1 hour ago    Up 1 hour     6379/tcp  test-redis"
             }
             
-            containers_result = await integration_client.call_tool("list_containers", {
+            containers_result = await integration_client.call_tool("docker_container", {"action": "list",
                 "host_id": test_host_id,
                 "limit": 10
             })
@@ -130,7 +130,7 @@ class TestCompleteWorkflowIntegration:
                 }
             }]
             
-            info_result = await integration_client.call_tool("get_container_info", {
+            info_result = await integration_client.call_tool("docker_container", {"action": "info",
                 "host_id": test_host_id,
                 "container_id": "abc123def456"
             })
@@ -367,7 +367,7 @@ server:
         test_host_id = "integration-host"
         
         # Test 1: Invalid host handling
-        invalid_result = await integration_client.call_tool("list_containers", {
+        invalid_result = await integration_client.call_tool("docker_container", {"action": "list",
             "host_id": "nonexistent-host"
         })
         assert invalid_result.data["success"] is False
@@ -377,7 +377,7 @@ server:
         with patch('docker_mcp.core.docker_context.DockerContextManager._run_docker_command') as mock_docker:
             mock_docker.side_effect = DockerContextError("Docker daemon not available")
             
-            context_result = await integration_client.call_tool("get_container_info", {
+            context_result = await integration_client.call_tool("docker_container", {"action": "info",
                 "host_id": test_host_id,
                 "container_id": "test-container"
             })
@@ -421,13 +421,13 @@ server:
             mock_docker.side_effect = side_effect
             
             # First call should fail
-            first_result = await integration_client.call_tool("list_containers", {
+            first_result = await integration_client.call_tool("docker_container", {"action": "list",
                 "host_id": test_host_id
             })
             assert first_result.data["success"] is False
             
             # Second call should succeed (recovery)
-            second_result = await integration_client.call_tool("list_containers", {
+            second_result = await integration_client.call_tool("docker_container", {"action": "list",
                 "host_id": test_host_id
             })
             assert second_result.data["success"] is True
@@ -604,7 +604,7 @@ class TestToolsLayerIntegration:
                 "output": "container1\tnginx\trunning\tweb\ncontainer2\tredis\texited\tcache"
             }
             
-            containers = await tools_client.call_tool("list_containers", {
+            containers = await tools_client.call_tool("docker_container", {"action": "list",
                 "host_id": test_host_id
             })
             assert containers.data["success"] is True
@@ -617,7 +617,7 @@ class TestToolsLayerIntegration:
                 "Config": {"Image": "nginx"}
             }]
             
-            details = await tools_client.call_tool("get_container_info", {
+            details = await tools_client.call_tool("docker_container", {"action": "info",
                 "host_id": test_host_id,
                 "container_id": "container1"
             })
@@ -722,7 +722,7 @@ ghi789jkl012   postgres:13   0.0.0.0:5432->5432/tcp   db"""
             assert "port_mappings" in ports.data
             
             # Verify specific container ports
-            containers = await tools_client.call_tool("list_containers", {
+            containers = await tools_client.call_tool("docker_container", {"action": "list",
                 "host_id": test_host_id
             })
             assert containers.data["success"] is True
@@ -812,7 +812,7 @@ class TestServerIntegration:
                 pass  # Expected
             
             # 2. Invalid parameters
-            result = await client.call_tool("list_containers", {
+            result = await client.call_tool("docker_container", {"action": "list",
                 "host_id": "",  # Invalid empty host_id
                 "limit": -1     # Invalid negative limit
             })
@@ -841,7 +841,7 @@ class TestServerIntegration:
                 # Create multiple concurrent operations
                 tasks = []
                 for i in range(5):
-                    task = client.call_tool("list_containers", {
+                    task = client.call_tool("docker_container", {"action": "list",
                         "host_id": "concurrent-test",
                         "limit": 10
                     })

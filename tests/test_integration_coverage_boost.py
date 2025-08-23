@@ -13,7 +13,7 @@ from typing import AsyncGenerator
 import pytest
 from fastmcp import Client
 
-from docker_mcp.core.config import DockerHost, DockerMCPConfig
+from docker_mcp.core.config_loader import DockerHost, DockerMCPConfig
 from docker_mcp.models.container import ContainerInfo, ContainerStats, PortMapping
 from docker_mcp.server import DockerMCPServer
 
@@ -60,13 +60,15 @@ class TestServicesCoverageBoosting:
             }
             
             # Test with default parameters
-            result1 = await services_client.call_tool("list_containers", {
+            result1 = await services_client.call_tool("docker_container", {
+                "action": "list",
                 "host_id": test_host_id
             })
             assert "success" in result1.data
             
             # Test with custom limit and offset
-            result2 = await services_client.call_tool("list_containers", {
+            result2 = await services_client.call_tool("docker_container", {
+                "action": "list",
                 "host_id": test_host_id,
                 "limit": 5,
                 "offset": 1
@@ -74,7 +76,8 @@ class TestServicesCoverageBoosting:
             assert "success" in result2.data
             
             # Test with all_containers flag
-            result3 = await services_client.call_tool("list_containers", {
+            result3 = await services_client.call_tool("docker_container", {
+                "action": "list",
                 "host_id": test_host_id,
                 "all_containers": True
             })
@@ -103,7 +106,7 @@ class TestServicesCoverageBoosting:
     async def test_config_service_comprehensive(self, services_client: Client):
         """Comprehensive test to boost config service coverage."""
         # Test host listing with various scenarios
-        hosts_result = await services_client.call_tool("list_docker_hosts", {})
+        hosts_result = await services_client.call_tool("docker_hosts", {"action": "list"})
         assert hosts_result.data["success"] is True
         
         # Test that we can access host information
@@ -163,7 +166,8 @@ class TestToolsCoverageBoosting:
             # Test empty container list
             mock_docker.return_value = {"output": ""}
             
-            empty_result = await tools_client.call_tool("list_containers", {
+            empty_result = await tools_client.call_tool("docker_container", {
+                "action": "list",
                 "host_id": test_host_id
             })
             assert "success" in empty_result.data
@@ -171,7 +175,8 @@ class TestToolsCoverageBoosting:
             # Test container info with missing container
             mock_docker.side_effect = Exception("Container not found")
             
-            missing_result = await tools_client.call_tool("get_container_info", {
+            missing_result = await tools_client.call_tool("docker_container", {
+                "action": "info",
                 "host_id": test_host_id,
                 "container_id": "nonexistent"
             })
@@ -192,14 +197,16 @@ class TestToolsCoverageBoosting:
             }
             
             # Test default log parameters
-            logs_result1 = await tools_client.call_tool("get_container_logs", {
+            logs_result1 = await tools_client.call_tool("docker_container", {
+                "action": "logs",
                 "host_id": test_host_id,
                 "container_id": test_container_id
             })
             assert "success" in logs_result1.data
             
             # Test with custom line count
-            logs_result2 = await tools_client.call_tool("get_container_logs", {
+            logs_result2 = await tools_client.call_tool("docker_container", {
+                "action": "logs",
                 "host_id": test_host_id,
                 "container_id": test_container_id,
                 "lines": 50
@@ -207,7 +214,8 @@ class TestToolsCoverageBoosting:
             assert "success" in logs_result2.data
             
             # Test with follow flag (should handle gracefully)
-            logs_result3 = await tools_client.call_tool("get_container_logs", {
+            logs_result3 = await tools_client.call_tool("docker_container", {
+                "action": "logs",
                 "host_id": test_host_id,
                 "container_id": test_container_id,
                 "follow": True
@@ -452,7 +460,8 @@ class TestIntegrationWorkflowCoverage:
             
             # Test multiple operations to trigger retries
             for i in range(3):
-                result = await workflow_client.call_tool("list_containers", {
+                result = await workflow_client.call_tool("docker_container", {
+                    "action": "list",
                     "host_id": test_host_id
                 })
                 assert "success" in result.data
@@ -464,10 +473,10 @@ class TestIntegrationWorkflowCoverage:
         
         # Create mixed concurrent operations without deep mocking
         tasks = [
-            workflow_client.call_tool("list_containers", {"host_id": test_host_id}),
+            workflow_client.call_tool("docker_container", {"action": "list", "host_id": test_host_id}),
             workflow_client.call_tool("list_stacks", {"host_id": test_host_id}),
-            workflow_client.call_tool("list_docker_hosts", {}),
-            workflow_client.call_tool("list_containers", {"host_id": test_host_id, "limit": 5}),
+            workflow_client.call_tool("docker_hosts", {"action": "list"}),
+            workflow_client.call_tool("docker_container", {"action": "list", "host_id": test_host_id, "limit": 5}),
         ]
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -482,7 +491,7 @@ class TestIntegrationWorkflowCoverage:
     async def test_configuration_change_workflow(self, workflow_client: Client):
         """Test configuration change and reload workflows."""
         # Test configuration operations
-        hosts_result = await workflow_client.call_tool("list_docker_hosts", {})
+        hosts_result = await workflow_client.call_tool("docker_hosts", {"action": "list"})
         assert hosts_result.data["success"] is True
         
         initial_count = len(hosts_result.data["hosts"])
@@ -567,7 +576,8 @@ class TestErrorPathCoverage:
             for i, exception in enumerate(failure_scenarios):
                 mock_docker.side_effect = exception
                 
-                result = await error_client.call_tool("list_containers", {
+                result = await error_client.call_tool("docker_container", {
+                    "action": "list",
                     "host_id": test_host_id
                 })
                 assert "success" in result.data

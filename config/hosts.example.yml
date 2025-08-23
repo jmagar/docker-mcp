@@ -1,31 +1,56 @@
-# FastMCP Docker SSH Manager Configuration Example
+# Docker Manager MCP Configuration Example
 
 hosts:
   production-1:
     hostname: 192.168.1.10
     user: dockeruser
-    identity_file: ~/.ssh/docker_host_key
-    description: "Production Docker host"
-    tags: ["production", "web"]
-    compose_path: "/mnt/user/compose"  # Optional: Path for persistent compose files (auto-discovered if not set)
+    port: 22                          # Optional: SSH port (default: 22)
+    identity_file: ~/.ssh/docker_host_key  # Optional: SSH private key path
+    description: "Production Docker host"  # Optional: Human-readable description
+    tags: ["production", "web"]       # Optional: Tags for categorization
+    compose_path: "/mnt/user/compose" # Optional: Path for persistent compose files (auto-discovered if not set)
+    enabled: true                     # Optional: Whether host is active (default: true)
     
   staging-1:
-    hostname: 192.168.1.20  
-    user: dockeruser
-    identity_file: ~/.ssh/docker_host_key
+    hostname: staging.example.com
+    user: deployuser
+    port: 2222                        # Custom SSH port example
+    identity_file: ~/.ssh/staging_key
     description: "Staging environment"
-    tags: ["staging"]
-    compose_path: "/home/docker/compose"  # Custom compose file location
+    tags: ["staging", "test"]
+    compose_path: "/home/docker/compose"
+    enabled: true
     
   development:
     hostname: localhost
-    user: ${USER}
+    user: ${USER}                     # Environment variable expansion
     description: "Local development"
     tags: ["development", "local"]
+    # port defaults to 22
+    # enabled defaults to true
     # compose_path auto-discovered if not specified
+    # identity_file uses SSH defaults
+    
+  disabled-host:
+    hostname: old-server.example.com
+    user: legacy
+    port: 22
+    description: "Temporarily disabled host"
+    tags: ["maintenance", "disabled"]
+    enabled: false                    # Host is disabled and won't be used
+
+# All available host configuration fields:
+# - hostname: SSH hostname or IP address (REQUIRED)
+# - user: SSH username (REQUIRED)
+# - port: SSH port (optional, default: 22)
+# - identity_file: Path to SSH private key (optional, uses SSH defaults)
+# - description: Human-readable description (optional)
+# - tags: List of tags for categorization (optional)
+# - compose_path: Path where compose files are stored (optional, auto-discovered)
+# - enabled: Whether host is active (optional, default: true)
 
 # Server settings are configured via .env file
-# - FASTMCP_HOST (default: 0.0.0.0)
+# - FASTMCP_HOST (default: 127.0.0.1, use 0.0.0.0 for external access)
 # - FASTMCP_PORT (default: 8000) 
 # - LOG_LEVEL (default: INFO)
 

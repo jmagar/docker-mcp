@@ -10,7 +10,7 @@ import pytest
 import structlog
 from fastmcp import Client, FastMCP
 
-from docker_mcp.core.config import DockerMCPConfig, load_config
+from docker_mcp.core.config_loader import DockerMCPConfig, load_config
 from docker_mcp.server import DockerMCPServer
 from docker_mcp.middleware import (
     LoggingMiddleware,
@@ -66,25 +66,6 @@ async def test_nginx_container(client: Client, test_host_id: str, worker_id: str
     from tests.cleanup_utils import get_resource_tracker
     tracker = get_resource_tracker()
     
-    # Define cleanup function
-    async def cleanup():
-        """Cleanup function that will always run."""
-        try:
-            await client.call_tool("manage_stack", {
-                "host_id": test_host_id,
-                "stack_name": stack_name,
-                "action": "down"
-            })
-            tracker.remove_stack(test_host_id, stack_name)
-            print(f"✓ Cleaned up test stack: {stack_name}")
-        except Exception as e:
-            # Record failure but don't raise
-            tracker.record_failure("stack", stack_name, test_host_id, str(e))
-            print(f"✗ Failed to cleanup test stack {stack_name}: {e}")
-    
-    # Register cleanup as finalizer (runs even if test fails)
-    request.addfinalizer(lambda: asyncio.run(cleanup()))
-    
     # Deploy test container using deploy_stack with dynamic port
     compose_content = f"""version: '3.8'
 services:
@@ -121,8 +102,19 @@ services:
     try:
         yield container_name
     finally:
-        # This cleanup runs after the test, but finalizer ensures cleanup even on failure
-        pass
+        # Cleanup using direct async call (no new event loop)
+        try:
+            await client.call_tool("manage_stack", {
+                "host_id": test_host_id,
+                "stack_name": stack_name,
+                "action": "down"
+            })
+            tracker.remove_stack(test_host_id, stack_name)
+            print(f"✓ Cleaned up test stack: {stack_name}")
+        except Exception as e:
+            # Record failure but don't raise
+            tracker.record_failure("stack", stack_name, test_host_id, str(e))
+            print(f"✗ Failed to cleanup test stack {stack_name}: {e}")
 
 
 @pytest.fixture
@@ -283,7 +275,7 @@ async def session_cleanup(request):
         try:
             # Load config to get hosts
             config_path = Path(__file__).parent.parent / "config" / "hosts.yml"
-            from docker_mcp.core.config import load_config
+            from docker_mcp.core.config_loader import load_config
             from docker_mcp.server import DockerMCPServer
             
             config = load_config(str(config_path))

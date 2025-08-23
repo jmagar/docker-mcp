@@ -9,7 +9,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 import json
 
-from docker_mcp.core.config import DockerMCPConfig
+from docker_mcp.core.config_loader import DockerMCPConfig
 from docker_mcp.core.docker_context import DockerContextManager
 from docker_mcp.tools.containers import ContainerTools
 from docker_mcp.tools.stacks import StackTools

@@ -12,7 +12,7 @@ from typing import Any
 
 import structlog
 
-from .config import DockerHost, DockerMCPConfig
+from .config_loader import DockerHost, DockerMCPConfig
 from .exceptions import DockerContextError
 
 logger = structlog.get_logger()

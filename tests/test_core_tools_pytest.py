@@ -17,7 +17,7 @@ class TestCoreToolsFunctionality:
     @pytest.mark.asyncio
     async def test_list_docker_hosts_basic(self, client: Client):
         """Test list_docker_hosts basic functionality."""
-        result = await client.call_tool("list_docker_hosts", {})
+        result = await client.call_tool("docker_hosts", {"action": "list"})
         
         assert result.data.get('success', False) is True
         hosts = result.data.get('hosts', [])
@@ -35,7 +35,8 @@ class TestCoreToolsFunctionality:
             # Configure mock to return container data
             mock_execute.return_value = {"output": mock_docker_output}
             
-            result = await client.call_tool("list_containers", {
+            result = await client.call_tool("docker_container", {
+                "action": "list",
                 "host_id": test_host_id,
                 "limit": 5
             })
@@ -93,7 +94,8 @@ class TestCoreToolsFunctionality:
             # Configure mock to return inspect data (JSON commands return parsed JSON)
             mock_execute.return_value = mock_inspect_data
             
-            result = await client.call_tool("get_container_info", {
+            result = await client.call_tool("docker_container", {
+                "action": "info",
                 "host_id": test_host_id,
                 "container_id": test_container_id
             })
@@ -123,7 +125,8 @@ class TestCoreToolsFunctionality:
     @pytest.mark.asyncio
     async def test_list_stacks_basic(self, client: Client, test_host_id: str):
         """Test list_stacks on configured host."""
-        result = await client.call_tool("list_stacks", {
+        result = await client.call_tool("docker_compose", {
+            "action": "list",
             "host_id": test_host_id
         })
         
@@ -179,10 +182,10 @@ class TestEnhancedContainerOperations:
             # Configure mock to return success
             mock_execute.return_value = {"output": test_container_id}  # Docker start returns container ID
             
-            result = await client.call_tool("manage_container", {
+            result = await client.call_tool("docker_container", {
+                "action": "start",
                 "host_id": test_host_id,
-                "container_id": test_container_id,
-                "action": "start"
+                "container_id": test_container_id
             })
             
             # Verify mock was called with correct Docker start command
@@ -207,7 +210,8 @@ class TestEnhancedContainerOperations:
             # Configure mock to return log data
             mock_execute.return_value = {"output": mock_log_output}
             
-            result = await client.call_tool("get_container_logs", {
+            result = await client.call_tool("docker_container", {
+                "action": "logs",
                 "host_id": test_host_id,
                 "container_id": test_container_id,
                 "lines": 10
@@ -242,10 +246,10 @@ class TestEnhancedContainerOperations:
             from docker_mcp.core.exceptions import DockerCommandError
             mock_execute.side_effect = DockerCommandError("No such container: nonexistent-container")
             
-            result = await client.call_tool("manage_container", {
+            result = await client.call_tool("docker_container", {
+                "action": "start",
                 "host_id": test_host_id,
-                "container_id": test_container_id,
-                "action": "start"
+                "container_id": test_container_id
             })
             
             # Verify mock was called
@@ -255,6 +259,35 @@ class TestEnhancedContainerOperations:
             assert result.data["success"] is False
             assert "error" in result.data
             assert "No such container" in result.data["error"]
+
+    @pytest.mark.asyncio
+    async def test_docker_container_pull_with_mock(self, client: Client, test_host_id: str):
+        """Test docker_container pull action with mock verification."""
+        test_image_name = "nginx:latest"
+        
+        with patch('docker_mcp.core.docker_context.DockerContextManager.execute_docker_command') as mock_execute:
+            # Configure mock to return pull success output
+            mock_execute.return_value = {"output": f"latest: Pulling from library/nginx\nPull complete\nStatus: Downloaded newer image for {test_image_name}"}
+            
+            result = await client.call_tool("docker_container", {
+                "action": "pull",
+                "host_id": test_host_id,
+                "container_id": test_image_name  # container_id is image name for pull
+            })
+            
+            # Verify mock was called with correct Docker pull command
+            mock_execute.assert_called_once()
+            call_args = mock_execute.call_args
+            assert call_args[0][0] == test_host_id  # host_id argument
+            docker_cmd = call_args[0][1]
+            assert "pull" in docker_cmd
+            assert test_image_name in docker_cmd
+            
+            # Verify successful response
+            assert result.data["success"] is True
+            assert result.data["host_id"] == test_host_id
+            assert result.data["image_name"] == test_image_name
+            assert "output" in result.data
 
     @pytest.mark.asyncio
     async def test_list_containers_with_all_flag(self, client: Client, test_host_id: str):
@@ -277,7 +310,8 @@ class TestEnhancedContainerOperations:
             
             mock_execute.side_effect = mock_side_effect
             
-            result = await client.call_tool("list_containers", {
+            result = await client.call_tool("docker_container", {
+                "action": "list",
                 "host_id": test_host_id,
                 "all_containers": True,
                 "limit": 10
@@ -321,7 +355,8 @@ class TestErrorHandlingRefactored:
     @pytest.mark.asyncio
     async def test_invalid_host_error_handling(self, client: Client):
         """Test proper error handling for invalid host ID."""
-        result = await client.call_tool("list_containers", {
+        result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": "invalid-host-id"
         })
         
@@ -332,7 +367,8 @@ class TestErrorHandlingRefactored:
     @pytest.mark.asyncio
     async def test_invalid_container_error_handling(self, client: Client, test_host_id: str):
         """Test proper error handling for invalid container ID."""
-        result = await client.call_tool("get_container_info", {
+        result = await client.call_tool("docker_container", {
+            "action": "info",
             "host_id": test_host_id,
             "container_id": "invalid-container-id"
         })
@@ -342,19 +378,52 @@ class TestErrorHandlingRefactored:
         assert 'error' in result.data
 
     @pytest.mark.asyncio
+    async def test_docker_container_pull_error_handling(self, client: Client, test_host_id: str):
+        """Test error handling for docker_container pull action."""
+        with patch('docker_mcp.core.docker_context.DockerContextManager.execute_docker_command') as mock_execute:
+            # Configure mock to raise Docker error
+            from docker_mcp.core.exceptions import DockerCommandError
+            mock_execute.side_effect = DockerCommandError("pull access denied for image")
+            
+            result = await client.call_tool("docker_container", {
+                "action": "pull",
+                "host_id": test_host_id,
+                "container_id": "private/image:latest"
+            })
+            
+            # Verify mock was called
+            mock_execute.assert_called_once()
+            
+            # Verify error response
+            assert result.data["success"] is False
+            assert "error" in result.data
+            assert "pull access denied" in result.data["error"]
+            assert result.data["image_name"] == "private/image:latest"
+
+    @pytest.mark.asyncio
     async def test_missing_required_parameters(self, client: Client):
         """Test error handling for missing required parameters."""
         # Test missing host_id - FastMCP should catch this at validation layer
         try:
-            await client.call_tool("list_containers", {})
+            await client.call_tool("docker_container", {"action": "list"})
             assert False, "Should raise ToolError for missing required parameter"
         except Exception as e:
             assert "host_id" in str(e).lower()
             assert "required" in str(e).lower()
         
+        # Test missing container_id for pull action
+        result = await client.call_tool("docker_container", {
+            "action": "pull",
+            "host_id": "test-host",
+            "container_id": ""  # Empty container_id should fail
+        })
+        assert result.data.get('success', False) is False
+        assert 'error' in result.data
+        
         # Test missing container_id - FastMCP should catch this at validation layer
         try:
-            await client.call_tool("get_container_info", {
+            await client.call_tool("docker_container", {
+                "action": "info",
                 "host_id": "test-host"
             })
             assert False, "Should raise ToolError for missing required parameter"
@@ -365,14 +434,16 @@ class TestErrorHandlingRefactored:
     async def test_empty_string_parameters(self, client: Client):
         """Test error handling for empty string parameters."""
         # Test empty host_id
-        result = await client.call_tool("list_containers", {
+        result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": ""
         })
         assert result.data.get('success', False) is False
         assert 'error' in result.data
         
         # Test empty container_id
-        result = await client.call_tool("get_container_info", {
+        result = await client.call_tool("docker_container", {
+            "action": "info",
             "host_id": "test-host",
             "container_id": ""
         })
@@ -384,7 +455,8 @@ class TestErrorHandlingRefactored:
         """Test error handling for invalid parameter types."""
         # Test invalid limit type - FastMCP should catch this at validation layer
         try:
-            await client.call_tool("list_containers", {
+            await client.call_tool("docker_container", {
+                "action": "list",
                 "host_id": test_host_id,
                 "limit": "not-a-number"
             })
@@ -393,7 +465,8 @@ class TestErrorHandlingRefactored:
             assert "limit" in str(e).lower() or "type" in str(e).lower()
         
         # Test negative offset - this should be handled by application layer
-        result = await client.call_tool("list_containers", {
+        result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": test_host_id,
             "offset": -1
         })
@@ -404,7 +477,8 @@ class TestErrorHandlingRefactored:
     async def test_network_timeout_simulation(self, client: Client):
         """Test handling of network/connection timeouts."""
         # Test with a host that would cause timeout (non-existent host)
-        result = await client.call_tool("list_containers", {
+        result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": "timeout-test-host"
         })
         assert result.data.get('success', False) is False
@@ -414,7 +488,8 @@ class TestErrorHandlingRefactored:
     async def test_docker_context_connection_failure(self, client: Client):
         """Test Docker context connection failures."""
         # Test with malformed host configuration
-        result = await client.call_tool("list_containers", {
+        result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": "malformed-host-config"
         })
         assert result.data.get('success', False) is False
@@ -424,7 +499,8 @@ class TestErrorHandlingRefactored:
     async def test_host_permission_denied_simulation(self, client: Client):
         """Test handling of permission denied errors."""
         # Simulate permission denied by using invalid host
-        result = await client.call_tool("get_container_info", {
+        result = await client.call_tool("docker_container", {
+            "action": "info",
             "host_id": "permission-denied-host",
             "container_id": "some-container"
         })
@@ -441,11 +517,12 @@ class TestRefactoringValidation:
         """Comprehensive test to validate all refactored functionality."""
         
         # Test 1: Host management
-        hosts_result = await client.call_tool("list_docker_hosts", {})
+        hosts_result = await client.call_tool("docker_hosts", {"action": "list"})
         assert hosts_result.data.get('success', False) is True
         
         # Test 2: Container operations (basic functionality)
-        containers_result = await client.call_tool("list_containers", {
+        containers_result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": test_host_id,
             "limit": 3
         })
@@ -453,14 +530,16 @@ class TestRefactoringValidation:
         assert 'success' in containers_result.data
         
         # Test 3: Stack operations  
-        stacks_result = await client.call_tool("list_stacks", {
+        stacks_result = await client.call_tool("docker_compose", {
+            "action": "list",
             "host_id": test_host_id
         })
         # Accept either success or failure with error message
         assert 'success' in stacks_result.data
         
         # Test 4: Error handling still works
-        invalid_result = await client.call_tool("list_containers", {
+        invalid_result = await client.call_tool("docker_container", {
+            "action": "list",
             "host_id": "definitely-invalid-host"
         })
         assert invalid_result.data.get('success', False) is False
@@ -469,7 +548,8 @@ class TestRefactoringValidation:
     @pytest.mark.asyncio
     async def test_container_info_after_refactoring(self, client: Client, test_host_id: str, test_container_id: str):
         """Test container info retrieval works after refactoring."""
-        result = await client.call_tool("get_container_info", {
+        result = await client.call_tool("docker_container", {
+            "action": "info",
             "host_id": test_host_id,
             "container_id": test_container_id
         })

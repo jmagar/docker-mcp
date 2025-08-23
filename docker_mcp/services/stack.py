@@ -10,7 +10,7 @@ import structlog
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
-from ..core.config import DockerMCPConfig
+from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..tools.stacks import StackTools
 

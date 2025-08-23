@@ -1,0 +1,175 @@
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+.env/
+venv.bak/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.log
+.hypothesis/
+tests/
+test_*.py
+*_test.py
+
+# Cache directories
+.cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.ruff_cache/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Environment files (keep .env.example)
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+
+# Documentation (keep README.md for pip install)
+*.md
+!README.md
+docs/
+documentation/
+CLAUDE.md
+TOOLS.md
+CLEANUP.md
+
+# Docker files (avoid recursion)
+Dockerfile*
+docker-compose*.yml
+docker-compose*.yaml
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+azure-pipelines.yml
+jenkins/
+Jenkinsfile
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+*.tmp
+*.temp
+*~
+
+# Log files
+*.log
+logs/
+log/
+
+# Configuration overrides (keep examples)
+config/*.yml
+config/*.yaml
+!config/*.example.yml
+!config/*.example.yaml
+config/hosts.yml
+!config/hosts.example.yml
+
+# Secrets and keys
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+secrets/
+private/
+
+# Package manager files
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Misc development files
+.sass-cache/
+*.pid
+*.seed
+*.pid.lock
+.python-version
+.ruby-version
+Makefile
+makefile

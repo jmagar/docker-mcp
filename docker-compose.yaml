@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  docker-mcp:
+    image: ghcr.io/jmagar/docker-mcp:latest
+    container_name: docker-mcp
+    restart: unless-stopped
+    
+    ports:
+      - "8000:8000"
+    
+    volumes:
+      # Docker MCP SSH keys only - mounted read-only for security
+      - ~/.docker-mcp/ssh:/home/dockermcp/.ssh:ro
+      
+      # Configuration - mounted read-only
+      - ./config:/app/config:ro
+      
+      # Persistent data volume for logs and state
+      - docker-mcp-data:/app/data
+      
+      # Optional: Mount Docker socket if managing local Docker
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    environment:
+      # Server configuration
+      FASTMCP_HOST: "0.0.0.0"
+      FASTMCP_PORT: "8000"
+      
+      # Configuration file path
+      DOCKER_HOSTS_CONFIG: "/app/config/hosts.yml"
+      
+      # Logging configuration
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      LOG_DIR: "/app/data/logs"
+      LOG_FILE_SIZE_MB: "10"
+      
+      # Optional: SSH configuration
+      SSH_CONFIG_PATH: "/home/dockermcp/.ssh/config"
+      SSH_DEBUG: "${SSH_DEBUG:-0}"
+      
+      # Optional: Development settings
+      DEVELOPMENT_MODE: "${DEVELOPMENT_MODE:-false}"
+      HOT_RELOAD: "${HOT_RELOAD:-true}"
+      
+      # Optional: Rate limiting
+      RATE_LIMIT_PER_SECOND: "${RATE_LIMIT_PER_SECOND:-50.0}"
+      SLOW_REQUEST_THRESHOLD_MS: "${SLOW_REQUEST_THRESHOLD_MS:-5000.0}"
+    
+    # Health check (using internal endpoint check)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits (optional - uncomment to enable)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 2G
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 512M
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Network mode - use host network for better Docker connectivity
+    # Uncomment if needed for specific network requirements
+    # network_mode: host
+
+volumes:
+  docker-mcp-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data
+
+networks:
+  default:
+    name: docker-mcp-network
+    driver: bridge

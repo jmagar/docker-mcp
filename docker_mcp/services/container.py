@@ -10,7 +10,7 @@ import structlog
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
-from ..core.config import DockerMCPConfig
+from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..tools.containers import ContainerTools
 
@@ -316,6 +316,49 @@ class ContainerService:
                     "host_id": host_id,
                     "container_id": container_id,
                     "action": action,
+                },
+            )
+
+    async def pull_image(self, host_id: str, image_name: str) -> ToolResult:
+        """Pull a Docker image on a remote host."""
+        try:
+            is_valid, error_msg = self._validate_host(host_id)
+            if not is_valid:
+                return ToolResult(
+                    content=[TextContent(type="text", text=f"Error: {error_msg}")],
+                    structured_content={"success": False, "error": error_msg},
+                )
+
+            # Use container tools to pull image
+            result = await self.container_tools.pull_image(host_id, image_name)
+
+            if result["success"]:
+                return ToolResult(
+                    content=[TextContent(type="text", text=f"Success: {result['message']}")],
+                    structured_content=result,
+                )
+            else:
+                return ToolResult(
+                    content=[TextContent(type="text", text=f"Error: {result['message']}")],
+                    structured_content=result,
+                )
+
+        except Exception as e:
+            self.logger.error(
+                "Failed to pull image",
+                host_id=host_id,
+                image_name=image_name,
+                error=str(e),
+            )
+            return ToolResult(
+                content=[
+                    TextContent(type="text", text=f"❌ Failed to pull image: {str(e)}")
+                ],
+                structured_content={
+                    "success": False,
+                    "error": str(e),
+                    "host_id": host_id,
+                    "image_name": image_name,
                 },
             )
 

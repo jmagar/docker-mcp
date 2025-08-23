@@ -102,7 +102,7 @@ class TestHostManagement:
     @pytest.mark.asyncio
     async def test_list_docker_hosts(self, client: Client):
         """Test listing all configured Docker hosts."""
-        result = await client.call_tool("list_docker_hosts", {})
+        result = await client.call_tool("docker_hosts", {"action": "list", {})
         assert result.data["success"] is True
         assert "hosts" in result.data
         
@@ -166,7 +166,7 @@ async def deployed_test_stack(client: Client, test_host_id: str):
     stack_name = "test-stack-mgmt"
     
     # Setup: Deploy the stack
-    result = await client.call_tool("deploy_stack", {
+    result = await client.call_tool("docker_compose", {"action": "deploy", {
         "host_id": test_host_id,
         "stack_name": stack_name,
         "compose_content": compose_content,
@@ -177,7 +177,7 @@ async def deployed_test_stack(client: Client, test_host_id: str):
     yield stack_name  # Provide stack name to test
     
     # Teardown: Clean up after test
-    await client.call_tool("manage_stack", {
+    await client.call_tool("docker_compose", {
         "host_id": test_host_id,
         "stack_name": stack_name,
         "action": "down",
@@ -195,7 +195,7 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_invalid_host_id(self, client: Client):
         """Test operations with invalid host ID."""
-        result = await client.call_tool("list_containers", {
+        result = await client.call_tool("docker_container", {"action": "list", {
             "host_id": "invalid-host-id"
         })
         assert result.data["success"] is False
@@ -204,7 +204,7 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_invalid_container_id(self, client: Client, test_host_id: str):
         """Test operations with invalid container ID."""
-        result = await client.call_tool("get_container_info", {
+        result = await client.call_tool("docker_container", {"action": "info", {
             "host_id": test_host_id,
             "container_id": "invalid-container-id"
         })
@@ -218,7 +218,7 @@ class TestErrorHandling:
 @pytest.mark.asyncio
 async def test_container_operation_flexible(self, client: Client, test_host_id: str, test_container_id: str):
     """Test container info retrieval with flexible error handling."""
-    result = await client.call_tool("get_container_info", {
+    result = await client.call_tool("docker_container", {"action": "info", {
         "host_id": test_host_id,
         "container_id": test_container_id
     })
@@ -242,13 +242,13 @@ async def test_complete_stack_lifecycle(client: Client, test_host_id: str):
     """Integration test of complete stack lifecycle: list -> deploy -> manage -> remove."""
     
     # Step 1: List initial stacks
-    initial_list = await client.call_tool("list_stacks", {"host_id": test_host_id})
+    initial_list = await client.call_tool("docker_compose", {"action": "list", {"host_id": test_host_id})
     assert initial_list.data["success"] is True
     initial_count = len(initial_list.data["stacks"])
     
     # Step 2: Deploy new stack
     stack_name = "test-lifecycle-complete"
-    deploy_result = await client.call_tool("deploy_stack", {
+    deploy_result = await client.call_tool("docker_compose", {"action": "deploy", {
         "host_id": test_host_id,
         "stack_name": stack_name,
         "compose_content": compose_content,
@@ -257,11 +257,11 @@ async def test_complete_stack_lifecycle(client: Client, test_host_id: str):
     assert deploy_result.data["success"] is True
     
     # Step 3: Verify stack appears in listing
-    post_deploy_list = await client.call_tool("list_stacks", {"host_id": test_host_id})
+    post_deploy_list = await client.call_tool("docker_compose", {"action": "list", {"host_id": test_host_id})
     assert len(post_deploy_list.data["stacks"]) == initial_count + 1
     
     # Step 4: Check stack status
-    ps_result = await client.call_tool("manage_stack", {
+    ps_result = await client.call_tool("docker_compose", {
         "host_id": test_host_id,
         "stack_name": stack_name,
         "action": "ps"
@@ -270,7 +270,7 @@ async def test_complete_stack_lifecycle(client: Client, test_host_id: str):
     assert ps_result.data["execution_method"] == "ssh"
     
     # Step 5: Remove stack
-    down_result = await client.call_tool("manage_stack", {
+    down_result = await client.call_tool("docker_compose", {
         "host_id": test_host_id,
         "stack_name": stack_name,
         "action": "down",
@@ -279,7 +279,7 @@ async def test_complete_stack_lifecycle(client: Client, test_host_id: str):
     assert down_result.data["success"] is True
     
     # Step 6: Verify stack is removed
-    final_list = await client.call_tool("list_stacks", {"host_id": test_host_id})
+    final_list = await client.call_tool("docker_compose", {"action": "list", {"host_id": test_host_id})
     final_stack_names = [stack["name"] for stack in final_list.data["stacks"]]
     assert stack_name not in final_stack_names
 ```
@@ -293,7 +293,7 @@ async def test_stack_with_cleanup(self, client: Client, test_host_id: str):
     
     try:
         # Deploy
-        result = await client.call_tool("deploy_stack", {
+        result = await client.call_tool("docker_compose", {"action": "deploy", {
             "host_id": test_host_id,
             "stack_name": stack_name,
             "compose_content": compose_content
@@ -305,7 +305,7 @@ async def test_stack_with_cleanup(self, client: Client, test_host_id: str):
         
     finally:
         # Always clean up, even if test fails
-        await client.call_tool("manage_stack", {
+        await client.call_tool("docker_compose", {
             "host_id": test_host_id,
             "stack_name": stack_name,
             "action": "down",
@@ -333,7 +333,7 @@ def assert_error_response(result, error_substring: str | None = None):
         assert error_substring in result.data["error"].lower()
 
 # Usage in tests
-result = await client.call_tool("list_containers", {"host_id": test_host_id})
+result = await client.call_tool("docker_container", {"action": "list", {"host_id": test_host_id})
 assert_successful_response(result, ["containers", "limit", "offset"])
 ```
 
@@ -342,7 +342,7 @@ assert_successful_response(result, ["containers", "limit", "offset"])
 @pytest.mark.asyncio
 async def test_list_containers_response_structure(self, client: Client, test_host_id: str):
     """Test container listing returns proper response structure."""
-    result = await client.call_tool("list_containers", {
+    result = await client.call_tool("docker_container", {"action": "list", {
         "host_id": test_host_id,
         "limit": 5
     })
@@ -498,25 +498,25 @@ async def test_all_tools_integration(client: Client, test_host_id: str, test_con
     """Integration test that exercises all 13 tools."""
     
     # Host Management (3 tools)
-    hosts = await client.call_tool("list_docker_hosts", {})
+    hosts = await client.call_tool("docker_hosts", {"action": "list", {})
     assert hosts.data["success"] is True
     
     # Container Operations (5 tools)
-    containers = await client.call_tool("list_containers", {"host_id": test_host_id})
+    containers = await client.call_tool("docker_container", {"action": "list", {"host_id": test_host_id})
     assert containers.data["success"] is True
     
-    info = await client.call_tool("get_container_info", {
+    info = await client.call_tool("docker_container", {"action": "info", {
         "host_id": test_host_id, 
         "container_id": test_container_id
     })
     assert info.data["success"] is True
     
     # Stack Operations (3 tools)
-    stacks = await client.call_tool("list_stacks", {"host_id": test_host_id})
+    stacks = await client.call_tool("docker_compose", {"action": "list", {"host_id": test_host_id})
     assert stacks.data["success"] is True
     
     # Deploy and test stack
-    deploy = await client.call_tool("deploy_stack", {
+    deploy = await client.call_tool("docker_compose", {"action": "deploy", {
         "host_id": test_host_id,
         "stack_name": "test-integration",
         "compose_content": simple_compose_content,
@@ -525,7 +525,7 @@ async def test_all_tools_integration(client: Client, test_host_id: str, test_con
     assert deploy.data["success"] is True
     
     # Test SSH-based stack management
-    ps_result = await client.call_tool("manage_stack", {
+    ps_result = await client.call_tool("docker_compose", {
         "host_id": test_host_id,
         "stack_name": "test-integration", 
         "action": "ps"
@@ -534,7 +534,7 @@ async def test_all_tools_integration(client: Client, test_host_id: str, test_con
     assert ps_result.data["execution_method"] == "ssh"
     
     # Clean up
-    await client.call_tool("manage_stack", {
+    await client.call_tool("docker_compose", {
         "host_id": test_host_id,
         "stack_name": "test-integration",
         "action": "down",
@@ -620,11 +620,11 @@ async def test_container_operation_success_and_failure(client: Client):
 async def test_with_cleanup(client: Client):
     try:
         # Deploy resources
-        result = await client.call_tool("deploy_stack", params)
+        result = await client.call_tool("docker_compose", {"action": "deploy", params)
         # Test operations
     finally:
         # Always clean up
-        await client.call_tool("manage_stack", {"action": "down"})
+        await client.call_tool("docker_compose", {"action": "down"})
 
 # 4. Use meaningful assertions
 assert result.data["success"] is True  # Explicit boolean check

@@ -6,7 +6,7 @@ from typing import Any
 
 import structlog
 
-from ..core.config import DockerMCPConfig
+from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
 from ..models.container import (
@@ -591,6 +591,53 @@ class ContainerTools:
                 "container_id": container_id,
                 "host_id": host_id,
                 "action": action,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat(),
+            }
+
+    async def pull_image(self, host_id: str, image_name: str) -> dict[str, Any]:
+        """Pull a Docker image on a remote host.
+
+        Args:
+            host_id: ID of the Docker host
+            image_name: Name of the Docker image to pull (e.g., nginx:latest, ubuntu:20.04)
+
+        Returns:
+            Operation result
+        """
+        try:
+            # Build Docker pull command
+            cmd = f"pull {image_name}"
+
+            result = await self.context_manager.execute_docker_command(host_id, cmd)
+
+            logger.info(
+                "Image pull completed",
+                host_id=host_id,
+                image_name=image_name,
+            )
+
+            return {
+                "success": True,
+                "message": f"Successfully pulled image {image_name}",
+                "image_name": image_name,
+                "host_id": host_id,
+                "output": result.get("output", ""),
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        except (DockerCommandError, DockerContextError) as e:
+            logger.error(
+                "Failed to pull image",
+                host_id=host_id,
+                image_name=image_name,
+                error=str(e),
+            )
+            return {
+                "success": False,
+                "message": f"Failed to pull image {image_name}: {str(e)}",
+                "image_name": image_name,
+                "host_id": host_id,
                 "error": str(e),
                 "timestamp": datetime.now().isoformat(),
             }

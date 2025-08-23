@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from docker_mcp.core.config import DockerHost
+from docker_mcp.core.config_loader import DockerHost
 from docker_mcp.core.ssh_config_parser import SSHConfigEntry, SSHConfigParser
 
 

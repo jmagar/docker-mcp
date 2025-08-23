@@ -26,7 +26,7 @@ from typing import List, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastmcp import Client
-from docker_mcp.core.config import load_config
+from docker_mcp.core.config_loader import load_config
 from docker_mcp.server import DockerMCPServer
 from tests.cleanup_utils import (
     cleanup_test_containers,
@@ -98,10 +98,10 @@ async def cleanup_known_orphans(client: Client, host_id: str, dry_run: bool = Fa
                 results["stacks_removed"].append(f"{stack_name} (dry run)")
             else:
                 print(f"Removing stack: {stack_name}")
-                result = await client.call_tool("manage_stack", {
+                result = await client.call_tool("docker_compose", {
+                    "action": "down",
                     "host_id": host_id,
-                    "stack_name": stack_name,
-                    "action": "down"
+                    "stack_name": stack_name
                 })
                 
                 if result.data.get("success"):
@@ -125,10 +125,10 @@ async def cleanup_known_orphans(client: Client, host_id: str, dry_run: bool = Fa
                 results["containers_stopped"].append(f"{container_name} (dry run)")
             else:
                 print(f"Stopping container: {container_name}")
-                result = await client.call_tool("manage_container", {
+                result = await client.call_tool("docker_container", {
+                    "action": "stop",
                     "host_id": host_id,
                     "container_id": container_name,
-                    "action": "stop",
                     "timeout": 5
                 })
                 
@@ -157,7 +157,7 @@ async def cleanup_by_pattern(client: Client, host_id: str, pattern: str, dry_run
         print("[DRY RUN MODE - No actual changes will be made]")
         
         # List what would be cleaned
-        container_result = await client.call_tool("list_containers", {
+        container_result = await client.call_tool("docker_container", {"action": "list", {
             "host_id": host_id,
             "all_containers": True,
             "limit": 100
@@ -171,7 +171,7 @@ async def cleanup_by_pattern(client: Client, host_id: str, pattern: str, dry_run
                 for c in matching:
                     print(f"  - {c.get('name')} ({c.get('status', 'unknown')})")
         
-        stack_result = await client.call_tool("list_stacks", {
+        stack_result = await client.call_tool("docker_compose", {"action": "list", {
             "host_id": host_id
         })
         

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import structlog
 from watchfiles import awatch
 
-from .config import DockerMCPConfig, load_config
+from .config_loader import DockerMCPConfig, load_config
 from .exceptions import ConfigurationError
 
 if TYPE_CHECKING:

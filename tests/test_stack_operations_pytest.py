@@ -33,7 +33,8 @@ services:
         tracker = get_resource_tracker()
         
         try:
-            result = await client.call_tool("deploy_stack", {
+            result = await client.call_tool("docker_compose", {
+                "action": "deploy",
                 "host_id": test_host_id,
                 "stack_name": stack_name,
                 "compose_content": compose_content,
@@ -50,10 +51,10 @@ services:
         finally:
             # Clean up
             try:
-                cleanup = await client.call_tool("manage_stack", {
+                cleanup = await client.call_tool("docker_compose", {
+                    "action": "down",
                     "host_id": test_host_id,
-                    "stack_name": stack_name,
-                    "action": "down"
+                    "stack_name": stack_name
                 })
                 if cleanup.data["success"]:
                     tracker.remove_stack(test_host_id, stack_name)
@@ -88,7 +89,8 @@ services:
         tracker = get_resource_tracker()
         
         try:
-            result = await client.call_tool("deploy_stack", {
+            result = await client.call_tool("docker_compose", {
+                "action": "deploy",
                 "host_id": test_host_id,
                 "stack_name": stack_name,
                 "compose_content": compose_content,
@@ -103,10 +105,10 @@ services:
         finally:
             # Clean up
             try:
-                await client.call_tool("manage_stack", {
+                await client.call_tool("docker_compose", {
+                    "action": "down",
                     "host_id": test_host_id,
-                    "stack_name": stack_name,
-                    "action": "down"
+                    "stack_name": stack_name
                 })
                 tracker.remove_stack(test_host_id, stack_name)
             except Exception as e:
@@ -126,7 +128,8 @@ services:
         stack_name = "test-recreate"
         
         # Deploy first time
-        result1 = await client.call_tool("deploy_stack", {
+        result1 = await client.call_tool("docker_compose", {
+            "action": "deploy",
             "host_id": test_host_id,
             "stack_name": stack_name,
             "compose_content": compose_content,
@@ -136,7 +139,8 @@ services:
         assert result1.data["success"] is True
         
         # Deploy again with recreate=True
-        result2 = await client.call_tool("deploy_stack", {
+        result2 = await client.call_tool("docker_compose", {
+            "action": "deploy",
             "host_id": test_host_id,
             "stack_name": stack_name,
             "compose_content": compose_content,
@@ -146,10 +150,10 @@ services:
         assert result2.data["success"] is True
         
         # Clean up
-        await client.call_tool("manage_stack", {
+        await client.call_tool("docker_compose", {
+            "action": "down",
             "host_id": test_host_id,
             "stack_name": stack_name,
-            "action": "down",
             "options": {"volumes": True}
         })
 
@@ -174,23 +178,9 @@ services:
         from tests.cleanup_utils import get_resource_tracker
         tracker = get_resource_tracker()
         
-        # Define cleanup function
-        async def cleanup():
-            try:
-                await client.call_tool("manage_stack", {
-                    "host_id": test_host_id,
-                    "stack_name": stack_name,
-                    "action": "down"
-                })
-                tracker.remove_stack(test_host_id, stack_name)
-            except Exception as e:
-                tracker.record_failure("stack", stack_name, test_host_id, str(e))
-        
-        # Register cleanup as finalizer
-        request.addfinalizer(lambda: asyncio.run(cleanup()))
-        
         # Deploy the stack
-        result = await client.call_tool("deploy_stack", {
+        result = await client.call_tool("docker_compose", {
+            "action": "deploy",
             "host_id": test_host_id,
             "stack_name": stack_name,
             "compose_content": compose_content,
@@ -203,17 +193,25 @@ services:
         try:
             yield stack_name
         finally:
-            # Cleanup will be handled by finalizer
-            pass
+            # Cleanup using direct async call (no new event loop)
+            try:
+                await client.call_tool("docker_compose", {
+                    "action": "down",
+                    "host_id": test_host_id,
+                    "stack_name": stack_name
+                })
+                tracker.remove_stack(test_host_id, stack_name)
+            except Exception as e:
+                tracker.record_failure("stack", stack_name, test_host_id, str(e))
 
     @pytest.mark.slow
     @pytest.mark.asyncio
     async def test_manage_stack_ps(self, client: Client, test_host_id: str, deployed_test_stack: str):
         """Test stack status (ps) operation via SSH."""
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
+            "action": "ps",
             "host_id": test_host_id,
-            "stack_name": deployed_test_stack,
-            "action": "ps"
+            "stack_name": deployed_test_stack
         })
         
         assert result.data["success"] is True
@@ -229,10 +227,10 @@ services:
     @pytest.mark.asyncio
     async def test_manage_stack_logs(self, client: Client, test_host_id: str, deployed_test_stack: str):
         """Test getting stack logs via SSH."""
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
+            "action": "logs",
             "host_id": test_host_id,
             "stack_name": deployed_test_stack,
-            "action": "logs",
             "options": {"tail": 10}
         })
         
@@ -244,15 +242,29 @@ services:
     @pytest.mark.asyncio
     async def test_manage_stack_restart(self, client: Client, test_host_id: str, deployed_test_stack: str):
         """Test restarting stack services via SSH."""
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
+            "action": "restart",
             "host_id": test_host_id,
-            "stack_name": deployed_test_stack,
-            "action": "restart"
+            "stack_name": deployed_test_stack
         })
         
         assert result.data["success"] is True
         assert result.data["action"] == "restart"
+
+    @pytest.mark.slow
+    @pytest.mark.asyncio
+    async def test_docker_compose_pull(self, client: Client, test_host_id: str, deployed_test_stack: str):
+        """Test docker_compose pull action via SSH."""
+        result = await client.call_tool("docker_compose", {
+            "action": "pull",
+            "host_id": test_host_id,
+            "stack_name": deployed_test_stack
+        })
+        
+        assert result.data["success"] is True
+        assert result.data["action"] == "pull"
         assert result.data["execution_method"] == "ssh"
+        assert result.data["stack_name"] == deployed_test_stack
 
     @pytest.mark.slow
     @pytest.mark.asyncio
@@ -270,7 +282,8 @@ volumes:
 """
         stack_name = "test-temp-volumes"
         
-        deploy_result = await client.call_tool("deploy_stack", {
+        deploy_result = await client.call_tool("docker_compose", {
+            "action": "deploy",
             "host_id": test_host_id,
             "stack_name": stack_name,
             "compose_content": compose_content,
@@ -279,10 +292,10 @@ volumes:
         assert deploy_result.data["success"] is True
         
         # Now test down with volumes
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
+            "action": "down",
             "host_id": test_host_id,
             "stack_name": stack_name,
-            "action": "down",
             "options": {
                 "volumes": True,
                 "remove_orphans": True
@@ -301,7 +314,8 @@ class TestStackListing:
     @pytest.mark.asyncio
     async def test_list_stacks_basic(self, client: Client, test_host_id: str):
         """Test basic stack listing."""
-        result = await client.call_tool("list_stacks", {
+        result = await client.call_tool("docker_compose", {
+            "action": "list",
             "host_id": test_host_id
         })
         
@@ -323,7 +337,8 @@ services:
 """
         stack_name = "test-list-validation"
         
-        deploy_result = await client.call_tool("deploy_stack", {
+        deploy_result = await client.call_tool("docker_compose", {
+            "action": "deploy",
             "host_id": test_host_id,
             "stack_name": stack_name,
             "compose_content": compose_content,
@@ -332,7 +347,8 @@ services:
         assert deploy_result.data["success"] is True
         
         # List stacks and verify our stack is there
-        list_result = await client.call_tool("list_stacks", {
+        list_result = await client.call_tool("docker_compose", {
+            "action": "list",
             "host_id": test_host_id
         })
         
@@ -341,10 +357,10 @@ services:
         assert stack_name in stack_names
         
         # Clean up
-        await client.call_tool("manage_stack", {
+        await client.call_tool("docker_compose", {
+            "action": "down",
             "host_id": test_host_id,
             "stack_name": stack_name,
-            "action": "down",
             "options": {"volumes": True}
         })
 
@@ -356,7 +372,7 @@ class TestStackErrorHandling:
     @pytest.mark.asyncio
     async def test_manage_nonexistent_stack(self, client: Client, test_host_id: str):
         """Test managing a stack that doesn't exist."""
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": test_host_id,
             "stack_name": "nonexistent-stack",
             "action": "ps"
@@ -371,7 +387,7 @@ class TestStackErrorHandling:
         """Test deploying with invalid compose content."""
         invalid_compose = """invalid: yaml: content: ["""
         
-        result = await client.call_tool("deploy_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": test_host_id,
             "stack_name": "test-invalid",
             "compose_content": invalid_compose
@@ -384,7 +400,7 @@ class TestStackErrorHandling:
     @pytest.mark.asyncio
     async def test_manage_stack_invalid_action(self, client: Client, test_host_id: str):
         """Test invalid management action."""
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": test_host_id,
             "stack_name": "any-stack",
             "action": "invalid_action"
@@ -415,7 +431,8 @@ services:
 """
         
         for invalid_name in invalid_names:
-            result = await client.call_tool("deploy_stack", {
+            result = await client.call_tool("docker_compose", {
+                "action": "deploy",
                 "host_id": test_host_id,
                 "stack_name": invalid_name,
                 "compose_content": compose_content
@@ -427,7 +444,8 @@ services:
     async def test_deploy_stack_empty_compose_content(self, client: Client, test_host_id: str):
         """Test deployment with empty or minimal compose content."""
         # Test completely empty content
-        result = await client.call_tool("deploy_stack", {
+        result = await client.call_tool("docker_compose", {
+            "action": "deploy",
             "host_id": test_host_id,
             "stack_name": "test-empty",
             "compose_content": ""
@@ -436,7 +454,8 @@ services:
         assert "error" in result.data
         
         # Test minimal invalid content
-        result = await client.call_tool("deploy_stack", {
+        result = await client.call_tool("docker_compose", {
+            "action": "deploy",
             "host_id": test_host_id,
             "stack_name": "test-minimal",
             "compose_content": "version: '3.8'"  # No services
@@ -448,7 +467,7 @@ services:
     async def test_manage_stack_missing_compose_file(self, client: Client, test_host_id: str):
         """Test managing stack operations on stacks without compose files."""
         # Try to manage a stack that was never deployed via deploy_stack
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": test_host_id,
             "stack_name": "never-deployed-stack",
             "action": "up"
@@ -476,7 +495,7 @@ services:
         ]
         
         for env in invalid_environments:
-            result = await client.call_tool("deploy_stack", {
+            result = await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": "test-env-invalid",
                 "compose_content": compose_content,
@@ -504,7 +523,7 @@ services:
 """
         
         for valid_name in valid_names:
-            result = await client.call_tool("deploy_stack", {
+            result = await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": valid_name,
                 "compose_content": compose_content,
@@ -513,7 +532,7 @@ services:
             assert result.data["success"] is True, f"Valid stack name '{valid_name}' should be accepted"
             
             # Clean up the deployed stack
-            await client.call_tool("manage_stack", {
+            await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": valid_name,
                 "action": "down",
@@ -526,14 +545,15 @@ services:
         invalid_host = "completely-nonexistent-host"
         
         # Test list stacks
-        result = await client.call_tool("list_stacks", {
+        result = await client.call_tool("docker_compose", {
+            "action": "list",
             "host_id": invalid_host
         })
         assert result.data["success"] is False
         assert "error" in result.data
         
         # Test deploy stack
-        result = await client.call_tool("deploy_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": invalid_host,
             "stack_name": "test-stack",
             "compose_content": "version: '3.8'\nservices:\n  test:\n    image: nginx"
@@ -542,7 +562,7 @@ services:
         assert "error" in result.data
         
         # Test manage stack
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": invalid_host,
             "stack_name": "any-stack",
             "action": "ps"
@@ -554,7 +574,7 @@ services:
     async def test_manage_stack_invalid_options(self, client: Client, test_host_id: str):
         """Test manage stack with invalid option combinations."""
         # Test with invalid timeout value
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": test_host_id,
             "stack_name": "test-stack",
             "action": "restart",
@@ -564,7 +584,7 @@ services:
         assert "error" in result.data
         
         # Test logs with invalid tail value
-        result = await client.call_tool("manage_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": test_host_id,
             "stack_name": "test-stack",
             "action": "logs",
@@ -585,7 +605,7 @@ services:
       - "22:80"  # Port 22 is likely used by SSH
 """
         
-        result = await client.call_tool("deploy_stack", {
+        result = await client.call_tool("docker_compose", {
             "host_id": test_host_id,
             "stack_name": "test-port-conflict",
             "compose_content": conflicting_compose,
@@ -596,7 +616,7 @@ services:
         
         # Clean up if it succeeded
         if result.data.get("success"):
-            await client.call_tool("manage_stack", {
+            await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": "test-port-conflict",
                 "action": "down",
@@ -629,7 +649,7 @@ services:
             mock_result.stderr = ""
             mock_subprocess.return_value = mock_result
             
-            result = await client.call_tool("deploy_stack", {
+            result = await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": stack_name,
                 "compose_content": compose_content,
@@ -681,7 +701,7 @@ services:
             mock_result.stderr = ""
             mock_subprocess.return_value = mock_result
             
-            result = await client.call_tool("manage_stack", {
+            result = await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": stack_name,
                 "action": "ps"
@@ -731,7 +751,7 @@ services:
             mock_result.stderr = ""
             mock_subprocess.return_value = mock_result
             
-            result = await client.call_tool("manage_stack", {
+            result = await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": stack_name,
                 "action": "down",
@@ -794,7 +814,7 @@ services:
             mock_result.stderr = ""
             mock_subprocess.return_value = mock_result
             
-            result = await client.call_tool("deploy_stack", {
+            result = await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": stack_name,
                 "compose_content": compose_content,
@@ -837,7 +857,8 @@ services:
             # Configure mock to return stack list data
             mock_execute.return_value = {"output": mock_stack_output}
             
-            result = await client.call_tool("list_stacks", {
+            result = await client.call_tool("docker_compose", {
+                "action": "list",
                 "host_id": test_host_id
             })
             
@@ -865,7 +886,7 @@ services:
             mock_result.stderr = "Error: Could not find compose file"
             mock_subprocess.return_value = mock_result
             
-            result = await client.call_tool("manage_stack", {
+            result = await client.call_tool("docker_compose", {
                 "host_id": test_host_id,
                 "stack_name": stack_name,
                 "action": "ps"
@@ -887,7 +908,7 @@ async def test_complete_stack_lifecycle(client: Client, test_host_id: str, worke
     """Integration test of complete stack lifecycle: list -> deploy -> manage -> remove."""
     
     # Step 1: List initial stacks
-    initial_list = await client.call_tool("list_stacks", {"host_id": test_host_id})
+    initial_list = await client.call_tool("docker_compose", {"action": "list", "host_id": test_host_id})
     assert initial_list.data["success"] is True
     initial_count = len(initial_list.data["stacks"])
     
@@ -907,7 +928,7 @@ services:
       - "worker={worker_id}"
 """
     
-    deploy_result = await client.call_tool("deploy_stack", {
+    deploy_result = await client.call_tool("docker_compose", {
         "host_id": test_host_id,
         "stack_name": stack_name,
         "compose_content": compose_content,
@@ -916,13 +937,13 @@ services:
     assert deploy_result.data["success"] is True
     
     # Step 3: Verify stack appears in listing
-    post_deploy_list = await client.call_tool("list_stacks", {"host_id": test_host_id})
+    post_deploy_list = await client.call_tool("docker_compose", {"action": "list", "host_id": test_host_id})
     assert post_deploy_list.data["success"] is True
     stack_names = [stack["name"] for stack in post_deploy_list.data["stacks"]]
     assert stack_name in stack_names, f"Stack '{stack_name}' should appear in stack list"
     
     # Step 4: Check stack status
-    ps_result = await client.call_tool("manage_stack", {
+    ps_result = await client.call_tool("docker_compose", {
         "host_id": test_host_id,
         "stack_name": stack_name,
         "action": "ps"
@@ -931,7 +952,7 @@ services:
     assert ps_result.data["execution_method"] == "ssh"
     
     # Step 5: Remove stack
-    down_result = await client.call_tool("manage_stack", {
+    down_result = await client.call_tool("docker_compose", {
         "host_id": test_host_id,
         "stack_name": stack_name,
         "action": "down",
@@ -941,7 +962,7 @@ services:
     assert down_result.data["execution_method"] == "ssh"
     
     # Step 6: Verify stack is removed from listing
-    final_list = await client.call_tool("list_stacks", {"host_id": test_host_id})
+    final_list = await client.call_tool("docker_compose", {"action": "list", "host_id": test_host_id})
     assert final_list.data["success"] is True
     final_stack_names = [stack["name"] for stack in final_list.data["stacks"]]
     assert stack_name not in final_stack_names

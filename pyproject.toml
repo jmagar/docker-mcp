@@ -1,7 +1,7 @@
 [project]
 name = "docker-mcp"
 version = "0.1.0"
-description = "FastMCP Docker SSH Manager - Remote Docker management via SSH"
+description = "Docker Manager MCP - AI-powered Docker management across multiple hosts"
 authors = [
     {name = "Docker MCP Team"}
 ]
