@@ -24,181 +24,146 @@ That's it! The installer:
 
 ## 🎯 What You Can Actually Do
 
-### Deploy Applications Instantly
-```javascript
-// Deploy WordPress with one command
-await docker_compose({
-  action: "deploy",
-  host_id: "my-server",
-  stack_name: "wordpress",
-  compose_content: `your-compose-file-here`
-});
-```
+- **Deploy applications** across multiple Docker hosts
+- **Control containers** with start/stop/restart operations
+- **Monitor services** with real-time log streaming
+- **Manage stacks** using Docker Compose configurations
+- **Update services** without downtime using rolling updates
+- **Check port usage** to avoid conflicts
+- **Auto-discover hosts** from your SSH configuration
 
-### Control Containers Everywhere
-```javascript
-// Check what's running on all your servers
-const hosts = ["web-1", "web-2", "db-1", "cache-1"];
-for (const host of hosts) {
-  const containers = await docker_container({
-    action: "list",
-    host_id: host
-  });
-  console.log(`${host}: ${containers.length} containers`);
+## 🛠 The 3 Tools
+
+### Tool 1: `docker_hosts`
+Manage your Docker hosts and connectivity.
+
+**Actions:**
+- `list` - List all configured Docker hosts
+- `add` - Add a new Docker host
+- `ports` - List port mappings for a host
+- `compose_path` - Update host compose path
+- `import_ssh` - Import hosts from SSH config
+
+**Schema for `add` action:**
+```json
+{
+  "action": "add",
+  "host_id": "production-1",        // Required: unique identifier
+  "ssh_host": "192.168.1.100",      // Required: hostname or IP
+  "ssh_user": "dockeruser",          // Required: SSH username
+  "ssh_port": 22,                    // Optional: default 22
+  "ssh_key_path": "~/.ssh/id_ed25519", // Optional: SSH key path
+  "description": "Production server",   // Optional: description
+  "tags": ["production", "web"],       // Optional: tags for filtering
+  "compose_path": "/opt/compose"       // Optional: compose file path
 }
 ```
 
-### Monitor Everything in Real-Time
-```javascript
-// Stream logs from any container on any host
-await docker_container({
-  action: "logs",
-  host_id: "production",
-  container_id: "my-app",
-  follow: true
-});
-```
+### Tool 2: `docker_container`
+Control containers across all your hosts.
 
-### Update Services Without Downtime
-```javascript
-// Rolling update across multiple hosts
-for (const host of ["web-1", "web-2", "web-3"]) {
-  await docker_container({
-    action: "pull",
-    host_id: host,
-    container_id: "nginx:latest"
-  });
-  
-  await docker_container({
-    action: "restart", 
-    host_id: host,
-    container_id: "nginx"
-  });
+**Actions:**
+- `list` - List containers on a host
+- `info` - Get detailed container information
+- `start` / `stop` / `restart` - Container lifecycle
+- `logs` - View or stream container logs
+- `pull` - Pull Docker images
+- `build` - Build containers from Dockerfile
+
+**Schema for `list` action:**
+```json
+{
+  "action": "list",
+  "host_id": "production-1",    // Required: which host to query
+  "all_containers": false,       // Optional: include stopped containers
+  "limit": 20,                   // Optional: pagination limit
+  "offset": 0                    // Optional: pagination offset
 }
 ```
 
-## 💡 Real-World Examples
+**Schema for lifecycle actions:**
+```json
+{
+  "action": "start",             // Or "stop", "restart"
+  "host_id": "production-1",     // Required: target host
+  "container_id": "nginx-web",   // Required: container name or ID
+  "force": false,                // Optional: force stop
+  "timeout": 10                  // Optional: timeout in seconds
+}
+```
 
-### Deploy a Multi-Container App
-Deploy a complete application stack with database, cache, and web server:
+### Tool 3: `docker_compose`
+Deploy and manage Docker Compose stacks.
 
-```javascript
-const composeFile = `
+**Actions:**
+- `deploy` - Deploy a new stack
+- `list` - List all stacks on a host
+- `up` / `down` / `restart` - Stack lifecycle
+- `logs` - View stack logs
+- `build` / `pull` - Build or update images
+- `discover` - Find compose files on host
+
+**Schema for `deploy` action:**
+```json
+{
+  "action": "deploy",
+  "host_id": "production-1",        // Required: target host
+  "stack_name": "wordpress",        // Required: stack identifier
+  "compose_content": "...",         // Required: docker-compose.yml content
+  "environment": {                  // Optional: environment variables
+    "DB_PASSWORD": "secret"
+  },
+  "pull_images": true,              // Optional: pull latest images
+  "recreate": false                 // Optional: force recreate containers
+}
+```
+
+**Schema for `logs` action:**
+```json
+{
+  "action": "logs",
+  "host_id": "production-1",        // Required: target host
+  "stack_name": "wordpress",        // Required: stack name
+  "lines": 100,                     // Optional: number of lines
+  "follow": false                   // Optional: stream logs
+}
+```
+
+## 💡 Real-World Use Cases
+
+### Deploy a WordPress Site
+```yaml
+# compose_content for WordPress deployment
 version: '3.8'
 services:
-  web:
+  wordpress:
     image: wordpress:latest
     ports:
       - "80:80"
     environment:
       WORDPRESS_DB_HOST: db
       WORDPRESS_DB_PASSWORD: secret
-  
   db:
     image: mysql:5.7
     environment:
       MYSQL_ROOT_PASSWORD: secret
     volumes:
       - db_data:/var/lib/mysql
-  
-  cache:
-    image: redis:alpine
-    
 volumes:
   db_data:
-`;
-
-await docker_compose({
-  action: "deploy",
-  host_id: "production",
-  stack_name: "my-blog",
-  compose_content: composeFile
-});
 ```
 
-### Emergency Response
-Something wrong? Stop everything on a host instantly:
+Use with: `docker_compose` action: `deploy`
 
-```javascript
-// Stop ALL containers on compromised host
-const containers = await docker_container({
-  action: "list",
-  host_id: "compromised-host"
-});
+### Monitor Multiple Hosts
+1. Use `docker_hosts` with action `list` to get all hosts
+2. For each host, use `docker_container` with action `list`
+3. Use `docker_container` with action `logs` to monitor specific containers
 
-for (const container of containers) {
-  await docker_container({
-    action: "stop",
-    host_id: "compromised-host",
-    container_id: container.id,
-    force: true
-  });
-}
-```
-
-### Automated Deployments
-Deploy to staging, test, then deploy to production:
-
-```javascript
-// Deploy to staging
-await docker_compose({
-  action: "deploy",
-  host_id: "staging",
-  stack_name: "my-app",
-  compose_content: appConfig
-});
-
-// Run tests...
-// If tests pass, deploy to production
-
-await docker_compose({
-  action: "deploy", 
-  host_id: "production",
-  stack_name: "my-app",
-  compose_content: appConfig
-});
-```
-
-### Monitor Resource Usage
-Check which containers are using the most resources:
-
-```javascript
-const info = await docker_container({
-  action: "info",
-  host_id: "production",
-  container_id: "database"
-});
-
-console.log(`Memory: ${info.memory_usage}`);
-console.log(`CPU: ${info.cpu_percentage}%`);
-```
-
-## 🛠 Just 3 Simple Tools
-
-We've simplified everything down to just 3 tools that do everything you need:
-
-### `docker_hosts`
-Manage your Docker hosts:
-- **list** - See all your connected hosts
-- **add** - Connect to a new Docker host
-- **ports** - Check what ports are in use
-- **import_ssh** - Auto-import from SSH config
-
-### `docker_container`  
-Control containers:
-- **list** - See what's running
-- **info** - Get container details
-- **start/stop/restart** - Control containers
-- **logs** - View or stream logs
-- **pull** - Update images
-
-### `docker_compose`
-Deploy and manage stacks:
-- **deploy** - Deploy new applications
-- **list** - See deployed stacks
-- **up/down/restart** - Control entire stacks
-- **logs** - View stack logs
-- **build/pull** - Build or update images
+### Emergency Container Management
+- Stop all containers: `docker_container` with action `stop` and `force: true`
+- Check what's using ports: `docker_hosts` with action `ports`
+- Restart services: `docker_container` with action `restart`
 
 ## 🔧 Configuration (Optional!)
 
