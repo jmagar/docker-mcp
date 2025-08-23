@@ -24,6 +24,7 @@ class DockerHost(BaseModel):
     tags: list[str] = Field(default_factory=list)
     docker_context: str | None = None
     compose_path: str | None = None  # Path where compose files are stored on this host
+    appdata_path: str | None = None  # Path where container data volumes are stored
     enabled: bool = True
 
 

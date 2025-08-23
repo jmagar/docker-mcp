@@ -9,6 +9,7 @@ hosts:
     description: "Production Docker host"  # Optional: Human-readable description
     tags: ["production", "web"]       # Optional: Tags for categorization
     compose_path: "/mnt/user/compose" # Optional: Path for persistent compose files (auto-discovered if not set)
+    appdata_path: "/mnt/user/appdata" # Optional: Path for container data volumes (default: /opt/docker-appdata)
     enabled: true                     # Optional: Whether host is active (default: true)
     
   staging-1:
@@ -19,6 +20,7 @@ hosts:
     description: "Staging environment"
     tags: ["staging", "test"]
     compose_path: "/home/docker/compose"
+    appdata_path: "/home/docker/appdata"
     enabled: true
     
   development:
@@ -47,6 +49,7 @@ hosts:
 # - description: Human-readable description (optional)
 # - tags: List of tags for categorization (optional)
 # - compose_path: Path where compose files are stored (optional, auto-discovered)
+# - appdata_path: Path where container data volumes are stored (optional, default: /opt/docker-appdata)
 # - enabled: Whether host is active (optional, default: true)
 
 # Server settings are configured via .env file

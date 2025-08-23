@@ -359,7 +359,13 @@ class DockerMCPServer:
         recreate: bool = False,
         options: dict[str, Any] | None = None,
         lines: int = 100,
-        follow: bool = False
+        follow: bool = False,
+        # Migration-specific parameters
+        target_host_id: str = "",
+        stop_source: bool = True,
+        start_target: bool = True,
+        remove_source: bool = False,
+        dry_run: bool = False
     ) -> dict[str, Any]:
         """Consolidated Docker Compose stack management tool.
         
@@ -368,10 +374,11 @@ class DockerMCPServer:
         - deploy: Deploy a stack (requires: host_id, stack_name, compose_content)
         - up/down/restart/build: Manage stack lifecycle (requires: host_id, stack_name)
         - discover: Discover compose paths on a host (requires: host_id)
-        - logs: Get stack logs (requires: host_id, stack_name) [NEW CAPABILITY]
+        - logs: Get stack logs (requires: host_id, stack_name)
+        - migrate: Migrate stack between hosts (requires: host_id, target_host_id, stack_name)
         """
         # Validate action parameter
-        valid_actions = ["list", "deploy", "up", "down", "restart", "build", "pull", "discover", "logs"]
+        valid_actions = ["list", "deploy", "up", "down", "restart", "build", "pull", "discover", "logs", "migrate"]
         if action not in valid_actions:
             return {
                 "success": False,
@@ -484,6 +491,31 @@ class DockerMCPServer:
                 except Exception as e:
                     self.logger.error("docker_compose logs error", host_id=host_id, stack_name=stack_name, error=str(e))
                     return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
+            
+            elif action == "migrate":
+                # Validate required parameters for migrate action
+                if not host_id:
+                    return {"success": False, "error": "host_id (source) is required for migrate action"}
+                if not target_host_id:
+                    return {"success": False, "error": "target_host_id is required for migrate action"}
+                if not stack_name:
+                    return {"success": False, "error": "stack_name is required for migrate action"}
+                
+                # Call the migration service
+                result = await self.stack_service.migrate_stack(
+                    source_host_id=host_id,
+                    target_host_id=target_host_id,
+                    stack_name=stack_name,
+                    stop_source=stop_source,
+                    start_target=start_target,
+                    remove_source=remove_source,
+                    dry_run=dry_run
+                )
+                
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, 'structured_content'):
+                    return result.structured_content or {"success": True, "data": "Migration completed"}
+                return result
                 
         except Exception as e:
             self.logger.error("docker_compose tool error", action=action, host_id=host_id, stack_name=stack_name, error=str(e))

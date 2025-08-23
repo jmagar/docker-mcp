@@ -102,6 +102,7 @@ Deploy and manage Docker Compose stacks.
 - `logs` - View stack logs
 - `build` / `pull` - Build or update images
 - `discover` - Find compose files on host
+- `migrate` - Migrate stack between hosts with data
 
 **Schema for `deploy` action:**
 ```json
@@ -126,6 +127,20 @@ Deploy and manage Docker Compose stacks.
   "stack_name": "wordpress",        // Required: stack name
   "lines": 100,                     // Optional: number of lines
   "follow": false                   // Optional: stream logs
+}
+```
+
+**Schema for `migrate` action:**
+```json
+{
+  "action": "migrate",
+  "host_id": "production-1",        // Required: source host
+  "target_host_id": "production-2",  // Required: destination host
+  "stack_name": "wordpress",        // Required: stack to migrate
+  "stop_source": true,              // Optional: stop on source first
+  "start_target": true,             // Optional: start on target after
+  "remove_source": false,           // Optional: remove from source
+  "dry_run": false                  // Optional: test without changes
 }
 ```
 
@@ -165,6 +180,37 @@ Use with: `docker_compose` action: `deploy`
 - Check what's using ports: `docker_hosts` with action `ports`
 - Restart services: `docker_container` with action `restart`
 
+### Migrate Stack to New Host
+Perfect for hardware upgrades or load balancing:
+
+1. **Test the migration** (dry run):
+   ```json
+   {
+     "action": "migrate",
+     "host_id": "old-server",
+     "target_host_id": "new-server",
+     "stack_name": "wordpress",
+     "dry_run": true
+   }
+   ```
+
+2. **Perform the actual migration**:
+   - Automatically stops the stack on source
+   - **Verifies all containers are completely stopped** (prevents data corruption)
+   - Waits for filesystem sync to ensure data consistency
+   - Archives all volumes and data (excludes cache, logs, node_modules)
+   - **Verifies archive integrity** before transfer
+   - Transfers via rsync with compression
+   - Updates paths for the target host
+   - Deploys and starts on the target
+   - Preserves all your data and configurations
+
+The migration intelligently handles:
+- Named Docker volumes
+- Bind mounts
+- Compose configurations
+- Environment-specific paths
+
 ## 🔧 Configuration (Optional!)
 
 The beauty of Docker Manager MCP is that **you don't need to configure anything**. It automatically:
@@ -182,6 +228,8 @@ hosts:
     hostname: 192.168.1.100
     user: myuser
     description: "My Docker server"
+    compose_path: /opt/compose      # Where to store compose files
+    appdata_path: /opt/appdata      # Where to store container data
 ```
 
 ### Use Environment Variables
