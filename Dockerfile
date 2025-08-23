@@ -15,17 +15,13 @@ ENV PATH="/root/.cargo/bin:$PATH"
 # Set working directory for build
 WORKDIR /build
 
-# Copy dependency files
-COPY pyproject.toml ./
+# Copy project files
+COPY pyproject.toml uv.lock ./
 COPY README.md ./
-
-# Copy source code for installation
 COPY docker_mcp/ ./docker_mcp/
 
-# Create virtual environment and install dependencies with uv
-RUN uv venv /opt/venv && \
-    . /opt/venv/bin/activate && \
-    uv pip install .
+# Install dependencies with uv sync
+RUN uv sync --frozen --no-dev
 
 # Production stage
 FROM python:3.11-slim
@@ -59,7 +55,7 @@ RUN groupadd --gid 1000 dockermcp && \
     useradd --uid 1000 --gid dockermcp --shell /bin/bash --create-home dockermcp
 
 # Copy Python virtual environment from builder stage
-COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /build/.venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Set working directory
