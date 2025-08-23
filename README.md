@@ -137,7 +137,7 @@ Deploy and manage Docker Compose stacks.
   "host_id": "production-1",        // Required: source host
   "target_host_id": "production-2",  // Required: destination host
   "stack_name": "wordpress",        // Required: stack to migrate
-  "stop_source": true,              // Optional: stop on source first
+  "skip_stop_source": false,        // Optional: DANGEROUS - skip stopping (default: false, always stops)
   "start_target": true,             // Optional: start on target after
   "remove_source": false,           // Optional: remove from source
   "dry_run": false                  // Optional: test without changes
@@ -195,7 +195,7 @@ Perfect for hardware upgrades or load balancing:
    ```
 
 2. **Perform the actual migration**:
-   - Automatically stops the stack on source
+   - **ALWAYS stops the stack on source by default** (safety first!)
    - **Verifies all containers are completely stopped** (prevents data corruption)
    - Waits for filesystem sync to ensure data consistency
    - Archives all volumes and data (excludes cache, logs, node_modules)

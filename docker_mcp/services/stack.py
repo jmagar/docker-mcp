@@ -223,7 +223,7 @@ class StackService:
         source_host_id: str,
         target_host_id: str,
         stack_name: str,
-        stop_source: bool = True,
+        skip_stop_source: bool = False,  # Changed: must explicitly skip stopping
         start_target: bool = True,
         remove_source: bool = False,
         dry_run: bool = False,
@@ -231,17 +231,18 @@ class StackService:
         """Migrate a Docker Compose stack between hosts with data integrity protection.
         
         This method ensures safe migration by:
-        1. Verifying all containers are stopped before archiving (prevents corruption)
-        2. Waiting for filesystem sync after stopping containers
-        3. Verifying archive integrity before transfer
-        4. Using atomic operations where possible
-        5. Providing dry-run mode for testing
+        1. ALWAYS stopping containers unless explicitly skipped (prevents corruption)
+        2. Verifying all containers are stopped before archiving
+        3. Waiting for filesystem sync after stopping containers
+        4. Verifying archive integrity before transfer
+        5. Using atomic operations where possible
+        6. Providing dry-run mode for testing
         
         Args:
             source_host_id: Source host ID
             target_host_id: Target host ID
             stack_name: Name of the stack to migrate
-            stop_source: Stop the stack on source before migration (recommended)
+            skip_stop_source: Skip stopping the stack (DANGEROUS - only if already stopped)
             start_target: Start the stack on target after migration
             remove_source: Remove stack from source after successful migration
             dry_run: Perform dry run without actual changes
@@ -251,7 +252,7 @@ class StackService:
             
         Raises:
             Will return error ToolResult if:
-            - Containers are still running and stop_source=False
+            - Containers are still running and skip_stop_source=True
             - Archive creation or verification fails
             - Transfer fails
         """
@@ -309,8 +310,8 @@ class StackService:
             migration_steps.append("🔍 Analyzing volume configuration...")
             volumes_info = await self.migration_utils.parse_compose_volumes(compose_content)
             
-            # Step 3: Stop source stack and verify all containers are down
-            if stop_source and not dry_run:
+            # Step 3: Stop source stack (default behavior) and verify all containers are down
+            if not skip_stop_source and not dry_run:
                 migration_steps.append(f"⏹️  Stopping stack on {source_host_id}...")
                 stop_result = await self.stack_tools.manage_stack(
                     source_host_id, stack_name, "down", {"remove_volumes": False}
@@ -345,8 +346,8 @@ class StackService:
                 migration_steps.append("⏳ Waiting for filesystem sync...")
                 await asyncio.sleep(2)
                 
-            elif not stop_source and not dry_run:
-                # If not stopping, verify containers are already down
+            elif skip_stop_source and not dry_run:
+                # If explicitly skipping stop, verify containers are already down
                 migration_steps.append("⚠️  Checking if stack containers are running...")
                 check_cmd = ssh_cmd_source + [f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"]
                 check_result = subprocess.run(check_cmd, capture_output=True, text=True, check=False)  # nosec B603
@@ -357,14 +358,14 @@ class StackService:
                         content=[TextContent(
                             type="text",
                             text=f"Error: Stack has running containers: {', '.join(running_containers)}\n"
-                                 f"You must stop the stack before migration to prevent data corruption.\n"
-                                 f"Use stop_source=true or manually stop the stack first."
+                                 f"Migration requires all containers to be stopped to prevent data corruption.\n"
+                                 f"Remove skip_stop_source flag or manually stop the stack first."
                         )],
                         structured_content={
                             "success": False,
                             "error": "Cannot migrate with running containers",
                             "running_containers": running_containers,
-                            "suggestion": "Set stop_source=true or stop stack manually",
+                            "suggestion": "Remove skip_stop_source flag or stop stack manually",
                         },
                     )
             

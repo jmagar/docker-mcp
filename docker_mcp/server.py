@@ -362,7 +362,7 @@ class DockerMCPServer:
         follow: bool = False,
         # Migration-specific parameters
         target_host_id: str = "",
-        stop_source: bool = True,
+        skip_stop_source: bool = False,  # Changed: must explicitly skip stopping
         start_target: bool = True,
         remove_source: bool = False,
         dry_run: bool = False
@@ -506,7 +506,7 @@ class DockerMCPServer:
                     source_host_id=host_id,
                     target_host_id=target_host_id,
                     stack_name=stack_name,
-                    stop_source=stop_source,
+                    skip_stop_source=skip_stop_source,
                     start_target=start_target,
                     remove_source=remove_source,
                     dry_run=dry_run
