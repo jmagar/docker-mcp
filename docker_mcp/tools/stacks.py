@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,7 @@ from ..core.compose_manager import ComposeManager
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
+from ..core.subprocess_manager import run_ssh_command, LONG_TIMEOUT
 from ..models.container import StackInfo
 
 logger = structlog.get_logger()
@@ -333,46 +333,25 @@ class StackTools:
         if not host_config:
             raise DockerCommandError(f"Host {host_id} not found in configuration")
 
-        # Build SSH command
-        ssh_cmd = self._build_ssh_command(host_config)
-
         # Build remote command
         remote_cmd = self._build_remote_command(project_directory, compose_cmd, environment)
-
-        ssh_cmd.extend([f"{host_config.user}@{host_config.hostname}", remote_cmd])
 
         # Debug logging
         logger.debug(
             "Executing SSH command",
             host_id=host_id,
-            ssh_command=" ".join(ssh_cmd),
             remote_command=remote_cmd,
         )
 
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd,
-                    check=False,
-                    text=True,
-                    capture_output=True,
-                    timeout=300,  # 5 minute timeout for deployment
-                ),
-            )
-
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() or result.stdout.strip()
-                raise DockerCommandError(f"Docker compose command failed: {error_msg}")
-
-            return result.stdout.strip()
-
-        except subprocess.TimeoutExpired as e:
-            raise DockerCommandError(f"Docker compose command timed out: {e}") from e
-        except Exception as e:
-            if isinstance(e, DockerCommandError):
-                raise
-            raise DockerCommandError(f"Failed to execute docker compose: {e}") from e
+        # Execute command via SSH with timeout
+        result = await run_ssh_command(
+            host_config,
+            remote_cmd,
+            timeout=LONG_TIMEOUT,  # 5 minute timeout for deployment
+            check=True,  # Will raise DockerCommandError if fails
+        )
+        
+        return result.stdout.strip()
 
     def _extract_host_id_from_context(self, context_name: str) -> str:
         """Extract host_id from context_name."""
@@ -381,27 +360,6 @@ class StackTools:
             if context_name.startswith("docker-mcp-")
             else context_name
         )
-
-    def _build_ssh_command(self, host_config) -> list[str]:
-        """Build base SSH command with options."""
-        ssh_cmd = ["ssh"]
-
-        # Add port if not default
-        if host_config.port != 22:
-            ssh_cmd.extend(["-p", str(host_config.port)])
-
-        # Add identity file if specified
-        if host_config.identity_file:
-            ssh_cmd.extend(["-i", host_config.identity_file])
-
-        # Add common SSH options
-        ssh_cmd.extend([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-        ])
-
-        return ssh_cmd
 
     def _build_remote_command(
         self, project_directory: str, compose_cmd: list[str], environment: dict[str, str] | None

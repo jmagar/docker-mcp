@@ -14,6 +14,7 @@ from mcp.types import TextContent
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.migration import MigrationManager
+from ..core.subprocess_manager import run_ssh_command, LONG_TIMEOUT, DEFAULT_TIMEOUT
 from ..tools.stacks import StackTools
 
 
@@ -288,18 +289,16 @@ class StackService:
             migration_steps.append("📋 Retrieving compose configuration...")
             compose_file_path = f"{source_host.compose_path or '/opt/compose'}/{stack_name}/docker-compose.yml"
             
-            # Build SSH command for source
-            ssh_cmd_source = ["ssh", "-o", "StrictHostKeyChecking=no"]
-            if source_host.identity_file:
-                ssh_cmd_source.extend(["-i", source_host.identity_file])
-            ssh_cmd_source.append(f"{source_host.user}@{source_host.hostname}")
-            
             # Read compose file
-            read_cmd = ssh_cmd_source + [f"cat {compose_file_path}"]
-            import subprocess
-            result = subprocess.run(read_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            read_cmd = f"cat {compose_file_path}"
+            result = await run_ssh_command(
+                source_host,
+                read_cmd,
+                timeout=DEFAULT_TIMEOUT,
+                check=False,
+            )
             
-            if result.returncode != 0:
+            if not result.success:
                 return ToolResult(
                     content=[TextContent(type="text", text=f"Error: Failed to read compose file: {result.stderr}")],
                     structured_content={"success": False, "error": f"Compose file not found: {result.stderr}"},
@@ -325,8 +324,13 @@ class StackService:
                 
                 # Verify all containers are actually stopped
                 migration_steps.append("🔍 Verifying all containers are stopped...")
-                verify_cmd = ssh_cmd_source + [f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"]
-                verify_result = subprocess.run(verify_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                verify_cmd = f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'" 
+                verify_result = await run_ssh_command(
+                    source_host,
+                    verify_cmd,
+                    timeout=DEFAULT_TIMEOUT,
+                    check=False,
+                )
                 
                 if verify_result.stdout.strip():
                     running_containers = verify_result.stdout.strip().split('\n')
@@ -350,8 +354,13 @@ class StackService:
             elif skip_stop_source and not dry_run:
                 # If explicitly skipping stop, verify containers are already down
                 migration_steps.append("⚠️  Checking if stack containers are running...")
-                check_cmd = ssh_cmd_source + [f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"]
-                check_result = subprocess.run(check_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                check_cmd = f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"
+                check_result = await run_ssh_command(
+                    source_host,
+                    check_cmd,
+                    timeout=DEFAULT_TIMEOUT,
+                    check=False,
+                )
                 
                 if check_result.stdout.strip():
                     running_containers = check_result.stdout.strip().split('\n')
