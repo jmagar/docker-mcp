@@ -9,11 +9,12 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Annotated, Optional, List, Dict
 
 import structlog
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
+from pydantic import Field
 
 try:
     from .core.config_loader import DockerMCPConfig, load_config
@@ -26,6 +27,7 @@ try:
         TimingMiddleware,
         RateLimitingMiddleware
     )
+    from .models.params import DockerHostsParams, DockerContainerParams, DockerComposeParams
     from .services import ConfigService, ContainerService, HostService, StackService
     from .tools.logs import LogTools
 except ImportError:
@@ -39,6 +41,7 @@ except ImportError:
         TimingMiddleware,
         RateLimitingMiddleware
     )
+    from docker_mcp.models.params import DockerHostsParams, DockerContainerParams, DockerComposeParams
     from docker_mcp.services import ConfigService, ContainerService, HostService, StackService
     from docker_mcp.tools.logs import LogTools
 
@@ -154,23 +157,23 @@ class DockerMCPServer:
     # Consolidated Tools Implementation
     
     async def docker_hosts(
-        self, 
-        action: str,
-        host_id: str = "",
-        ssh_host: str = "",
-        ssh_user: str = "",
-        ssh_port: int = 22,
-        ssh_key_path: str | None = None,
-        description: str = "",
-        tags: list[str] | None = None,
-        test_connection: bool = True,
-        include_stopped: bool = False,
-        compose_path: str | None = None,
-        enabled: bool = True,
-        ssh_config_path: str | None = None,
-        selected_hosts: str | None = None,
-        compose_path_overrides: dict[str, str] | None = None,
-        auto_confirm: bool = False
+        self,
+        action: Annotated[str, Field(description="Action to perform (list, add, ports, compose_path, import_ssh)")],
+        host_id: Annotated[str, Field(default="", description="Host identifier **(used by: add, ports, compose_path)**")] = "",
+        ssh_host: Annotated[str, Field(default="", description="SSH hostname or IP address **(used by: add)**")] = "",
+        ssh_user: Annotated[str, Field(default="", description="SSH username **(used by: add)**")] = "",
+        ssh_port: Annotated[int, Field(default=22, ge=1, le=65535, description="SSH port number **(used by: add)**")] = 22,
+        ssh_key_path: Annotated[Optional[str], Field(default=None, description="Path to SSH private key file **(used by: add)**")] = None,
+        description: Annotated[str, Field(default="", description="Host description **(used by: add)**")] = "",
+        tags: Annotated[List[str], Field(default_factory=list, description="Host tags **(used by: add)**")] = None,
+        test_connection: Annotated[bool, Field(default=True, description="Test connection when adding host **(used by: add)**")] = True,
+        include_stopped: Annotated[bool, Field(default=False, description="Include stopped containers in listings **(used by: ports)**")] = False,
+        compose_path: Annotated[Optional[str], Field(default=None, description="Docker Compose file path **(used by: add, compose_path)**")] = None,
+        enabled: Annotated[bool, Field(default=True, description="Whether host is enabled **(used by: add)**")] = True,
+        ssh_config_path: Annotated[Optional[str], Field(default=None, description="Path to SSH config file **(used by: import_ssh)**")] = None,
+        selected_hosts: Annotated[Optional[str], Field(default=None, description="Comma-separated list of hosts to select **(used by: import_ssh)**")] = None,
+        compose_path_overrides: Annotated[Dict[str, str], Field(default_factory=dict, description="Per-host compose path overrides **(used by: import_ssh)**")] = None,
+        auto_confirm: Annotated[bool, Field(default=False, description="Auto-confirm operations without prompting **(used by: add, import_ssh)**")] = False
     ) -> dict[str, Any]:
         """Consolidated Docker hosts management tool.
         
@@ -181,6 +184,12 @@ class DockerMCPServer:
         - compose_path: Update host compose path (requires: host_id, compose_path)
         - import_ssh: Import hosts from SSH config
         """
+        # Handle default values for list parameters
+        if tags is None:
+            tags = []
+        if compose_path_overrides is None:
+            compose_path_overrides = {}
+            
         # Validate action parameter
         valid_actions = ["list", "add", "ports", "compose_path", "import_ssh"]
         if action not in valid_actions:
@@ -254,16 +263,16 @@ class DockerMCPServer:
 
     async def docker_container(
         self,
-        action: str,
-        host_id: str = "",
-        container_id: str = "",
-        all_containers: bool = False,
-        limit: int = 20,
-        offset: int = 0,
-        force: bool = False,
-        timeout: int = 10,
-        lines: int = 100,
-        follow: bool = False
+        action: Annotated[str, Field(description="Action to perform (list, info, start, stop, restart, build, logs)")],
+        host_id: Annotated[str, Field(default="", description="Host identifier **(required for all actions)**")] = "",
+        container_id: Annotated[str, Field(default="", description="Container identifier **(used by: info, start, stop, restart, build, logs)**")] = "",
+        all_containers: Annotated[bool, Field(default=False, description="Include all containers, not just running **(used by: list)**")] = False,
+        limit: Annotated[int, Field(default=20, ge=1, le=1000, description="Maximum number of results to return **(used by: list)**")] = 20,
+        offset: Annotated[int, Field(default=0, ge=0, description="Number of results to skip **(used by: list)**")] = 0,
+        follow: Annotated[bool, Field(default=False, description="Follow log output **(used by: logs)**")] = False,
+        lines: Annotated[int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve **(used by: logs)**")] = 100,
+        force: Annotated[bool, Field(default=False, description="Force the operation **(used by: stop)**")] = False,
+        timeout: Annotated[int, Field(default=10, ge=1, le=300, description="Operation timeout in seconds **(used by: start, stop, restart)**")] = 10
     ) -> dict[str, Any]:
         """Consolidated Docker container management tool.
         
@@ -369,22 +378,21 @@ class DockerMCPServer:
 
     async def docker_compose(
         self,
-        action: str,
-        host_id: str = "",
-        stack_name: str = "",
-        compose_content: str = "",
-        environment: dict[str, str] | None = None,
-        pull_images: bool = True,
-        recreate: bool = False,
-        options: dict[str, Any] | None = None,
-        lines: int = 100,
-        follow: bool = False,
-        # Migration-specific parameters
-        target_host_id: str = "",
-        skip_stop_source: bool = False,  # Changed: must explicitly skip stopping
-        start_target: bool = True,
-        remove_source: bool = False,
-        dry_run: bool = False
+        action: Annotated[str, Field(description="Action to perform (list, deploy, up, down, restart, build, discover, logs, migrate)")],
+        host_id: Annotated[str, Field(default="", description="Host identifier **(required for all actions)**")] = "",
+        stack_name: Annotated[str, Field(default="", description="Stack name **(used by: deploy, up, down, restart, build, logs, migrate)**")] = "",
+        compose_content: Annotated[str, Field(default="", description="Docker Compose file content **(used by: deploy)**")] = "",
+        environment: Annotated[Dict[str, str], Field(default_factory=dict, description="Environment variables **(used by: deploy, up)**")] = None,
+        pull_images: Annotated[bool, Field(default=True, description="Pull images before deploying **(used by: deploy, up)**")] = True,
+        recreate: Annotated[bool, Field(default=False, description="Recreate containers **(used by: up)**")] = False,
+        follow: Annotated[bool, Field(default=False, description="Follow log output **(used by: logs)**")] = False,
+        lines: Annotated[int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve **(used by: logs)**")] = 100,
+        dry_run: Annotated[bool, Field(default=False, description="Perform a dry run without making changes **(used by: migrate)**")] = False,
+        options: Annotated[Optional[Dict[str, str]], Field(default=None, description="Additional options for the operation **(used by: up, down, restart, build)**")] = None,
+        target_host_id: Annotated[str, Field(default="", description="Target host ID for migration **(used by: migrate)**")] = "",
+        remove_source: Annotated[bool, Field(default=False, description="Remove source stack after migration **(used by: migrate)**")] = False,
+        skip_stop_source: Annotated[bool, Field(default=False, description="Skip stopping source stack before migration **(used by: migrate)**")] = False,
+        start_target: Annotated[bool, Field(default=True, description="Start target stack after migration **(used by: migrate)**")] = True
     ) -> dict[str, Any]:
         """Consolidated Docker Compose stack management tool.
         
@@ -396,6 +404,12 @@ class DockerMCPServer:
         - logs: Get stack logs (requires: host_id, stack_name)
         - migrate: Migrate stack between hosts (requires: host_id, target_host_id, stack_name)
         """
+        # Handle default values for dict parameters
+        if environment is None:
+            environment = {}
+        if options is None:
+            options = {}
+            
         # Validate action parameter
         valid_actions = ["list", "deploy", "up", "down", "restart", "build", "pull", "discover", "logs", "migrate"]
         if action not in valid_actions:

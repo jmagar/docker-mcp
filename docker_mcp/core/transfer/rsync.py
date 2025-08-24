@@ -84,30 +84,34 @@ class RsyncTransfer(BaseTransfer):
         Returns:
             Transfer result with statistics
         """
-        # Build rsync command
-        rsync_cmd = ["rsync", "-avP"]
+        # Build SSH command to connect to source host
+        ssh_cmd = self.build_ssh_cmd(source_host)
         
+        # Build rsync options
+        rsync_opts = ["-avP"]
         if compress:
-            rsync_cmd.append("-z")
+            rsync_opts.append("-z")
         if delete:
-            rsync_cmd.append("--delete")
+            rsync_opts.append("--delete")
         if dry_run:
-            rsync_cmd.append("--dry-run")
+            rsync_opts.append("--dry-run")
         
-        # Add SSH options for source
-        if source_host.identity_file:
-            ssh_opts = f"-e 'ssh -i {source_host.identity_file}'"
-            rsync_cmd.append(ssh_opts)
-        
-        # Build source and target URLs
-        source_url = f"{source_host.user}@{source_host.hostname}:{source_path}"
+        # Build target URL for rsync running ON source host
         target_url = f"{target_host.user}@{target_host.hostname}:{target_path}"
         
-        rsync_cmd.extend([source_url, target_url])
+        # Build rsync command that will run on the source host
+        rsync_inner_cmd = f"rsync {' '.join(rsync_opts)} {source_path} {target_url}"
+        
+        # Handle SSH key for target host connection (nested SSH)
+        if target_host.identity_file:
+            rsync_inner_cmd = f"rsync {' '.join(rsync_opts)} -e 'ssh -i {target_host.identity_file}' {source_path} {target_url}"
+        
+        # Full command: SSH into source, then run rsync from there to target
+        rsync_cmd = ssh_cmd + [rsync_inner_cmd]
         
         self.logger.info(
             "Starting rsync transfer",
-            source=source_url,
+            source=f"{source_host.hostname}:{source_path}",
             target=target_url,
             compress=compress,
             delete=delete,
@@ -131,7 +135,7 @@ class RsyncTransfer(BaseTransfer):
         return {
             "success": True,
             "transfer_type": "rsync",
-            "source": source_url,
+            "source": f"{source_host.hostname}:{source_path}",
             "target": target_url,
             "stats": stats,
             "dry_run": dry_run,

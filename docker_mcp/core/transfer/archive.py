@@ -3,11 +3,13 @@
 import asyncio
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import structlog
 
 from ..exceptions import DockerMCPError
+from ..safety import MigrationSafety
 
 logger = structlog.get_logger()
 
@@ -56,6 +58,74 @@ class ArchiveUtils:
     
     def __init__(self):
         self.logger = logger.bind(component="archive_utils")
+        self.safety = MigrationSafety()
+    
+    def _find_common_parent(self, paths: list[str]) -> tuple[str, list[str]]:
+        """Find common parent directory and relative paths for archiving contents.
+        
+        Args:
+            paths: List of absolute paths
+            
+        Returns:
+            Tuple of (common_parent, relative_paths_for_contents)
+        """
+        if not paths:
+            return "/", []
+        
+        # Convert to Path objects
+        path_objects = [Path(p) for p in paths]
+        
+        # For archiving, we want to archive the CONTENTS of directories
+        # So we use the path itself as the parent and archive everything inside with "*"
+        if len(path_objects) == 1:
+            # Single path - use the path itself as parent, archive its contents
+            parent = str(path_objects[0])
+            # Use "." to archive all contents of the directory
+            relative_paths = ["."]
+        else:
+            # Multiple paths - find their common parent
+            try:
+                # Find the longest common prefix
+                common_parts = []
+                min_parts = min(len(p.parts) for p in path_objects)
+                
+                for i in range(min_parts):
+                    part = path_objects[0].parts[i]
+                    if all(p.parts[i] == part for p in path_objects):
+                        common_parts.append(part)
+                    else:
+                        break
+                
+                # Build parent from common parts
+                if common_parts:
+                    if len(common_parts) == 1 and common_parts[0] == "/":
+                        parent = "/"
+                    else:
+                        parent = "/" + "/".join(common_parts[1:])
+                else:
+                    parent = "/"
+                
+                # Calculate relative paths from parent
+                relative_paths = []
+                parent_path = Path(parent)
+                for p in path_objects:
+                    try:
+                        if parent_path == Path("/"):
+                            # Remove leading slash for relative path from root
+                            rel_path = str(p)[1:] if str(p).startswith("/") else str(p)
+                        else:
+                            rel_path = str(p.relative_to(parent_path))
+                        relative_paths.append(rel_path)
+                    except ValueError:
+                        # Path is not relative to parent, use absolute
+                        relative_paths.append(str(p))
+                        
+            except Exception:
+                # Fallback to using root as parent
+                parent = "/"
+                relative_paths = [str(p)[1:] if str(p).startswith("/") else str(p) for p in path_objects]
+        
+        return parent, relative_paths
     
     async def create_archive(
         self,
@@ -94,8 +164,11 @@ class ArchiveUtils:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         archive_file = f"{temp_dir}/{archive_name}_{timestamp}.tar.gz"
         
-        # Build tar command
-        tar_cmd = ["tar", "czf", archive_file] + exclude_flags + volume_paths
+        # Find common parent and convert to relative paths
+        common_parent, relative_paths = self._find_common_parent(volume_paths)
+        
+        # Build tar command with -C to change directory
+        tar_cmd = ["tar", "czf", archive_file, "-C", common_parent] + exclude_flags + relative_paths
         
         # Execute tar command on remote host
         remote_cmd = " ".join(tar_cmd)
@@ -104,7 +177,8 @@ class ArchiveUtils:
         self.logger.info(
             "Creating volume archive",
             archive_file=archive_file,
-            paths=volume_paths,
+            parent_dir=common_parent,
+            relative_paths=relative_paths,
             exclusions=len(all_exclusions),
         )
         
@@ -174,22 +248,21 @@ class ArchiveUtils:
             return False
     
     async def cleanup_archive(self, ssh_cmd: list[str], archive_path: str) -> None:
-        """Remove archive file.
+        """Remove archive file with safety validation.
         
         Args:
             ssh_cmd: SSH command parts for remote execution
             archive_path: Path to archive file to remove
         """
-        cleanup_cmd = ssh_cmd + [f"rm -f {archive_path}"]
-        
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                cleanup_cmd, check=False, capture_output=True, text=True
-            ),
-        )
-        
-        if result.returncode == 0:
-            self.logger.debug("Archive cleaned up", archive=archive_path)
-        else:
-            self.logger.warning("Failed to cleanup archive", archive=archive_path, error=result.stderr)
+        try:
+            success, message = await self.safety.safe_cleanup_archive(
+                ssh_cmd, archive_path, "Archive cleanup after migration"
+            )
+            
+            if success:
+                self.logger.debug("Archive cleaned up safely", archive=archive_path, message=message)
+            else:
+                self.logger.warning("Archive cleanup failed", archive=archive_path, error=message)
+                
+        except Exception as e:
+            self.logger.error("Archive cleanup error", archive=archive_path, error=str(e))
