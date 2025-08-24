@@ -13,6 +13,7 @@ from mcp.types import TextContent
 
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
+from ..core.filesystem_sync import FilesystemSync
 from ..core.migration import MigrationManager
 from ..tools.stacks import StackTools
 
@@ -25,6 +26,7 @@ class StackService:
         self.context_manager = context_manager
         self.stack_tools = StackTools(config, context_manager)
         self.migration_manager = MigrationManager()
+        self.filesystem_sync = FilesystemSync()
         self.logger = structlog.get_logger()
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
@@ -343,9 +345,31 @@ class StackService:
                         },
                     )
                 
-                # Wait a moment for filesystem sync
-                migration_steps.append("⏳ Waiting for filesystem sync...")
-                await asyncio.sleep(2)
+                # Get volume paths for sync verification
+                volume_paths_for_sync = await self.migration_manager.get_volume_locations(
+                    ssh_cmd_source, volumes_info["named_volumes"]
+                )
+                all_paths_for_sync = list(volume_paths_for_sync.values()) + volumes_info["bind_mounts"]
+                
+                # Perform filesystem sync verification
+                migration_steps.append("⏳ Verifying filesystem sync...")
+                try:
+                    sync_result = await self.filesystem_sync.wait_for_sync(
+                        ssh_cmd_source,
+                        all_paths_for_sync[:10],  # Limit to first 10 paths for performance
+                        method="auto",
+                    )
+                    migration_steps.append(
+                        f"✅ Filesystem sync verified ({sync_result.method} method, "
+                        f"{sync_result.attempts} attempts, {sync_result.duration:.1f}s)"
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        "Filesystem sync verification failed, using fallback delay",
+                        error=str(e),
+                    )
+                    migration_steps.append("⚠️  Using fallback sync delay (2s)")
+                    await asyncio.sleep(2)
                 
             elif skip_stop_source and not dry_run:
                 # If explicitly skipping stop, verify containers are already down

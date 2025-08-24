@@ -177,14 +177,54 @@ async def migrate_stack(
         if running_containers := check_result.stdout.strip():
             raise MigrationError(f"Containers still running: {running_containers}")
         
-        # 3. Wait for filesystem sync
-        await asyncio.sleep(2)
+        # 3. Verify filesystem sync with intelligent polling
+        sync_result = await self.filesystem_sync.wait_for_sync(
+            ssh_cmd_source,
+            volume_paths[:10],  # Limit paths for performance
+            method="auto",  # Automatically detect best method
+        )
     
     # 4. Archive integrity verification
     verify_cmd = ["tar", "tzf", archive_path, ">/dev/null", "2>&1", "&&", "echo", "OK"]
     if "FAILED" in verify_result.stdout:
         raise MigrationError("Archive integrity check failed")
 ```
+
+### Filesystem Sync Verification
+
+The system now uses intelligent filesystem sync verification instead of hardcoded delays:
+
+```python
+from docker_mcp.core.filesystem_sync import FilesystemSync
+
+# Initialize with configurable parameters
+filesystem_sync = FilesystemSync(
+    max_wait_time=30.0,      # Maximum wait time (seconds)
+    initial_delay=0.5,        # Initial polling delay
+    max_delay=5.0,           # Maximum polling delay
+    backoff_factor=1.5,      # Exponential backoff multiplier
+)
+
+# Verify filesystem sync after stopping containers
+sync_result = await filesystem_sync.wait_for_sync(
+    ssh_cmd,
+    paths_to_verify,
+    method="auto",  # Options: "auto", "sync", "checksum", "size"
+)
+```
+
+**Sync Verification Methods:**
+1. **sync** - Uses system `sync` command with polling verification
+2. **checksum** - Monitors file checksums for stability
+3. **size** - Monitors file sizes for stability
+4. **auto** - Automatically selects best available method
+
+**Features:**
+- Exponential backoff to reduce system load
+- Configurable timeouts to prevent hanging
+- Multiple verification methods for different systems
+- Fallback to simple delay if advanced methods fail
+- Path accessibility verification after sync
 
 **Safety Principles:**
 - **Default to Safe**: Containers stopped by default unless explicitly skipped
