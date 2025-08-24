@@ -8,6 +8,7 @@ across multiple remote hosts via SSH connections.
 import argparse
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -42,6 +43,24 @@ except ImportError:
     from docker_mcp.tools.logs import LogTools
 
 
+def get_data_dir() -> Path:
+    """Get data directory based on environment."""
+    if os.getenv("DOCKER_CONTAINER"):
+        return Path("/app/data")
+    else:
+        # Local development path
+        return Path.home() / ".docker-mcp" / "data"
+
+
+def get_config_dir() -> Path:
+    """Get config directory based on environment.""" 
+    if os.getenv("DOCKER_CONTAINER"):
+        return Path("/app/config")
+    else:
+        # Local development - use project config dir
+        return Path("config")
+
+
 class DockerMCPServer:
     """FastMCP server for Docker management via Docker contexts."""
 
@@ -51,7 +70,7 @@ class DockerMCPServer:
         
         # Setup dual logging system first (before any logging)
         setup_logging(
-            log_dir=os.getenv("LOG_DIR", "logs"),
+            log_dir=os.getenv("LOG_DIR", str(get_data_dir() / "logs")),
             log_level=os.getenv("LOG_LEVEL"),
             max_file_size_mb=int(os.getenv("LOG_FILE_SIZE_MB", "10"))
         )

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     
     ports:
-      - "8011:8000"
+      - "${FASTMCP_PORT:-8011}:${FASTMCP_PORT:-8011}"
     
     volumes:
       # Docker MCP SSH keys only - mounted read-only for security

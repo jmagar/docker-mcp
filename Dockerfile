@@ -73,6 +73,7 @@ USER dockermcp
 ENV FASTMCP_HOST=0.0.0.0 \
     FASTMCP_PORT=8000 \
     LOG_LEVEL=INFO \
+    DOCKER_CONTAINER=true \
     PYTHONPATH=/app
 
 # Expose port

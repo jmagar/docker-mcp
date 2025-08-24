@@ -508,13 +508,37 @@ print_completion() {
     echo
 }
 
+setup_ssh_with_standalone_script() {
+    echo -e "${BLUE}Setting up SSH keys...${NC}"
+    echo
+    
+    local script_path="$(dirname "$0")/scripts/setup-ssh-keys.sh"
+    
+    if [ -f "$script_path" ]; then
+        print_info "Using standalone SSH setup script"
+        if "$script_path" --batch; then
+            print_success "SSH key distribution completed successfully"
+        else
+            print_warning "SSH setup script encountered issues, falling back to embedded functions"
+            generate_ssh_keys
+            copy_ssh_keys
+            generate_hosts_config
+        fi
+    else
+        print_info "Standalone script not found, using embedded SSH setup"
+        generate_ssh_keys
+        copy_ssh_keys
+        generate_hosts_config
+    fi
+    
+    echo
+}
+
 main() {
     print_header
     check_prerequisites
     create_directories
-    generate_ssh_keys
-    copy_ssh_keys
-    generate_hosts_config
+    setup_ssh_with_standalone_script
     download_compose_file
     start_services
     print_completion

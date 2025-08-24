@@ -27,7 +27,7 @@ def setup_logging(
         max_file_size_mb: Max file size before truncation (no backup files kept)
     """
     log_dir = Path(log_dir)
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     
     # Get log level from environment or parameter
     if log_level is None:
@@ -126,5 +126,5 @@ def get_middleware_logger() -> Any:
 def ensure_log_directory(log_dir: Path | str = Path("logs")) -> Path:
     """Ensure log directory exists and return Path object."""
     log_dir = Path(log_dir)
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
