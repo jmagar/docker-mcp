@@ -3,15 +3,52 @@
 # Docker Manager MCP - Automated Installer
 # This script sets up Docker Manager MCP with automatic SSH key configuration
 # Usage: curl -sSL https://raw.githubusercontent.com/jmagar/docker-mcp/main/install.sh | bash
+#
+# For security-conscious users, download and inspect first:
+#   curl -sSL https://raw.githubusercontent.com/jmagar/docker-mcp/main/install.sh -o install.sh
+#   # Inspect the script
+#   bash install.sh
 
-set -e
+set -euo pipefail
+
+# Global installation state tracking
+INSTALL_STATE_FILE=""
+INSTALLATION_STARTED=false
+CLEANUP_ON_EXIT=true
+
+# Installation options (can be set via environment variables)
+VERBOSE=${VERBOSE:-false}
+QUIET=${QUIET:-false}
+DRY_RUN=${DRY_RUN:-false}
+SKIP_SSH_COPY=${SKIP_SSH_COPY:-false}
+FORCE_REINSTALL=${FORCE_REINSTALL:-false}
+VERIFY_CHECKSUMS=${VERIFY_CHECKSUMS:-true}
 
 # Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# Detect OS and set platform-specific variables
+OS_TYPE="unknown"
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    OS_TYPE="linux"
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+    OS_TYPE="macos"
+elif [[ "$OSTYPE" == "freebsd"* ]] || [[ "$OSTYPE" == "openbsd"* ]] || [[ "$OSTYPE" == "netbsd"* ]]; then
+    OS_TYPE="bsd"
+fi
+
+# Platform-specific sed command
+if [[ "$OS_TYPE" == "macos" ]] || [[ "$OS_TYPE" == "bsd" ]]; then
+    SED_INPLACE="sed -i ''"
+else
+    SED_INPLACE="sed -i"
+fi
 
 # Configuration
 DOCKER_MCP_DIR="${HOME}/.docker-mcp"
@@ -22,7 +59,7 @@ DATA_DIR="${DOCKER_MCP_DIR}/data"
 COMPOSE_URL="https://raw.githubusercontent.com/jmagar/docker-mcp/main/docker-compose.yaml"
 EXAMPLE_CONFIG_URL="https://raw.githubusercontent.com/jmagar/docker-mcp/main/config/hosts.example.yml"
 
-# Functions
+# Expected checksums (update these when files change)\nCOMPOSE_CHECKSUM=\"\"\nEXAMPLE_CONFIG_CHECKSUM=\"\"\n\n# Cleanup and error handling functions\ncleanup_on_error() {\n    local exit_code=$?\n    if [[ $exit_code -ne 0 ]] && [[ \"$CLEANUP_ON_EXIT\" == \"true\" ]] && [[ \"$INSTALLATION_STARTED\" == \"true\" ]]; then\n        print_error \"Installation failed with exit code $exit_code. Cleaning up...\"\n        \n        if [[ -n \"$INSTALL_STATE_FILE\" ]] && [[ -f \"$INSTALL_STATE_FILE\" ]]; then\n            cleanup_partial_installation\n        fi\n    fi\n}\n\ncleanup_partial_installation() {\n    print_info \"Performing cleanup of partial installation...\"\n    \n    # Stop services if they were started\n    if [[ -f \"${DOCKER_MCP_DIR}/docker-compose.yaml\" ]]; then\n        cd \"${DOCKER_MCP_DIR}\" 2>/dev/null || true\n        if command -v docker-compose &> /dev/null; then\n            docker-compose down 2>/dev/null || true\n        else\n            docker compose down 2>/dev/null || true\n        fi\n    fi\n    \n    # Remove created directories if they're empty or only contain our files\n    if [[ -d \"$DOCKER_MCP_DIR\" ]]; then\n        # Only remove if we created it (check if it contains our marker file)\n        if [[ -f \"${DOCKER_MCP_DIR}/.docker-mcp-install\" ]]; then\n            print_info \"Removing Docker MCP directory: $DOCKER_MCP_DIR\"\n            rm -rf \"$DOCKER_MCP_DIR\" 2>/dev/null || true\n        fi\n    fi\n    \n    rm -f \"$INSTALL_STATE_FILE\" 2>/dev/null || true\n}\n\n# Set up trap handlers\ntrap cleanup_on_error EXIT ERR\ntrap 'echo \"Installation interrupted by user\"; exit 130' INT TERM\n\n# Logging functions\nlog_verbose() {\n    if [[ \"$VERBOSE\" == \"true\" ]] && [[ \"$QUIET\" != \"true\" ]]; then\n        echo -e \"${CYAN}[VERBOSE]${NC} $1\" >&2\n    fi\n}\n\nlog_step() {\n    if [[ \"$QUIET\" != \"true\" ]]; then\n        echo -e \"${MAGENTA}[STEP]${NC} $1\"\n    fi\n}\n\n# Functions
 print_header() {
     echo -e "${BLUE}========================================${NC}"
     echo -e "${BLUE}Docker Manager MCP Installer${NC}"
@@ -401,7 +438,7 @@ download_compose_file() {
     
     if curl -sSL "$COMPOSE_URL" -o "$compose_file"; then
         # Update paths in compose file
-        # Cross-platform sed for path updates\n        if [[ "$OSTYPE" == "darwin"* ]] || [[ "$OSTYPE" == "freebsd"* ]] || [[ "$OSTYPE" == "openbsd"* ]]; then\n            sed -i '' "s|~/.ssh|${DOCKER_MCP_DIR}/ssh|g" "$compose_file"\n        else\n            sed -i "s|~/.ssh|${DOCKER_MCP_DIR}/ssh|g" "$compose_file"\n        fi
+        sed -i.bak "s|~/.ssh|${DOCKER_MCP_DIR}/ssh|g" "$compose_file"
         sed -i.bak "s|./config|${CONFIG_DIR}|g" "$compose_file"
         sed -i.bak "s|./data|${DATA_DIR}|g" "$compose_file"
         rm -f "${compose_file}.bak"
