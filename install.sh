@@ -492,10 +492,10 @@ print_completion() {
     echo "  http://localhost:${FASTMCP_PORT:-8000}"
     echo
     echo "Useful commands:"
-    echo "  View logs:    cd ${DOCKER_MCP_DIR} && docker-compose logs -f"
-    echo "  Stop:         cd ${DOCKER_MCP_DIR} && docker-compose down"
-    echo "  Restart:      cd ${DOCKER_MCP_DIR} && docker-compose restart"
-    echo "  Update:       cd ${DOCKER_MCP_DIR} && docker-compose pull && docker-compose up -d"
+    echo "  View logs:    cd ${DOCKER_MCP_DIR} && docker compose logs -f"
+    echo "  Stop:         cd ${DOCKER_MCP_DIR} && docker compose down"
+    echo "  Restart:      cd ${DOCKER_MCP_DIR} && docker compose restart"
+    echo "  Update:       cd ${DOCKER_MCP_DIR} && docker compose pull && docker compose up -d"
     echo
     echo "To use with Claude Desktop, add to config:"
     echo '  {'

@@ -10,7 +10,7 @@
 Docker contexts cannot access remote filesystem paths. Stack deployment requires:
 - Compose file transfer to remote host
 - Directory creation and file persistence
-- Remote docker-compose command execution
+- Remote docker compose command execution
 
 ## Services Layer Pattern
 

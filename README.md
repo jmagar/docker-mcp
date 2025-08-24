@@ -322,16 +322,16 @@ Already included! The installer creates everything:
 
 ```bash
 # Check status
-cd ~/.docker-mcp && docker-compose ps
+cd ~/.docker-mcp && docker compose ps
 
 # View logs
-cd ~/.docker-mcp && docker-compose logs
+cd ~/.docker-mcp && docker compose logs
 
 # Update to latest
-cd ~/.docker-mcp && docker-compose pull && docker-compose up -d
+cd ~/.docker-mcp && docker compose pull && docker compose up -d
 
 # Stop service
-cd ~/.docker-mcp && docker-compose down
+cd ~/.docker-mcp && docker compose down
 ```
 
 ## 🔒 Security Built-In
