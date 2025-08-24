@@ -13,6 +13,7 @@ from ..core.compose_manager import ComposeManager
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
+from ..core.ssh_pool import get_connection_pool, SSHConnectionError
 from ..models.container import StackInfo
 
 logger = structlog.get_logger()
@@ -25,6 +26,7 @@ class StackTools:
         self.config = config
         self.context_manager = context_manager
         self.compose_manager = ComposeManager(config, context_manager)
+        self.ssh_pool = get_connection_pool()
 
     async def deploy_stack(
         self,
@@ -311,7 +313,7 @@ class StackTools:
         compose_args: list[str],
         environment: dict[str, str] | None = None,
     ) -> str:
-        """Execute docker compose command via SSH on remote host."""
+        """Execute docker compose command via SSH on remote host using connection pool."""
         # Extract directory from full path
         compose_path = Path(compose_file_path)
         project_directory = str(compose_path.parent)
@@ -333,42 +335,32 @@ class StackTools:
         if not host_config:
             raise DockerCommandError(f"Host {host_id} not found in configuration")
 
-        # Build SSH command
-        ssh_cmd = self._build_ssh_command(host_config)
-
-        # Build remote command
+        # Build remote command with environment variables
         remote_cmd = self._build_remote_command(project_directory, compose_cmd, environment)
-
-        ssh_cmd.extend([f"{host_config.user}@{host_config.hostname}", remote_cmd])
 
         # Debug logging
         logger.debug(
-            "Executing SSH command",
+            "Executing SSH command via connection pool",
             host_id=host_id,
-            ssh_command=" ".join(ssh_cmd),
             remote_command=remote_cmd,
         )
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd,
-                    check=False,
-                    text=True,
-                    capture_output=True,
-                    timeout=300,  # 5 minute timeout for deployment
-                ),
+            # Use connection pool for SSH execution
+            exit_code, stdout, stderr = await self.ssh_pool.execute_command(
+                host_config,
+                remote_cmd,
+                timeout=300,  # 5 minute timeout for deployment
             )
 
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() or result.stdout.strip()
+            if exit_code != 0:
+                error_msg = stderr.strip() or stdout.strip()
                 raise DockerCommandError(f"Docker compose command failed: {error_msg}")
 
-            return result.stdout.strip()
+            return stdout.strip()
 
-        except subprocess.TimeoutExpired as e:
-            raise DockerCommandError(f"Docker compose command timed out: {e}") from e
+        except SSHConnectionError as e:
+            raise DockerCommandError(f"SSH connection failed: {e}") from e
         except Exception as e:
             if isinstance(e, DockerCommandError):
                 raise

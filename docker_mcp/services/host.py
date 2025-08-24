@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 
 from ..core.config_loader import DockerHost, DockerMCPConfig
+from ..core.ssh_pool import get_connection_pool
 
 
 class HostService:
@@ -17,6 +18,7 @@ class HostService:
     def __init__(self, config: DockerMCPConfig):
         self.config = config
         self.logger = structlog.get_logger()
+        self.ssh_pool = get_connection_pool()
 
     async def add_docker_host(
         self,
@@ -134,3 +136,44 @@ class HostService:
             Host configuration or None if not found
         """
         return self.config.hosts.get(host_id)
+    
+    async def get_ssh_pool_stats(self) -> dict[str, Any]:
+        """Get SSH connection pool statistics.
+        
+        Returns:
+            Dictionary containing pool statistics including:
+            - connections_created: Total connections created
+            - connections_reused: Total connections reused
+            - connections_closed: Total connections closed
+            - connection_errors: Total connection errors
+            - active_pools: Number of active host pools
+            - total_connections: Total connections in all pools
+            - active_connections: Currently active connections
+        """
+        try:
+            stats = self.ssh_pool.get_stats()
+            
+            # Add additional computed metrics
+            stats["efficiency_rate"] = (
+                stats["connections_reused"] / max(1, stats["connections_created"] + stats["connections_reused"])
+            ) * 100 if stats["connections_created"] > 0 else 0
+            
+            stats["success"] = True
+            
+            self.logger.debug(
+                "SSH pool statistics retrieved",
+                **stats
+            )
+            
+            return stats
+            
+        except Exception as e:
+            self.logger.error("Failed to get SSH pool stats", error=str(e))
+            return {
+                "success": False,
+                "error": str(e),
+                "connections_created": 0,
+                "connections_reused": 0,
+                "active_pools": 0,
+                "total_connections": 0,
+            }

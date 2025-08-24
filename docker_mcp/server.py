@@ -19,6 +19,7 @@ try:
     from .core.docker_context import DockerContextManager
     from .core.file_watcher import HotReloadManager
     from .core.logging_config import setup_logging, get_server_logger
+    from .core.ssh_pool import initialize_connection_pool, close_connection_pool
     from .middleware import (
         LoggingMiddleware,
         ErrorHandlingMiddleware,
@@ -32,6 +33,7 @@ except ImportError:
     from docker_mcp.core.docker_context import DockerContextManager
     from docker_mcp.core.file_watcher import HotReloadManager
     from docker_mcp.core.logging_config import setup_logging, get_server_logger
+    from docker_mcp.core.ssh_pool import initialize_connection_pool, close_connection_pool
     from docker_mcp.middleware import (
         LoggingMiddleware,
         ErrorHandlingMiddleware,
@@ -161,9 +163,10 @@ class DockerMCPServer:
         - ports: List port mappings for a host (requires: host_id)
         - compose_path: Update host compose path (requires: host_id, compose_path)
         - import_ssh: Import hosts from SSH config
+        - ssh_pool_stats: Get SSH connection pool statistics
         """
         # Validate action parameter
-        valid_actions = ["list", "add", "ports", "compose_path", "import_ssh"]
+        valid_actions = ["list", "add", "ports", "compose_path", "import_ssh", "ssh_pool_stats"]
         if action not in valid_actions:
             return {
                 "success": False,
@@ -224,6 +227,10 @@ class DockerMCPServer:
                 if hasattr(result, 'content') and hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": str(result.content)}
                 return result
+            
+            elif action == "ssh_pool_stats":
+                # Get SSH connection pool statistics
+                return await self.host_service.get_ssh_pool_stats()
                 
         except Exception as e:
             self.logger.error("docker_hosts tool error", action=action, error=str(e))
@@ -808,6 +815,18 @@ def main() -> None:
         async def start_hot_reload():
             await server.start_hot_reload()
 
+        # Initialize SSH connection pool
+        async def initialize_pool():
+            # Configure connection pool with appropriate settings
+            pool_config = {
+                "max_connections_per_host": int(os.getenv("SSH_POOL_MAX_CONNECTIONS", "5")),
+                "max_idle_time": int(os.getenv("SSH_POOL_MAX_IDLE_TIME", "300")),
+                "max_lifetime": int(os.getenv("SSH_POOL_MAX_LIFETIME", "3600")),
+                "health_check_interval": int(os.getenv("SSH_POOL_HEALTH_CHECK_INTERVAL", "60")),
+            }
+            await initialize_connection_pool(**pool_config)
+            logger.info("SSH connection pool initialized", **pool_config)
+
         # Run hot reload starter in the background
         import asyncio
         import threading
@@ -819,11 +838,31 @@ def main() -> None:
             # Keep the loop running to handle file changes
             loop.run_forever()
 
+        def run_pool_init():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(initialize_pool())
+
+        # Initialize SSH pool
+        pool_thread = threading.Thread(target=run_pool_init)
+        pool_thread.start()
+        pool_thread.join()  # Wait for initialization to complete
+
         hot_reload_thread = threading.Thread(target=run_hot_reload, daemon=True)
         hot_reload_thread.start()
         logger.info("Hot reload enabled for configuration changes")
 
-        server.run()
+        try:
+            server.run()
+        finally:
+            # Clean up SSH connection pool on shutdown
+            async def cleanup_pool():
+                await close_connection_pool()
+                logger.info("SSH connection pool closed")
+            
+            cleanup_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(cleanup_loop)
+            cleanup_loop.run_until_complete(cleanup_pool())
 
     except KeyboardInterrupt:
         logger.info("Server shutdown requested")
