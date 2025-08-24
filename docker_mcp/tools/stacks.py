@@ -13,6 +13,7 @@ from ..core.compose_manager import ComposeManager
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
+from ..core.security import SSHCommandBuilder, SSHRateLimiter, SSHAuditLog, SSHSecurityError
 from ..models.container import StackInfo
 
 logger = structlog.get_logger()
@@ -25,6 +26,13 @@ class StackTools:
         self.config = config
         self.context_manager = context_manager
         self.compose_manager = ComposeManager(config, context_manager)
+        self.ssh_builder = SSHCommandBuilder()
+        self.rate_limiter = SSHRateLimiter(
+            max_requests_per_minute=60,
+            max_requests_per_hour=600,
+            max_concurrent=10
+        )
+        self.audit_log = SSHAuditLog(log_file='/var/log/docker-mcp-ssh-audit.log')
 
     async def deploy_stack(
         self,
@@ -311,64 +319,102 @@ class StackTools:
         compose_args: list[str],
         environment: dict[str, str] | None = None,
     ) -> str:
-        """Execute docker compose command via SSH on remote host."""
-        # Extract directory from full path
-        compose_path = Path(compose_file_path)
-        project_directory = str(compose_path.parent)
-
-        # Build docker compose command to run on remote host
-        compose_cmd = [
-            "docker",
-            "compose",
-            "--project-name",
-            project_name,
-            "-f",
-            compose_file_path,
-        ]
-        compose_cmd.extend(compose_args)
-
-        # Get host config for SSH connection
+        """Execute docker compose command via SSH on remote host with security hardening."""
+        # Extract host_id first for rate limiting
         host_id = self._extract_host_id_from_context(context_name)
-        host_config = self.config.hosts.get(host_id)
-        if not host_config:
-            raise DockerCommandError(f"Host {host_id} not found in configuration")
-
-        # Build SSH command
-        ssh_cmd = self._build_ssh_command(host_config)
-
-        # Build remote command
-        remote_cmd = self._build_remote_command(project_directory, compose_cmd, environment)
-
-        ssh_cmd.extend([f"{host_config.user}@{host_config.hostname}", remote_cmd])
-
-        # Debug logging
-        logger.debug(
-            "Executing SSH command",
-            host_id=host_id,
-            ssh_command=" ".join(ssh_cmd),
-            remote_command=remote_cmd,
-        )
-
+        
+        # Check rate limit
+        allowed, reason = self.rate_limiter.check_rate_limit(host_id)
+        if not allowed:
+            raise DockerCommandError(f"Rate limit exceeded for host {host_id}: {reason}")
+        
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd,
-                    check=False,
-                    text=True,
-                    capture_output=True,
-                    timeout=300,  # 5 minute timeout for deployment
-                ),
+            # Record request for rate limiting
+            self.rate_limiter.record_request(host_id)
+            
+            # Validate inputs
+            try:
+                project_name = self.ssh_builder.validate_stack_name(project_name)
+                compose_file_path = self.ssh_builder.validate_path(compose_file_path)
+            except SSHSecurityError as e:
+                raise DockerCommandError(f"Input validation failed: {e}") from e
+            
+            # Extract directory from full path
+            compose_path = Path(compose_file_path)
+            project_directory = str(compose_path.parent)
+
+            # Build docker compose command to run on remote host
+            compose_cmd = [
+                "docker",
+                "compose",
+                "--project-name",
+                project_name,
+                "-f",
+                compose_file_path,
+            ]
+            compose_cmd.extend(compose_args)
+
+            # Get host config for SSH connection
+            host_config = self.config.hosts.get(host_id)
+            if not host_config:
+                raise DockerCommandError(f"Host {host_id} not found in configuration")
+
+            # Build SSH command with security hardening
+            ssh_cmd = self._build_ssh_command(host_config)
+
+            # Build remote command with proper escaping
+            remote_cmd = self._build_remote_command(project_directory, compose_cmd, environment)
+
+            # Complete SSH command - no need to append target as it's already in ssh_cmd
+            ssh_cmd.append(remote_cmd)
+
+            # Debug logging (without exposing sensitive details)
+            logger.debug(
+                "Executing secure SSH command",
+                host_id=host_id,
+                command_length=len(remote_cmd),
+                has_environment=environment is not None,
             )
 
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() or result.stdout.strip()
-                raise DockerCommandError(f"Docker compose command failed: {error_msg}")
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: subprocess.run(  # nosec B603 - Command is properly validated
+                        ssh_cmd,
+                        check=False,
+                        text=True,
+                        capture_output=True,
+                        timeout=300,  # 5 minute timeout for deployment
+                    ),
+                )
 
-            return result.stdout.strip()
+                # Audit log the command
+                self.audit_log.log_command(
+                    host_id=host_id,
+                    username=host_config.user,
+                    command=remote_cmd,
+                    result="success" if result.returncode == 0 else "failed",
+                    error=result.stderr.strip() if result.returncode != 0 else None
+                )
 
-        except subprocess.TimeoutExpired as e:
-            raise DockerCommandError(f"Docker compose command timed out: {e}") from e
+                if result.returncode != 0:
+                    error_msg = result.stderr.strip() or result.stdout.strip()
+                    raise DockerCommandError(f"Docker compose command failed: {error_msg}")
+
+                return result.stdout.strip()
+
+            except subprocess.TimeoutExpired as e:
+                self.audit_log.log_command(
+                    host_id=host_id,
+                    username=host_config.user,
+                    command=remote_cmd,
+                    error=f"Timeout: {e}"
+                )
+                raise DockerCommandError(f"Docker compose command timed out: {e}") from e
+        
+        finally:
+            # Release connection for rate limiting
+            self.rate_limiter.release_connection(host_id)
         except Exception as e:
             if isinstance(e, DockerCommandError):
                 raise
@@ -383,41 +429,29 @@ class StackTools:
         )
 
     def _build_ssh_command(self, host_config) -> list[str]:
-        """Build base SSH command with options."""
-        ssh_cmd = ["ssh"]
-
-        # Add port if not default
-        if host_config.port != 22:
-            ssh_cmd.extend(["-p", str(host_config.port)])
-
-        # Add identity file if specified
-        if host_config.identity_file:
-            ssh_cmd.extend(["-i", host_config.identity_file])
-
-        # Add common SSH options
-        ssh_cmd.extend([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-        ])
-
-        return ssh_cmd
+        """Build base SSH command with security-hardened options."""
+        try:
+            return self.ssh_builder.build_ssh_base_command(
+                hostname=host_config.hostname,
+                username=host_config.user,
+                port=host_config.port,
+                identity_file=host_config.identity_file
+            )
+        except SSHSecurityError as e:
+            raise DockerCommandError(f"SSH security validation failed: {e}") from e
 
     def _build_remote_command(
         self, project_directory: str, compose_cmd: list[str], environment: dict[str, str] | None
     ) -> str:
-        """Build remote Docker compose command."""
-        # Build environment variables for remote execution
-        env_vars = []
-        if environment:
-            for key, value in environment.items():
-                env_vars.append(f"{key}={value}")
-
-        # Combine environment and docker compose command
-        if env_vars:
-            return f"cd {project_directory} && {' '.join(env_vars)} {' '.join(compose_cmd)}"
-        else:
-            return f"cd {project_directory} && {' '.join(compose_cmd)}"
+        """Build secure remote Docker compose command with proper escaping."""
+        try:
+            return self.ssh_builder.build_remote_command(
+                working_directory=project_directory,
+                command_parts=compose_cmd,
+                environment=environment
+            )
+        except SSHSecurityError as e:
+            raise DockerCommandError(f"Command validation failed: {e}") from e
 
     async def manage_stack(
         self, host_id: str, stack_name: str, action: str, options: dict[str, Any] | None = None
