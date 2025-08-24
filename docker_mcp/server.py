@@ -19,6 +19,7 @@ try:
     from .core.docker_context import DockerContextManager
     from .core.file_watcher import HotReloadManager
     from .core.logging_config import setup_logging, get_server_logger
+    from .core.subprocess_manager import setup_signal_handlers, cleanup_all
     from .middleware import (
         LoggingMiddleware,
         ErrorHandlingMiddleware,
@@ -32,6 +33,7 @@ except ImportError:
     from docker_mcp.core.docker_context import DockerContextManager
     from docker_mcp.core.file_watcher import HotReloadManager
     from docker_mcp.core.logging_config import setup_logging, get_server_logger
+    from docker_mcp.core.subprocess_manager import setup_signal_handlers, cleanup_all
     from docker_mcp.middleware import (
         LoggingMiddleware,
         ErrorHandlingMiddleware,
@@ -802,6 +804,10 @@ def main() -> None:
             env_config=os.getenv("DOCKER_HOSTS_CONFIG"),
         )
 
+        # Setup signal handlers for graceful shutdown
+        setup_signal_handlers()
+        logger.info("Signal handlers registered for graceful shutdown")
+        
         server = DockerMCPServer(config, config_path=config_path_for_reload)
 
         # Start hot reload in background (always enabled)
@@ -826,9 +832,20 @@ def main() -> None:
         server.run()
 
     except KeyboardInterrupt:
-        logger.info("Server shutdown requested")
+        logger.info("Server shutdown requested, cleaning up subprocesses...")
+        # Cleanup all subprocesses on shutdown
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(cleanup_all())
+        logger.info("Subprocess cleanup complete")
     except Exception as e:
         logger.error("Server error", error=str(e))
+        # Cleanup on error too
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(cleanup_all())
         sys.exit(1)
 
 
