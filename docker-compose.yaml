@@ -1,6 +1,6 @@
 services:
   docker-mcp:
-    image: ghcr.io/jmagar/docker-mcp:latest
+    build: .
     container_name: docker-mcp
     restart: unless-stopped
     
@@ -9,7 +9,7 @@ services:
     
     volumes:
       # Docker MCP SSH keys only - mounted read-only for security
-      - ~/.docker-mcp/ssh:/home/dockermcp/.ssh:ro
+      - ${SSH_KEYS_HOST_PATH:-~/.docker-mcp/ssh}:/home/dockermcp/.ssh:ro
       
       # Configuration - mounted read-only
       - ./config:/app/config:ro
@@ -22,26 +22,26 @@ services:
     
     environment:
       # Server configuration
-      FASTMCP_HOST: "0.0.0.0"
-      FASTMCP_PORT: "8000"
+      FASTMCP_HOST: "${FASTMCP_HOST:-0.0.0.0}"
+      FASTMCP_PORT: "${FASTMCP_PORT:-8000}"
       
       # Configuration file path
-      DOCKER_HOSTS_CONFIG: "/app/config/hosts.yml"
+      DOCKER_HOSTS_CONFIG: "${DOCKER_HOSTS_CONFIG:-/app/config/hosts.yml}"
       
       # Logging configuration
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      LOG_DIR: "/app/data/logs"
-      LOG_FILE_SIZE_MB: "10"
+      LOG_DIR: "${LOG_DIR:-/app/data/logs}"
+      LOG_FILE_SIZE_MB: "${LOG_FILE_SIZE_MB:-10}"
       
-      # Optional: SSH configuration
+      # SSH configuration (container path)
       SSH_CONFIG_PATH: "/home/dockermcp/.ssh/config"
       SSH_DEBUG: "${SSH_DEBUG:-0}"
       
-      # Optional: Development settings
+      # Development settings
       DEVELOPMENT_MODE: "${DEVELOPMENT_MODE:-false}"
       HOT_RELOAD: "${HOT_RELOAD:-true}"
       
-      # Optional: Rate limiting
+      # Rate limiting
       RATE_LIMIT_PER_SECOND: "${RATE_LIMIT_PER_SECOND:-50.0}"
       SLOW_REQUEST_THRESHOLD_MS: "${SLOW_REQUEST_THRESHOLD_MS:-5000.0}"
     
