@@ -326,6 +326,44 @@ def caplog_setup(caplog):
 
 
 @pytest.fixture
+def structlog_caplog():
+    """Configure structlog for testing with log capture functionality.
+    
+    This fixture sets up structlog to capture logs in memory for test assertions.
+    It returns a LogCapture object that can be used to inspect logged messages.
+    """
+    from structlog.testing import LogCapture
+    
+    # Create log capture instance
+    log_capture = LogCapture()
+    
+    # Store the original configuration to restore later
+    original_config = structlog.get_config()
+    
+    # Configure structlog for testing with the LogCapture processor
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.StackInfoRenderer(),
+            structlog.dev.set_exc_info,
+            structlog.processors.TimeStamper(fmt="iso"),
+            log_capture,  # Add the LogCapture processor to capture logs
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        logger_factory=structlog.PrintLoggerFactory(),  # Use PrintLoggerFactory for testing
+        cache_logger_on_first_use=False,  # Don't cache to ensure fresh logger for each test
+    )
+    
+    # Clear any existing entries (LogCapture clears automatically on init)
+    
+    yield log_capture
+    
+    # Restore original configuration after test
+    structlog.configure(**original_config)
+
+
+@pytest.fixture
 def mock_server_base():
     """Create a basic FastMCP server without middleware for testing."""
     server = FastMCP("test-server")
@@ -507,6 +545,54 @@ def get_log_messages(caplog, level=None):
     if level:
         return [record.getMessage() for record in caplog.records if record.levelname == level]
     return [record.getMessage() for record in caplog.records]
+
+
+def assert_structlog_contains(log_capture, event, **kwargs):
+    """Assert that structlog captured logs contain specific event and context.
+    
+    Args:
+        log_capture: The LogCapture fixture
+        event: The log event/message to search for
+        **kwargs: Additional context fields that should be present in the log
+    
+    Returns:
+        The matching log entry if found
+        
+    Raises:
+        AssertionError: If no matching log entry is found
+    """
+    entries = log_capture.entries
+    
+    for entry in entries:
+        if entry.get("event") == event:
+            # Check if all required fields are present
+            if all(entry.get(k) == v for k, v in kwargs.items()):
+                return entry
+    
+    # Build helpful error message
+    msg = f"No log entry found with event='{event}'"
+    if kwargs:
+        msg += f" and fields: {kwargs}"
+    msg += f"\nCaptured entries: {entries}"
+    pytest.fail(msg)
+
+
+def get_structlog_events(log_capture, level=None):
+    """Get all structlog events, optionally filtered by level.
+    
+    Args:
+        log_capture: The LogCapture fixture
+        level: Optional log level to filter by (e.g., "info", "error")
+        
+    Returns:
+        List of log events (strings)
+    """
+    entries = log_capture.entries
+    
+    if level:
+        entries = [e for e in entries if e.get("log_level", "").lower() == level.lower()]
+    
+    return [e.get("event", "") for e in entries]
 
 
 class MockCall:
