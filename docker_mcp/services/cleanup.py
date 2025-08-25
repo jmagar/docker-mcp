@@ -165,31 +165,34 @@ class CleanupService:
             return {"success": False, "error": str(e)}
 
     async def _check_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
-        """Show what would be cleaned without actually cleaning."""
-        cmd = self._build_ssh_cmd(host) + ["docker", "system", "df"]
+        """Show detailed summary of what would be cleaned without actually cleaning."""
         
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                cmd, check=False, capture_output=True, text=True
-            ),
-        )
+        # Get comprehensive disk usage data
+        disk_usage_data = await self.docker_disk_usage(host_id, include_details=True)
         
-        if result.returncode != 0:
+        if not disk_usage_data.get("success", False):
             return {
                 "success": False,
-                "error": f"Failed to check cleanup: {result.stderr}"
+                "error": f"Failed to analyze disk usage: {disk_usage_data.get('error', 'Unknown error')}"
             }
         
-        # Parse what could be cleaned
-        cleanup_potential = self._analyze_cleanup_potential(result.stdout)
+        summary = disk_usage_data.get("summary", {})
+        
+        # Get additional specific cleanup data
+        cleanup_details = await self._get_cleanup_details(host, host_id)
+        
+        # Format cleanup summary
+        cleanup_summary = self._format_cleanup_summary(summary, cleanup_details)
         
         return {
             "success": True,
             "host_id": host_id,
             "cleanup_type": "check",
-            "would_clean": cleanup_potential,
-            "message": "This is a dry run - no actual cleanup was performed"
+            "summary": cleanup_summary,
+            "total_reclaimable": summary.get("totals", {}).get("total_reclaimable", "0B"),
+            "reclaimable_percentage": summary.get("totals", {}).get("reclaimable_percentage", 0),
+            "recommendations": disk_usage_data.get("recommendations", []),
+            "message": "📊 Cleanup Analysis Complete - No actual cleanup was performed"
         }
 
     async def _safe_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -673,3 +676,96 @@ class CleanupService:
             )
         
         return recommendations
+
+    async def _get_cleanup_details(self, host: DockerHost, host_id: str) -> dict[str, Any]:
+        """Get specific cleanup details beyond disk usage."""
+        details = {
+            "stopped_containers": {"count": 0, "names": []},
+            "unused_networks": {"count": 0, "names": []},
+            "dangling_images": {"count": 0, "size": "0B"}
+        }
+        
+        try:
+            # Get stopped containers
+            containers_cmd = self._build_ssh_cmd(host) + [
+                "docker", "ps", "-a", "--filter", "status=exited", "--format", "{{.Names}}"
+            ]
+            containers_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(containers_cmd, capture_output=True, text=True)  # nosec B603
+            )
+            
+            if containers_result.returncode == 0 and containers_result.stdout.strip():
+                stopped_containers = containers_result.stdout.strip().split('\n')
+                details["stopped_containers"] = {
+                    "count": len(stopped_containers),
+                    "names": stopped_containers[:5]  # Show first 5
+                }
+            
+            # Get unused networks (custom networks with no containers)
+            networks_cmd = self._build_ssh_cmd(host) + [
+                "docker", "network", "ls", "--filter", "dangling=true", "--format", "{{.Name}}"
+            ]
+            networks_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(networks_cmd, capture_output=True, text=True)  # nosec B603
+            )
+            
+            if networks_result.returncode == 0 and networks_result.stdout.strip():
+                unused_networks = networks_result.stdout.strip().split('\n')
+                details["unused_networks"] = {
+                    "count": len(unused_networks),
+                    "names": unused_networks[:5]  # Show first 5
+                }
+            
+            # Get dangling images
+            images_cmd = self._build_ssh_cmd(host) + [
+                "docker", "images", "-f", "dangling=true", "--format", "{{.Repository}}:{{.Tag}}"
+            ]
+            images_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(images_cmd, capture_output=True, text=True)  # nosec B603
+            )
+            
+            if images_result.returncode == 0 and images_result.stdout.strip():
+                dangling_images = images_result.stdout.strip().split('\n')
+                details["dangling_images"]["count"] = len(dangling_images)
+        
+        except Exception as e:
+            self.logger.warning(
+                "Failed to get some cleanup details",
+                host_id=host_id,
+                error=str(e)
+            )
+        
+        return details
+
+    def _format_cleanup_summary(self, summary: dict, cleanup_details: dict) -> dict[str, Any]:
+        """Format a concise cleanup summary."""
+        formatted = {
+            "containers": {
+                "stopped": cleanup_details["stopped_containers"]["count"],
+                "reclaimable_space": summary.get("containers", {}).get("reclaimable", "0B"),
+                "example_names": cleanup_details["stopped_containers"]["names"]
+            },
+            "images": {
+                "unused": summary.get("images", {}).get("count", 0) - summary.get("images", {}).get("active", 0),
+                "dangling": cleanup_details["dangling_images"]["count"],
+                "reclaimable_space": summary.get("images", {}).get("reclaimable", "0B")
+            },
+            "networks": {
+                "unused": cleanup_details["unused_networks"]["count"],
+                "example_names": cleanup_details["unused_networks"]["names"]
+            },
+            "build_cache": {
+                "size": summary.get("build_cache", {}).get("size", "0B"),
+                "fully_reclaimable": True
+            },
+            "volumes": {
+                "unused": summary.get("volumes", {}).get("count", 0) - summary.get("volumes", {}).get("active", 0),
+                "reclaimable_space": summary.get("volumes", {}).get("reclaimable", "0B"),
+                "warning": "⚠️  Volume cleanup may delete data!"
+            }
+        }
+        
+        return formatted
