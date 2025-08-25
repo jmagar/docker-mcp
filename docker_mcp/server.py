@@ -9,9 +9,8 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any, Annotated, Literal
+from typing import Annotated, Any, Literal
 
-import structlog
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
@@ -20,14 +19,14 @@ try:
     from .core.config_loader import DockerMCPConfig, load_config
     from .core.docker_context import DockerContextManager
     from .core.file_watcher import HotReloadManager
-    from .core.logging_config import setup_logging, get_server_logger
+    from .core.logging_config import get_server_logger, setup_logging
     from .middleware import (
-        LoggingMiddleware,
         ErrorHandlingMiddleware,
+        LoggingMiddleware,
+        RateLimitingMiddleware,
         TimingMiddleware,
-        RateLimitingMiddleware
     )
-    from .models.params import DockerHostsParams, DockerContainerParams, DockerComposeParams
+    from .models.params import DockerComposeParams, DockerContainerParams, DockerHostsParams
     from .services import ConfigService, ContainerService, HostService, StackService
     from .services.cleanup import CleanupService
     from .services.schedule import ScheduleService
@@ -36,14 +35,13 @@ except ImportError:
     from docker_mcp.core.config_loader import DockerMCPConfig, load_config
     from docker_mcp.core.docker_context import DockerContextManager
     from docker_mcp.core.file_watcher import HotReloadManager
-    from docker_mcp.core.logging_config import setup_logging, get_server_logger
+    from docker_mcp.core.logging_config import get_server_logger
     from docker_mcp.middleware import (
-        LoggingMiddleware,
         ErrorHandlingMiddleware,
+        LoggingMiddleware,
+        RateLimitingMiddleware,
         TimingMiddleware,
-        RateLimitingMiddleware
     )
-    from docker_mcp.models.params import DockerHostsParams, DockerContainerParams, DockerComposeParams
     from docker_mcp.services import ConfigService, ContainerService, HostService, StackService
     from docker_mcp.services.cleanup import CleanupService
     from docker_mcp.services.schedule import ScheduleService
@@ -67,7 +65,7 @@ def get_data_dir() -> Path:
         os.getenv("DOCKER_MCP_DATA_DIR"),
         os.getenv("XDG_DATA_HOME") and Path(os.getenv("XDG_DATA_HOME")) / "docker-mcp",
     ]
-    
+
     # Check explicit environment overrides
     for candidate in env_candidates:
         if candidate:
@@ -83,7 +81,7 @@ def get_data_dir() -> Path:
             except (OSError, PermissionError, FileNotFoundError):
                 # If we can't create/write, continue to next candidate
                 continue
-    
+
     # Check if running in container with comprehensive detection
     container_indicators = [
         os.getenv("DOCKER_CONTAINER", "").lower() in ("1", "true", "yes", "on"),
@@ -91,7 +89,7 @@ def get_data_dir() -> Path:
         os.path.exists("/app"),
         os.getenv("container") is not None,  # systemd container detection
     ]
-    
+
     if any(container_indicators):
         container_path = Path("/app/data")
         try:
@@ -100,7 +98,7 @@ def get_data_dir() -> Path:
         except (OSError, PermissionError):
             # Container path failed, fall through to other options
             pass
-    
+
     # Standard user data directory fallbacks
     fallback_candidates = [
         Path.home() / ".docker-mcp" / "data",  # Primary user directory
@@ -108,7 +106,7 @@ def get_data_dir() -> Path:
         Path("/tmp") / "docker-mcp" / str(os.getuid() if hasattr(os, 'getuid') else 'user'),  # Temp with user isolation
         Path("/tmp") / "docker-mcp",  # Final fallback
     ]
-    
+
     for fallback_path in fallback_candidates:
         try:
             fallback_path.mkdir(parents=True, exist_ok=True)
@@ -119,7 +117,7 @@ def get_data_dir() -> Path:
             return fallback_path
         except (OSError, PermissionError, FileNotFoundError):
             continue
-    
+
     # If all else fails, return the primary fallback even if not writable
     # Let the calling code handle the permission error
     return Path.home() / ".docker-mcp" / "data"
@@ -143,7 +141,7 @@ def get_config_dir() -> Path:
         os.getenv("DOCKER_MCP_CONFIG_DIR"),
         os.getenv("XDG_CONFIG_HOME") and Path(os.getenv("XDG_CONFIG_HOME")) / "docker-mcp",
     ]
-    
+
     # Check explicit environment overrides
     for candidate in env_candidates:
         if candidate:
@@ -158,7 +156,7 @@ def get_config_dir() -> Path:
             except (OSError, PermissionError):
                 # If we can't create, continue to next candidate
                 continue
-    
+
     # Check if running in container with comprehensive detection
     container_indicators = [
         os.getenv("DOCKER_CONTAINER", "").lower() in ("1", "true", "yes", "on"),
@@ -166,7 +164,7 @@ def get_config_dir() -> Path:
         os.path.exists("/app"),
         os.getenv("container") is not None,  # systemd container detection
     ]
-    
+
     if any(container_indicators):
         container_path = Path("/app/config")
         try:
@@ -176,7 +174,7 @@ def get_config_dir() -> Path:
         except (OSError, PermissionError):
             # Container path failed, fall through to other options
             pass
-    
+
     # Config directory fallbacks with preference for existing directories
     fallback_candidates = [
         Path("config"),  # Local project config (for development)
@@ -185,7 +183,7 @@ def get_config_dir() -> Path:
         Path.home() / ".docker-mcp" / "config",  # Alternative user config
         Path("/etc/docker-mcp"),  # System-wide config (read-only usually)
     ]
-    
+
     # First pass: look for existing config directories
     for candidate_path in fallback_candidates:
         if candidate_path.exists() and candidate_path.is_dir():
@@ -195,7 +193,7 @@ def get_config_dir() -> Path:
                 return candidate_path
             except (OSError, PermissionError):
                 continue
-    
+
     # Second pass: try to create config directories
     for candidate_path in fallback_candidates[:-1]:  # Skip system dir for creation
         try:
@@ -203,7 +201,7 @@ def get_config_dir() -> Path:
             return candidate_path
         except (OSError, PermissionError):
             continue
-    
+
     # If all else fails, return the primary fallback even if not accessible
     # Let the calling code handle the permission error
     return Path("config")
@@ -215,8 +213,8 @@ class DockerMCPServer:
     def __init__(self, config: DockerMCPConfig, config_path: str | None = None):
         self.config = config
         self._config_path: str = config_path or os.getenv("DOCKER_HOSTS_CONFIG") or str(get_config_dir() / "hosts.yml")
-        
-        
+
+
         # Use server logger (writes to mcp_server.log)
         self.logger = get_server_logger()
 
@@ -253,14 +251,14 @@ class DockerMCPServer:
         """Initialize FastMCP app, middleware, and register tools."""
         # Create FastMCP server
         self.app = FastMCP("Docker Context Manager")
-        
+
         # Add middleware in logical order (first added = first executed)
         # Error handling first to catch all errors
         self.app.add_middleware(ErrorHandlingMiddleware(
             include_traceback=os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG",
             track_error_stats=True
         ))
-        
+
         # Rate limiting to protect against abuse
         rate_limit = float(os.getenv("RATE_LIMIT_PER_SECOND", "50.0"))
         self.app.add_middleware(RateLimitingMiddleware(
@@ -268,20 +266,20 @@ class DockerMCPServer:
             burst_capacity=int(rate_limit * 2),
             enable_global_limit=True
         ))
-        
+
         # Timing middleware to monitor performance
         slow_threshold = float(os.getenv("SLOW_REQUEST_THRESHOLD_MS", "5000.0"))
         self.app.add_middleware(TimingMiddleware(
             slow_request_threshold_ms=slow_threshold,
             track_statistics=True
         ))
-        
+
         # Logging middleware last to log everything (including middleware processing)
         self.app.add_middleware(LoggingMiddleware(
             include_payloads=os.getenv("LOG_INCLUDE_PAYLOADS", "true").lower() == "true",
             max_payload_length=int(os.getenv("LOG_MAX_PAYLOAD_LENGTH", "1000"))
         ))
-        
+
         self.logger.info(
             "FastMCP middleware initialized",
             error_handling=True,
@@ -292,11 +290,11 @@ class DockerMCPServer:
 
         # Register consolidated tools (3 tools replace 13 individual tools)
         self.app.tool(self.docker_hosts)      # Consolidates: add_docker_host, list_docker_hosts, list_host_ports, update_host_config, import_ssh_config
-        self.app.tool(self.docker_container)  # Consolidates: list_containers, get_container_info, manage_container, get_container_logs  
+        self.app.tool(self.docker_container)  # Consolidates: list_containers, get_container_info, manage_container, get_container_logs
         self.app.tool(self.docker_compose)    # Consolidates: deploy_stack, manage_stack, list_stacks, discover_compose_paths + NEW: logs capability
 
     # Consolidated Tools Implementation
-    
+
     async def docker_hosts(
         self,
         action: Annotated[Literal["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule"], Field(description="Action to perform")],
@@ -335,7 +333,7 @@ class DockerMCPServer:
             tags = []
         if compose_path_overrides is None:
             compose_path_overrides = {}
-            
+
         # Validate action parameter
         valid_actions = ["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule"]
         if action not in valid_actions:
@@ -343,12 +341,12 @@ class DockerMCPServer:
                 "success": False,
                 "error": f"Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}"
             }
-            
+
         try:
             # Route to appropriate handler with validation
             if action == "list":
                 return await self.list_docker_hosts()
-                
+
             elif action == "add":
                 # Validate required parameters for add action
                 if not host_id:
@@ -357,39 +355,39 @@ class DockerMCPServer:
                     return {"success": False, "error": "ssh_host is required for add action"}
                 if not ssh_user:
                     return {"success": False, "error": "ssh_user is required for add action"}
-                    
+
                 # Validate port range
                 if not (1 <= ssh_port <= 65535):
                     return {"success": False, "error": f"ssh_port must be between 1 and 65535, got {ssh_port}"}
-                    
+
                 return await self.add_docker_host(
                     host_id, ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, test_connection, compose_path, enabled
                 )
-                
+
             elif action == "ports":
                 # Validate required parameters for ports action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for ports action"}
-                    
+
                 result = await self.list_host_ports(host_id, include_stopped)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'content') and hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": str(result.content)}
                 return result
-                
+
             elif action == "compose_path":
                 # Validate required parameters for compose_path action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for compose_path action"}
                 if not compose_path:
                     return {"success": False, "error": "compose_path is required for compose_path action"}
-                    
+
                 result = await self.update_host_config(host_id, compose_path)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'content') and hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": str(result.content)}
                 return result
-                
+
             elif action == "import_ssh":
                 result = await self.import_ssh_config(
                     ssh_config_path, selected_hosts, compose_path_overrides, auto_confirm
@@ -398,7 +396,7 @@ class DockerMCPServer:
                 if hasattr(result, 'content') and hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": str(result.content)}
                 return result
-                
+
             elif action == "cleanup":
                 # Validate required parameters for cleanup action
                 if not host_id:
@@ -406,33 +404,33 @@ class DockerMCPServer:
                 if not cleanup_type:
                     return {"success": False, "error": "cleanup_type is required for cleanup action"}
                 if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
-                    return {"success": False, "error": f"cleanup_type must be one of: check, safe, moderate, aggressive"}
-                
+                    return {"success": False, "error": "cleanup_type must be one of: check, safe, moderate, aggressive"}
+
                 return await self.cleanup_service.docker_cleanup(host_id, cleanup_type)
-                
+
             elif action == "disk_usage":
                 # Validate required parameters for disk_usage action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for disk_usage action"}
-                
+
                 return await self.cleanup_service.docker_disk_usage(host_id)
-                
+
             elif action == "schedule":
                 # Validate required parameters for schedule action
                 if not schedule_action:
                     return {"success": False, "error": "schedule_action is required for schedule action"}
                 if schedule_action not in ["add", "remove", "list", "enable", "disable"]:
-                    return {"success": False, "error": f"schedule_action must be one of: add, remove, list, enable, disable"}
-                
+                    return {"success": False, "error": "schedule_action must be one of: add, remove, list, enable, disable"}
+
                 return await self.schedule_service.handle_schedule_action(
-                    schedule_action, host_id, cleanup_type, 
+                    schedule_action, host_id, cleanup_type,
                     schedule_frequency, schedule_time, schedule_id
                 )
-                
+
         except Exception as e:
             self.logger.error("docker_hosts tool error", action=action, error=str(e))
             return {
-                "success": False, 
+                "success": False,
                 "error": f"Tool execution failed: {str(e)}",
                 "action": action
             }
@@ -466,87 +464,87 @@ class DockerMCPServer:
                 "success": False,
                 "error": f"Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}"
             }
-            
+
         try:
             # Route to appropriate handler with validation
             if action == "list":
                 # Validate required parameters for list action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for list action"}
-                    
+
                 # Validate pagination parameters
                 if limit < 1 or limit > 1000:
                     return {"success": False, "error": "limit must be between 1 and 1000"}
                 if offset < 0:
                     return {"success": False, "error": "offset must be >= 0"}
-                    
+
                 result = await self.list_containers(host_id, all_containers, limit, offset)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "No structured content"}
                 return result
-                
+
             elif action == "info":
                 # Validate required parameters for info action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for info action"}
                 if not container_id:
                     return {"success": False, "error": "container_id is required for info action"}
-                    
+
                 result = await self.get_container_info(host_id, container_id)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "No structured content"}
                 return result
-                
+
             elif action in ["start", "stop", "restart", "build"]:
                 # Validate required parameters for container management actions
                 if not host_id:
                     return {"success": False, "error": f"host_id is required for {action} action"}
                 if not container_id:
                     return {"success": False, "error": f"container_id is required for {action} action"}
-                    
+
                 # Validate timeout parameter
                 if timeout < 1 or timeout > 300:
                     return {"success": False, "error": "timeout must be between 1 and 300 seconds"}
-                    
+
                 result = await self.manage_container(host_id, container_id, action, force, timeout)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "No structured content"}
                 return result
-                
+
             elif action == "logs":
                 # Validate required parameters for logs action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for logs action"}
                 if not container_id:
                     return {"success": False, "error": "container_id is required for logs action"}
-                    
+
                 # Validate lines parameter
                 if lines < 1 or lines > 1000:
                     return {"success": False, "error": "lines must be between 1 and 10000"}
-                    
+
                 return await self.get_container_logs(host_id, container_id, lines, follow)
-                
+
             elif action == "pull":
                 # Validate required parameters for pull action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for pull action"}
                 if not container_id:
                     return {"success": False, "error": "container_id is required for pull action (image name)"}
-                
+
                 # For pull, container_id is actually the image name
                 result = await self.pull_image(host_id, container_id)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "No structured content"}
                 return result
-                
+
         except Exception as e:
             self.logger.error("docker_container tool error", action=action, host_id=host_id, container_id=container_id, error=str(e))
             return {
-                "success": False, 
+                "success": False,
                 "error": f"Tool execution failed: {str(e)}",
                 "action": action,
                 "host_id": host_id,
@@ -586,7 +584,7 @@ class DockerMCPServer:
             environment = {}
         if options is None:
             options = {}
-            
+
         # Validate action parameter
         valid_actions = ["list", "deploy", "up", "down", "restart", "build", "pull", "discover", "logs", "migrate"]
         if action not in valid_actions:
@@ -594,20 +592,20 @@ class DockerMCPServer:
                 "success": False,
                 "error": f"Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}"
             }
-            
+
         try:
             # Route to appropriate handler with validation
             if action == "list":
                 # Validate required parameters for list action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for list action"}
-                    
+
                 result = await self.list_stacks(host_id)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "No structured content"}
                 return result
-                
+
             elif action == "deploy":
                 # Validate required parameters for deploy action
                 if not host_id:
@@ -616,11 +614,11 @@ class DockerMCPServer:
                     return {"success": False, "error": "stack_name is required for deploy action"}
                 if not compose_content:
                     return {"success": False, "error": "compose_content is required for deploy action"}
-                    
+
                 # Validate stack name format (basic validation)
                 if not stack_name.replace("-", "").replace("_", "").isalnum():
                     return {"success": False, "error": "stack_name must contain only alphanumeric characters, hyphens, and underscores"}
-                    
+
                 result = await self.deploy_stack(
                     host_id, stack_name, compose_content, environment, pull_images, recreate
                 )
@@ -628,31 +626,31 @@ class DockerMCPServer:
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "No structured content"}
                 return result
-                
+
             elif action in ["up", "down", "restart", "build", "pull"]:
                 # Validate required parameters for stack management actions
                 if not host_id:
                     return {"success": False, "error": f"host_id is required for {action} action"}
                 if not stack_name:
                     return {"success": False, "error": f"stack_name is required for {action} action"}
-                    
+
                 result = await self.manage_stack(host_id, stack_name, action, options)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "No structured content"}
                 return result
-                
+
             elif action == "discover":
                 # Validate required parameters for discover action
                 if not host_id:
                     return {"success": False, "error": "host_id is required for discover action"}
-                    
+
                 result = await self.discover_compose_paths(host_id)
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "No structured content"}
                 return result
-                
+
             elif action == "logs":
                 # NEW CAPABILITY: Stack logs
                 # Validate required parameters for logs action
@@ -660,24 +658,24 @@ class DockerMCPServer:
                     return {"success": False, "error": "host_id is required for logs action"}
                 if not stack_name:
                     return {"success": False, "error": "stack_name is required for logs action"}
-                    
+
                 # Validate lines parameter
                 if lines < 1 or lines > 1000:
                     return {"success": False, "error": "lines must be between 1 and 10000"}
-                    
+
                 # Implement stack logs using docker-compose logs command
                 try:
                     if host_id not in self.config.hosts:
                         return {"success": False, "error": f"Host {host_id} not found"}
-                    
+
                     # Use stack service to execute docker-compose logs command
                     logs_options = {
                         "tail": str(lines),
                         "follow": follow
                     }
-                    
+
                     result = await self.stack_service.manage_stack(host_id, stack_name, "logs", logs_options)
-                    
+
                     # Format the result for logs
                     if hasattr(result, 'structured_content') and result.structured_content:
                         logs_data = result.structured_content
@@ -697,11 +695,11 @@ class DockerMCPServer:
                             return logs_data
                     else:
                         return {"success": False, "error": "Failed to retrieve stack logs"}
-                        
+
                 except Exception as e:
                     self.logger.error("docker_compose logs error", host_id=host_id, stack_name=stack_name, error=str(e))
                     return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
-            
+
             elif action == "migrate":
                 # Validate required parameters for migrate action
                 if not host_id:
@@ -710,7 +708,7 @@ class DockerMCPServer:
                     return {"success": False, "error": "target_host_id is required for migrate action"}
                 if not stack_name:
                     return {"success": False, "error": "stack_name is required for migrate action"}
-                
+
                 # Call the migration service
                 result = await self.stack_service.migrate_stack(
                     source_host_id=host_id,
@@ -721,16 +719,16 @@ class DockerMCPServer:
                     remove_source=remove_source,
                     dry_run=dry_run
                 )
-                
+
                 # Convert ToolResult to dict for consistency
                 if hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": "Migration completed"}
                 return result
-                
+
         except Exception as e:
             self.logger.error("docker_compose tool error", action=action, host_id=host_id, stack_name=stack_name, error=str(e))
             return {
-                "success": False, 
+                "success": False,
                 "error": f"Tool execution failed: {str(e)}",
                 "action": action,
                 "host_id": host_id,
@@ -789,13 +787,13 @@ class DockerMCPServer:
 
             # Use log tools to get logs
             logs_result = await self.log_tools.get_container_logs(
-                host_id=host_id, 
-                container_id=container_id, 
-                lines=lines, 
-                since=None, 
+                host_id=host_id,
+                container_id=container_id,
+                lines=lines,
+                since=None,
                 timestamps=False
             )
-            
+
             # Extract logs array from ContainerLogs model for cleaner API
             if isinstance(logs_result, dict) and "logs" in logs_result:
                 logs = logs_result["logs"]  # This is the list[str] of actual log lines
@@ -978,8 +976,8 @@ def main() -> None:
     args = parse_args()
 
     # Setup unified logging (console + files) with enhanced configuration
-    from docker_mcp.core.logging_config import setup_logging, get_server_logger
-    
+    from docker_mcp.core.logging_config import get_server_logger, setup_logging
+
     # Determine log directory with fallback options
     log_dir_candidates = [
         os.getenv("LOG_DIR"),  # Explicit environment override
@@ -987,7 +985,7 @@ def main() -> None:
         str(Path.home() / ".local" / "share" / "docker-mcp" / "logs"),  # User fallback
         "/tmp/docker-mcp-logs"  # System fallback
     ]
-    
+
     log_dir = None
     for candidate in log_dir_candidates:
         if candidate:
@@ -999,11 +997,11 @@ def main() -> None:
                     break
             except (OSError, PermissionError):
                 continue
-    
+
     if not log_dir:
         print("Warning: Unable to create log directory, using console-only logging")
         log_dir = None
-    
+
     # Parse log file size with validation
     try:
         max_file_size_mb = int(os.getenv("LOG_FILE_SIZE_MB", "10"))
@@ -1011,7 +1009,7 @@ def main() -> None:
             max_file_size_mb = 10  # Reset to default if out of range
     except ValueError:
         max_file_size_mb = 10
-    
+
     # Setup logging with error handling
     try:
         setup_logging(
@@ -1020,7 +1018,7 @@ def main() -> None:
             max_file_size_mb=max_file_size_mb
         )
         logger = get_server_logger()
-        
+
         # Log successful initialization with configuration details
         logger.info(
             "Logging system initialized",

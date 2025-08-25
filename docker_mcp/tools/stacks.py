@@ -448,9 +448,9 @@ class StackTools:
 
             # Get compose file information
             compose_info = await self._get_compose_file_info(host_id, stack_name)
-            
+
             # Always use SSH execution for consistency with deploy_stack
-            # This ensures we can access compose files on remote hosts and maintains 
+            # This ensures we can access compose files on remote hosts and maintains
             # consistent behavior across all stack operations
             return await self._execute_stack_via_ssh(host_id, stack_name, action, options, compose_info)
 
@@ -464,7 +464,7 @@ class StackTools:
         try:
             # Build compose arguments for the action
             compose_args = []
-            
+
             if action == "ps":
                 compose_args = ["ps", "--format", "json"]
             elif action == "down":
@@ -514,7 +514,7 @@ class StackTools:
 
             # Get Docker context for SSH connection info
             context_name = await self.context_manager.ensure_context(host_id)
-            
+
             # For stacks with compose files, use the full path
             # For project-only stacks, execute in a default directory
             if compose_info["exists"]:
@@ -525,7 +525,7 @@ class StackTools:
                 # Default to a standard location or fail gracefully
                 if action == "up":
                     return self._build_error_response(
-                        host_id, stack_name, action, 
+                        host_id, stack_name, action,
                         f"No compose file found for stack '{stack_name}'. Use deploy_stack for new deployments."
                     )
                 # For other actions on project-only stacks, we can't proceed without a compose file
@@ -533,7 +533,7 @@ class StackTools:
                     host_id, stack_name, action,
                     f"Cannot {action} stack '{stack_name}': no compose file found. Stack may not exist or was not deployed via this tool."
                 )
-            
+
             # Execute via SSH using the same method as deploy_stack
             result = await self._execute_compose_with_file(
                 context_name, stack_name, compose_file_path, compose_args, None
@@ -545,9 +545,9 @@ class StackTools:
                 output_data = self._parse_ps_output_from_ssh(result)
 
             logger.info(
-                f"Stack {action} completed via SSH", 
-                host_id=host_id, 
-                stack_name=stack_name, 
+                f"Stack {action} completed via SSH",
+                host_id=host_id,
+                stack_name=stack_name,
                 action=action
             )
 

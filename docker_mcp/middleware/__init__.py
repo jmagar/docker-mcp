@@ -9,14 +9,14 @@ This module provides comprehensive middleware for request/response processing:
 All middleware follows FastMCP patterns and integrates with the dual logging system.
 """
 
-from .logging import LoggingMiddleware
 from .error_handling import ErrorHandlingMiddleware
-from .timing import TimingMiddleware
+from .logging import LoggingMiddleware
 from .rate_limiting import RateLimitingMiddleware
+from .timing import TimingMiddleware
 
 __all__ = [
     "LoggingMiddleware",
-    "ErrorHandlingMiddleware", 
+    "ErrorHandlingMiddleware",
     "TimingMiddleware",
     "RateLimitingMiddleware"
 ]

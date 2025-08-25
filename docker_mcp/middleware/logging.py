@@ -20,7 +20,7 @@ class LoggingMiddleware(Middleware):
     - Error details and stack traces
     - Structured logging for easy parsing
     """
-    
+
     def __init__(self, include_payloads: bool = True, max_payload_length: int = 1000):
         """Initialize logging middleware.
         
@@ -31,11 +31,11 @@ class LoggingMiddleware(Middleware):
         self.logger = get_middleware_logger()
         self.include_payloads = include_payloads
         self.max_payload_length = max_payload_length
-        
+
     async def on_message(self, context: MiddlewareContext, call_next):
         """Log all MCP messages with comprehensive details."""
         start_time = time.time()
-        
+
         # Log request start with sanitized parameters
         log_data = {
             "method": context.method,
@@ -43,17 +43,17 @@ class LoggingMiddleware(Middleware):
             "message_type": context.type,
             "timestamp": context.timestamp
         }
-        
+
         # Add sanitized payload if enabled
         if self.include_payloads and hasattr(context.message, '__dict__'):
             log_data["params"] = self._sanitize_message(context.message)
-        
+
         self.logger.info("MCP request started", **log_data)
-        
+
         try:
             # Execute the request
             result = await call_next(context)
-            
+
             # Log successful completion
             duration_ms = round((time.time() - start_time) * 1000, 2)
             self.logger.info(
@@ -62,9 +62,9 @@ class LoggingMiddleware(Middleware):
                 success=True,
                 duration_ms=duration_ms
             )
-            
+
             return result
-            
+
         except Exception as e:
             # Log error with full context
             duration_ms = round((time.time() - start_time) * 1000, 2)
@@ -78,7 +78,7 @@ class LoggingMiddleware(Middleware):
                 exc_info=True  # Include stack trace
             )
             raise
-    
+
     def _sanitize_message(self, message: Any) -> dict[str, Any]:
         """Sanitize message data for safe logging.
         
@@ -90,14 +90,14 @@ class LoggingMiddleware(Middleware):
         """
         if not hasattr(message, '__dict__'):
             return {"message": str(message)[:self.max_payload_length]}
-        
+
         sanitized = {}
-        
+
         for key, value in message.__dict__.items():
             # Skip private attributes
             if key.startswith('_'):
                 continue
-                
+
             # Redact sensitive information
             if self._is_sensitive_field(key):
                 sanitized[key] = "[REDACTED]"
@@ -116,9 +116,9 @@ class LoggingMiddleware(Middleware):
                     sanitized[key] = value
             else:
                 sanitized[key] = value
-        
+
         return sanitized
-    
+
     def _is_sensitive_field(self, field_name: str) -> bool:
         """Check if field contains sensitive data that should be redacted.
         
@@ -131,11 +131,11 @@ class LoggingMiddleware(Middleware):
         sensitive_keywords = [
             "password", "passwd", "pwd",
             "token", "access_token", "refresh_token", "api_token",
-            "key", "api_key", "private_key", "secret_key", "ssh_key", 
+            "key", "api_key", "private_key", "secret_key", "ssh_key",
             "identity_file", "cert", "certificate",
             "secret", "client_secret", "auth_secret",
             "credential", "auth", "authorization"
         ]
-        
+
         field_lower = field_name.lower()
         return any(sensitive in field_lower for sensitive in sensitive_keywords)

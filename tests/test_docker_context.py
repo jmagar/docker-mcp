@@ -4,9 +4,8 @@ Comprehensive tests for Docker context management functionality.
 Tests Docker context creation, caching, command execution, and lifecycle management.
 """
 
-import json
 import subprocess
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -28,9 +27,9 @@ class TestDockerContextManagerInit:
                 description="Test host"
             )
         })
-        
+
         manager = DockerContextManager(config)
-        
+
         assert manager.config == config
         assert isinstance(manager._context_cache, dict)
         assert len(manager._context_cache) == 0
@@ -41,10 +40,10 @@ class TestDockerContextManagerInit:
     def test_docker_context_manager_custom_docker_bin(self, mock_which):
         """Test DockerContextManager with custom docker binary path."""
         mock_which.return_value = "/usr/local/bin/docker"
-        
+
         config = DockerMCPConfig()
         manager = DockerContextManager(config)
-        
+
         assert manager._docker_bin == "/usr/local/bin/docker"
         mock_which.assert_called_once_with("docker")
 
@@ -52,10 +51,10 @@ class TestDockerContextManagerInit:
     def test_docker_context_manager_no_docker_bin(self, mock_which):
         """Test DockerContextManager when docker binary not found."""
         mock_which.return_value = None
-        
+
         config = DockerMCPConfig()
         manager = DockerContextManager(config)
-        
+
         assert manager._docker_bin == "docker"  # Falls back to "docker"
 
 
@@ -84,13 +83,13 @@ class TestDockerCommandExecution:
             mock_result.stdout = '{"version": "1.0"}'
             mock_result.stderr = ""
             mock_run.return_value = mock_result
-            
+
             result = await manager._run_docker_command(["version"])
-            
+
             assert result.returncode == 0
             assert result.stdout == '{"version": "1.0"}'
             mock_run.assert_called_once()
-            
+
             # Verify command structure
             call_args = mock_run.call_args
             assert call_args[0][0][0] == "docker"  # First arg is command
@@ -104,12 +103,12 @@ class TestDockerCommandExecution:
             mock_result.returncode = 0
             mock_result.stdout = "output"
             mock_run.return_value = mock_result
-            
+
             result = await manager._run_docker_command(["ps"], timeout=45)
-            
+
             assert result.returncode == 0
             mock_run.assert_called_once()
-            
+
             # Check that timeout was passed
             call_kwargs = mock_run.call_args[1]
             assert call_kwargs["timeout"] == 45
@@ -121,7 +120,7 @@ class TestDockerCommandExecution:
             "compose", "pull", "build", "inspect", "images",
             "volume", "network", "system", "info", "version"
         ]
-        
+
         for command in allowed_commands:
             # These should not raise exceptions
             manager._validate_docker_command(command)
@@ -133,7 +132,7 @@ class TestDockerCommandExecution:
             "rm", "rmi", "exec", "run", "create", "commit",
             "save", "load", "export", "import", "cp", "diff"
         ]
-        
+
         for command in disallowed_commands:
             with pytest.raises(ValueError, match="Command not allowed"):
                 manager._validate_docker_command(command)
@@ -142,7 +141,7 @@ class TestDockerCommandExecution:
         """Test validation rejects empty commands."""
         with pytest.raises(ValueError, match="Empty command"):
             manager._validate_docker_command("")
-        
+
         with pytest.raises(ValueError, match="Empty command"):
             manager._validate_docker_command("   ")
 
@@ -176,9 +175,9 @@ class TestDockerContextLifecycle:
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_cmd.return_value = mock_result
-            
+
             exists = await manager_with_host._context_exists("test-context")
-            
+
             assert exists is True
             mock_cmd.assert_called_once_with(["context", "inspect", "test-context"], timeout=10)
 
@@ -189,9 +188,9 @@ class TestDockerContextLifecycle:
             mock_result = MagicMock()
             mock_result.returncode = 1
             mock_cmd.return_value = mock_result
-            
+
             exists = await manager_with_host._context_exists("nonexistent-context")
-            
+
             assert exists is False
 
     @pytest.mark.asyncio
@@ -199,9 +198,9 @@ class TestDockerContextLifecycle:
         """Test context existence check handles exceptions gracefully."""
         with patch.object(manager_with_host, '_run_docker_command') as mock_cmd:
             mock_cmd.side_effect = Exception("Connection error")
-            
+
             exists = await manager_with_host._context_exists("test-context")
-            
+
             assert exists is False
 
     @pytest.mark.asyncio
@@ -212,17 +211,17 @@ class TestDockerContextLifecycle:
             user="basicuser",
             port=22
         )
-        
+
         with patch.object(manager_with_host, '_run_docker_command') as mock_cmd:
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_cmd.return_value = mock_result
-            
+
             await manager_with_host._create_context("basic-context", host_config)
-            
+
             mock_cmd.assert_called_once()
             call_args = mock_cmd.call_args[0][0]
-            
+
             # Verify command structure
             assert call_args[0] == "context"
             assert call_args[1] == "create"
@@ -238,16 +237,16 @@ class TestDockerContextLifecycle:
             user="customuser",
             port=2222
         )
-        
+
         with patch.object(manager_with_host, '_run_docker_command') as mock_cmd:
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_cmd.return_value = mock_result
-            
+
             await manager_with_host._create_context("custom-context", host_config)
-            
+
             call_args = mock_cmd.call_args[0][0]
-            
+
             # Verify SSH URL includes custom port
             assert call_args[4] == "host=ssh://customuser@custom.example.com:2222"
 
@@ -259,16 +258,16 @@ class TestDockerContextLifecycle:
             user="user",
             description="A test host with description"
         )
-        
+
         with patch.object(manager_with_host, '_run_docker_command') as mock_cmd:
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_cmd.return_value = mock_result
-            
+
             await manager_with_host._create_context("described-context", host_config)
-            
+
             call_args = mock_cmd.call_args[0][0]
-            
+
             # Verify description is included
             assert "--description" in call_args
             desc_index = call_args.index("--description")
@@ -278,13 +277,13 @@ class TestDockerContextLifecycle:
     async def test_create_context_failure(self, manager_with_host):
         """Test Docker context creation failure."""
         host_config = DockerHost(hostname="fail.example.com", user="user")
-        
+
         with patch.object(manager_with_host, '_run_docker_command') as mock_cmd:
             mock_result = MagicMock()
             mock_result.returncode = 1
             mock_result.stderr = "Failed to create context"
             mock_cmd.return_value = mock_result
-            
+
             with pytest.raises(DockerContextError, match="Failed to create context"):
                 await manager_with_host._create_context("fail-context", host_config)
 
@@ -292,10 +291,10 @@ class TestDockerContextLifecycle:
     async def test_create_context_timeout(self, manager_with_host):
         """Test Docker context creation timeout."""
         host_config = DockerHost(hostname="timeout.example.com", user="user")
-        
+
         with patch.object(manager_with_host, '_run_docker_command') as mock_cmd:
             mock_cmd.side_effect = subprocess.TimeoutExpired("docker", 30)
-            
+
             with pytest.raises(DockerContextError, match="Context creation timed out"):
                 await manager_with_host._create_context("timeout-context", host_config)
 
@@ -303,10 +302,10 @@ class TestDockerContextLifecycle:
     async def test_create_context_general_exception(self, manager_with_host):
         """Test Docker context creation with general exception."""
         host_config = DockerHost(hostname="error.example.com", user="user")
-        
+
         with patch.object(manager_with_host, '_run_docker_command') as mock_cmd:
             mock_cmd.side_effect = Exception("Unexpected error")
-            
+
             with pytest.raises(DockerContextError, match="Failed to create context"):
                 await manager_with_host._create_context("error-context", host_config)
 
@@ -324,7 +323,7 @@ class TestContextEnsuring:
                 docker_context="cached-context"
             ),
             "new-host": DockerHost(
-                hostname="new.example.com", 
+                hostname="new.example.com",
                 user="new"
             ),
             "existing-host": DockerHost(
@@ -346,12 +345,12 @@ class TestContextEnsuring:
         """Test ensuring context when cached context is valid."""
         # Simulate cached context
         manager_with_hosts._context_cache["cached-host"] = "cached-context"
-        
+
         with patch.object(manager_with_hosts, '_context_exists') as mock_exists:
             mock_exists.return_value = True
-            
+
             context_name = await manager_with_hosts.ensure_context("cached-host")
-            
+
             assert context_name == "cached-context"
             mock_exists.assert_called_once_with("cached-context")
 
@@ -360,21 +359,21 @@ class TestContextEnsuring:
         """Test ensuring context when cached context no longer exists."""
         # Simulate cached context that no longer exists
         manager_with_hosts._context_cache["cached-host"] = "old-context"
-        
+
         with patch.object(manager_with_hosts, '_context_exists') as mock_exists, \
              patch.object(manager_with_hosts, '_create_context') as mock_create:
-            
-            # First call (cached context) returns False, second call (configured context) returns False, 
+
+            # First call (cached context) returns False, second call (configured context) returns False,
             # so it creates the context
             mock_exists.return_value = False
-            
+
             context_name = await manager_with_hosts.ensure_context("cached-host")
-            
+
             # Should use the configured docker_context name
             assert context_name == "cached-context"
             assert "cached-host" in manager_with_hosts._context_cache
             # Should check cached context, then configured context, then create
-            assert mock_exists.call_count == 2  
+            assert mock_exists.call_count == 2
             mock_create.assert_called_once()
 
     @pytest.mark.asyncio
@@ -382,9 +381,9 @@ class TestContextEnsuring:
         """Test ensuring context when context already exists."""
         with patch.object(manager_with_hosts, '_context_exists') as mock_exists:
             mock_exists.return_value = True
-            
+
             context_name = await manager_with_hosts.ensure_context("existing-host")
-            
+
             assert context_name == "existing-context"
             assert manager_with_hosts._context_cache["existing-host"] == "existing-context"
 
@@ -393,11 +392,11 @@ class TestContextEnsuring:
         """Test ensuring context by creating new one."""
         with patch.object(manager_with_hosts, '_context_exists') as mock_exists, \
              patch.object(manager_with_hosts, '_create_context') as mock_create:
-            
+
             mock_exists.return_value = False
-            
+
             context_name = await manager_with_hosts.ensure_context("new-host")
-            
+
             assert context_name == "docker-mcp-new-host"  # Default naming
             assert manager_with_hosts._context_cache["new-host"] == "docker-mcp-new-host"
             mock_create.assert_called_once()
@@ -421,18 +420,18 @@ class TestDockerCommandExecution:
     async def test_execute_docker_command_json_output(self, manager_with_host):
         """Test executing Docker command that returns JSON."""
         version_output = '{"Client": {"Version": "20.10.0"}}'
-        
+
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_host, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "exec-context"
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_result.stdout = version_output
             mock_run.return_value = mock_result
-            
+
             result = await manager_with_host.execute_docker_command("exec-host", "version")
-            
+
             assert isinstance(result, dict)
             assert result["Client"]["Version"] == "20.10.0"
             mock_ensure.assert_called_once_with("exec-host")
@@ -441,36 +440,36 @@ class TestDockerCommandExecution:
     async def test_execute_docker_command_text_output(self, manager_with_host):
         """Test executing Docker command that returns text."""
         ps_output = "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES"
-        
+
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_host, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "exec-context"
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_result.stdout = ps_output
             mock_run.return_value = mock_result
-            
+
             result = await manager_with_host.execute_docker_command("exec-host", "ps")
-            
+
             assert result == {"output": ps_output}
 
     @pytest.mark.asyncio
     async def test_execute_docker_command_invalid_json(self, manager_with_host):
         """Test executing command that should return JSON but doesn't."""
         invalid_json = "Not valid JSON output"
-        
+
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_host, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "exec-context"
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_result.stdout = invalid_json
             mock_run.return_value = mock_result
-            
+
             result = await manager_with_host.execute_docker_command("exec-host", "inspect container")
-            
+
             assert result == {"output": invalid_json}
 
     @pytest.mark.asyncio
@@ -478,13 +477,13 @@ class TestDockerCommandExecution:
         """Test executing Docker command that fails."""
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_host, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "exec-context"
             mock_result = MagicMock()
             mock_result.returncode = 1
             mock_result.stderr = "Container not found"
             mock_run.return_value = mock_result
-            
+
             with pytest.raises(DockerContextError, match="Docker command failed"):
                 await manager_with_host.execute_docker_command("exec-host", "start nonexistent")
 
@@ -493,10 +492,10 @@ class TestDockerCommandExecution:
         """Test executing Docker command that times out."""
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_host, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "exec-context"
             mock_run.side_effect = subprocess.TimeoutExpired("docker", 60)
-            
+
             with pytest.raises(DockerContextError, match="Docker command timed out"):
                 await manager_with_host.execute_docker_command("exec-host", "ps")
 
@@ -522,15 +521,15 @@ class TestContextListingAndRemoval:
         context_output = '''{"Name":"default","Current":true}
 {"Name":"test-context","Current":false}
 {"Name":"another-context","Current":false}'''
-        
+
         with patch.object(manager, '_run_docker_command') as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_result.stdout = context_output
             mock_run.return_value = mock_result
-            
+
             contexts = await manager.list_contexts()
-            
+
             assert len(contexts) == 3
             assert contexts[0]["Name"] == "default"
             assert contexts[0]["Current"] is True
@@ -545,7 +544,7 @@ class TestContextListingAndRemoval:
             mock_result.returncode = 1
             mock_result.stderr = "Access denied"
             mock_run.return_value = mock_result
-            
+
             with pytest.raises(DockerContextError, match="Failed to list contexts"):
                 await manager.list_contexts()
 
@@ -555,15 +554,15 @@ class TestContextListingAndRemoval:
         context_output = '''{"Name":"valid","Current":true}
 invalid json line
 {"Name":"another-valid","Current":false}'''
-        
+
         with patch.object(manager, '_run_docker_command') as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_result.stdout = context_output
             mock_run.return_value = mock_result
-            
+
             contexts = await manager.list_contexts()
-            
+
             # Should skip invalid line but parse valid ones
             assert len(contexts) == 2
             assert contexts[0]["Name"] == "valid"
@@ -574,7 +573,7 @@ invalid json line
         """Test context listing timeout."""
         with patch.object(manager, '_run_docker_command') as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired("docker", 10)
-            
+
             with pytest.raises(DockerContextError, match="Context listing timed out"):
                 await manager.list_contexts()
 
@@ -583,14 +582,14 @@ invalid json line
         """Test successful context removal."""
         # Set up cache to test cache cleanup
         manager._context_cache["test-host"] = "test-context"
-        
+
         with patch.object(manager, '_run_docker_command') as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_run.return_value = mock_result
-            
+
             await manager.remove_context("test-context")
-            
+
             # Verify cache was cleaned up
             assert "test-host" not in manager._context_cache
             mock_run.assert_called_once_with(["context", "rm", "test-context"], timeout=10)
@@ -603,7 +602,7 @@ invalid json line
             mock_result.returncode = 1
             mock_result.stderr = "Context not found"
             mock_run.return_value = mock_result
-            
+
             with pytest.raises(DockerContextError, match="Failed to remove context"):
                 await manager.remove_context("nonexistent-context")
 
@@ -612,7 +611,7 @@ invalid json line
         """Test context removal timeout."""
         with patch.object(manager, '_run_docker_command') as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired("docker", 10)
-            
+
             with pytest.raises(DockerContextError, match="Context removal timed out"):
                 await manager.remove_context("timeout-context")
 
@@ -635,18 +634,18 @@ class TestConnectionTesting:
     async def test_test_context_connection_success(self, manager_with_host):
         """Test successful connection testing."""
         version_output = '{"Client": {"Version": "20.10.0"}, "Server": {"Version": "20.10.0"}}'
-        
+
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_host, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "test-context"
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_result.stdout = version_output
             mock_run.return_value = mock_result
-            
+
             success = await manager_with_host.test_context_connection("test-connection")
-            
+
             assert success is True
             mock_ensure.assert_called_once_with("test-connection")
 
@@ -655,15 +654,15 @@ class TestConnectionTesting:
         """Test failed connection testing."""
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_host, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "test-context"
             mock_result = MagicMock()
             mock_result.returncode = 1
             mock_result.stderr = "Connection refused"
             mock_run.return_value = mock_result
-            
+
             success = await manager_with_host.test_context_connection("test-connection")
-            
+
             assert success is False
 
     @pytest.mark.asyncio
@@ -671,15 +670,15 @@ class TestConnectionTesting:
         """Test connection testing with non-JSON version output."""
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_host, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "test-context"
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_result.stdout = "Docker version 20.10.0"  # Non-JSON
             mock_run.return_value = mock_result
-            
+
             success = await manager_with_host.test_context_connection("test-connection")
-            
+
             assert success is True  # Returns True based on returncode
 
     @pytest.mark.asyncio
@@ -687,9 +686,9 @@ class TestConnectionTesting:
         """Test connection testing with exception."""
         with patch.object(manager_with_host, 'ensure_context') as mock_ensure:
             mock_ensure.side_effect = DockerContextError("Context creation failed")
-            
+
             success = await manager_with_host.test_context_connection("test-connection")
-            
+
             assert success is False
 
 
@@ -724,26 +723,26 @@ class TestDockerContextIntegration:
         with patch.object(manager_with_multiple_hosts, '_context_exists') as mock_exists, \
              patch.object(manager_with_multiple_hosts, '_create_context') as mock_create, \
              patch.object(manager_with_multiple_hosts, '_run_docker_command') as mock_run:
-            
+
             # Mock context existence checks
             mock_exists.return_value = False
-            
+
             # Mock successful Docker command execution
             mock_result = MagicMock()
             mock_result.returncode = 0
             mock_result.stdout = "success"
             mock_run.return_value = mock_result
-            
+
             # Ensure contexts for all hosts
             context1 = await manager_with_multiple_hosts.ensure_context("host1")
-            context2 = await manager_with_multiple_hosts.ensure_context("host2")  
+            context2 = await manager_with_multiple_hosts.ensure_context("host2")
             context3 = await manager_with_multiple_hosts.ensure_context("host3")
-            
+
             # Verify different context names
             assert context1 == "docker-mcp-host1"
             assert context2 == "custom-context"
             assert context3 == "docker-mcp-host3"
-            
+
             # Verify all are cached
             assert len(manager_with_multiple_hosts._context_cache) == 3
             assert manager_with_multiple_hosts._context_cache["host1"] == context1
@@ -756,14 +755,14 @@ class TestDockerContextIntegration:
         with patch.object(manager_with_multiple_hosts, '_context_exists') as mock_exists, \
              patch.object(manager_with_multiple_hosts, '_create_context') as mock_create, \
              patch.object(manager_with_multiple_hosts, '_run_docker_command') as mock_run:
-            
+
             # Setup mocks for context creation
             mock_exists.return_value = False
-            
+
             # Mock Docker command responses
             def mock_docker_responses(*args, **kwargs):
                 command = args[0]
-                
+
                 if command[0] == "context" and command[1] == "create":
                     # Context creation
                     result = MagicMock()
@@ -780,16 +779,16 @@ class TestDockerContextIntegration:
                     result.returncode = 0
                     result.stdout = "success"
                     return result
-            
+
             mock_run.side_effect = mock_docker_responses
-            
+
             # Execute commands on different hosts
             result1 = await manager_with_multiple_hosts.execute_docker_command("host1", "ps")
             result2 = await manager_with_multiple_hosts.execute_docker_command("host2", "info")
-            
+
             assert "containers" in result1 or "output" in result1
             assert isinstance(result2, dict)
-            
+
             # Verify contexts were created and cached
             assert len(manager_with_multiple_hosts._context_cache) == 2
 
@@ -798,23 +797,23 @@ class TestDockerContextIntegration:
         """Test context cache invalidation and recreation."""
         # Pre-populate cache with invalid context
         manager_with_multiple_hosts._context_cache["host1"] = "old-context"
-        
+
         with patch.object(manager_with_multiple_hosts, '_context_exists') as mock_exists, \
              patch.object(manager_with_multiple_hosts, '_create_context') as mock_create:
-            
+
             # First call returns False (cached context doesn't exist)
             # Second call returns False (default context doesn't exist), so create it
             mock_exists.return_value = False
-            
+
             context_name = await manager_with_multiple_hosts.ensure_context("host1")
-            
+
             # Should get the default context name
             assert context_name == "docker-mcp-host1"
-            
+
             # Should have called _context_exists twice and created new context
             assert mock_exists.call_count == 2
             mock_create.assert_called_once()
-            
+
             # Cache should be updated
             assert manager_with_multiple_hosts._context_cache["host1"] == "docker-mcp-host1"
 
@@ -824,30 +823,30 @@ class TestDockerContextIntegration:
         # Test 1: Invalid host ID
         with pytest.raises(DockerContextError, match="Host invalid not configured"):
             await manager_with_multiple_hosts.ensure_context("invalid")
-        
+
         # Test 2: Context creation failure
         with patch.object(manager_with_multiple_hosts, '_context_exists') as mock_exists, \
              patch.object(manager_with_multiple_hosts, '_create_context') as mock_create:
-            
+
             mock_exists.return_value = False
             mock_create.side_effect = DockerContextError("Creation failed")
-            
+
             with pytest.raises(DockerContextError, match="Creation failed"):
                 await manager_with_multiple_hosts.ensure_context("host1")
-        
-        # Test 3: Command validation failure  
+
+        # Test 3: Command validation failure
         with pytest.raises(ValueError, match="Command not allowed"):
             await manager_with_multiple_hosts.execute_docker_command("host1", "rm container")
-        
+
         # Test 4: Command execution failure
         with patch.object(manager_with_multiple_hosts, 'ensure_context') as mock_ensure, \
              patch.object(manager_with_multiple_hosts, '_run_docker_command') as mock_run:
-            
+
             mock_ensure.return_value = "test-context"
             mock_result = MagicMock()
             mock_result.returncode = 1
             mock_result.stderr = "Command failed"
             mock_run.return_value = mock_result
-            
+
             with pytest.raises(DockerContextError, match="Docker command failed"):
                 await manager_with_multiple_hosts.execute_docker_command("host1", "ps")

@@ -3,8 +3,8 @@
 import logging
 import os
 import sys
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -28,23 +28,23 @@ def setup_logging(
     """
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Get log level from environment or parameter
     if log_level is None:
         log_level = os.getenv("LOG_LEVEL", "INFO")
-    
+
     log_level_num = getattr(logging, log_level.upper(), logging.INFO)
     max_bytes = max_file_size_mb * 1024 * 1024
-    
+
     # Clear any existing handlers to prevent duplicates
     logging.getLogger().handlers.clear()
-    
+
     # Create formatters
     console_formatter = logging.Formatter(
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    
+
     # Server log handler (mcp_server.log)
     server_file_handler = RotatingFileHandler(
         log_dir / "mcp_server.log",
@@ -54,7 +54,7 @@ def setup_logging(
     )
     server_file_handler.setLevel(log_level_num)
     server_file_handler.setFormatter(console_formatter)
-    
+
     # Middleware log handler (middleware.log)
     middleware_file_handler = RotatingFileHandler(
         log_dir / "middleware.log",
@@ -64,29 +64,29 @@ def setup_logging(
     )
     middleware_file_handler.setLevel(log_level_num)
     middleware_file_handler.setFormatter(console_formatter)
-    
+
     # Console handler (for both server and middleware)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level_num)
     console_handler.setFormatter(console_formatter)
-    
+
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level_num)
     root_logger.addHandler(console_handler)
-    
+
     # Configure server logger (writes to mcp_server.log + console)
     server_logger = logging.getLogger("server")
     server_logger.addHandler(server_file_handler)
     server_logger.propagate = True  # Also send to console via root logger
-    
+
     # Configure middleware logger (writes to middleware.log + console)
     middleware_logger = logging.getLogger("middleware")
     middleware_logger.addHandler(middleware_file_handler)
     middleware_logger.propagate = True  # Also send to console via root logger
-    
+
     # Configure structlog to use standard library logging
-    from structlog.stdlib import LoggerFactory, BoundLogger, ProcessorFormatter
+    from structlog.stdlib import BoundLogger, LoggerFactory, ProcessorFormatter
     renderer = structlog.dev.ConsoleRenderer() if sys.stdout.isatty() else structlog.processors.JSONRenderer()
     # Integrate with stdlib handlers so file and console both receive events
     structlog.configure(
@@ -105,7 +105,7 @@ def setup_logging(
     console_handler.setFormatter(ProcessorFormatter(processor=renderer))
     server_file_handler.setFormatter(ProcessorFormatter(processor=structlog.processors.JSONRenderer()))
     middleware_file_handler.setFormatter(ProcessorFormatter(processor=structlog.processors.JSONRenderer()))
-    
+
     # Log initialization
     logger = structlog.get_logger("server")
     logger.info(

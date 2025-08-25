@@ -34,21 +34,21 @@ class ContainerService:
         """Validate container is safe for testing operations."""
         # List of production containers that should not be operated on during tests
         production_containers = {
-            "opengist", "nextcloud", "plex", "portainer", "traefik", 
+            "opengist", "nextcloud", "plex", "portainer", "traefik",
             "mysql", "postgres", "redis", "mongodb", "elasticsearch",
             "grafana", "prometheus", "nginx-proxy", "ssl-companion"
         }
-        
+
         # Check if this looks like a production container
         if container_id.lower() in production_containers:
             return False, f"Safety check failed: '{container_id}' appears to be a production container. Use test containers for testing."
-        
+
         # Allow test containers (those with "test" prefix or specific test patterns)
-        if (container_id.startswith("test-") or 
-            "test" in container_id.lower() or 
+        if (container_id.startswith("test-") or
+            "test" in container_id.lower() or
             container_id.startswith("mcp-")):
             return True, ""
-            
+
         # For other containers, issue a warning but allow operation
         # This preserves backward compatibility while encouraging safe practices
         self.logger.warning(

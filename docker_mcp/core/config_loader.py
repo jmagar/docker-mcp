@@ -32,7 +32,7 @@ class DockerHost(BaseModel):
 
 class CleanupSchedule(BaseModel):
     """Cleanup schedule configuration."""
-    
+
     host_id: str
     cleanup_type: Literal["safe", "moderate"]  # Only safe and moderate for scheduling
     frequency: str  # daily, weekly, monthly, custom

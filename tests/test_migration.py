@@ -1,10 +1,12 @@
 """Tests for Docker stack migration functionality."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from docker_mcp.core.migration.manager import MigrationManager
-from docker_mcp.core.exceptions import DockerMCPError as MigrationError
+
 from docker_mcp.core.config_loader import DockerHost
+from docker_mcp.core.exceptions import DockerMCPError as MigrationError
+from docker_mcp.core.migration.manager import MigrationManager
 
 
 class TestMigrationManager:
@@ -30,7 +32,7 @@ volumes:
   data:
 """
         result = await migration_manager.parse_compose_volumes(compose_content)
-        
+
         assert "data" in result["named_volumes"]
         assert "./config" in result["bind_mounts"]
         assert "data" in result["volume_definitions"]
@@ -60,7 +62,7 @@ volumes:
   redis_data:
 """
         result = await migration_manager.parse_compose_volumes(compose_content)
-        
+
         assert "postgres_data" in result["named_volumes"]
         assert "redis_data" in result["named_volumes"]
         assert "/host/backup" in result["bind_mounts"]
@@ -79,7 +81,7 @@ invalid: yaml: content
     def test_parse_volume_string_named(self, migration_manager):
         """Test parsing named volume string."""
         result = migration_manager._parse_volume_string("data:/app/data")
-        
+
         assert result["type"] == "named"
         assert result["name"] == "data"
         assert result["destination"] == "/app/data"
@@ -87,7 +89,7 @@ invalid: yaml: content
     def test_parse_volume_string_bind_absolute(self, migration_manager):
         """Test parsing bind mount with absolute path."""
         result = migration_manager._parse_volume_string("/host/path:/container/path:ro")
-        
+
         assert result["type"] == "bind"
         assert result["source"] == "/host/path"
         assert result["destination"] == "/container/path"
@@ -96,7 +98,7 @@ invalid: yaml: content
     def test_parse_volume_string_bind_relative(self, migration_manager):
         """Test parsing bind mount with relative path."""
         result = migration_manager._parse_volume_string("./config:/etc/app")
-        
+
         assert result["type"] == "bind"
         assert result["source"] == "./config"
         assert result["destination"] == "/etc/app"
@@ -106,17 +108,17 @@ invalid: yaml: content
         """Test creating volume archive with exclusions."""
         ssh_cmd = ["ssh", "user@host"]
         volume_paths = ["/data/app", "/data/db"]
-        
+
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            
+
             archive_path = await migration_manager.archive_utils.create_archive(
                 ssh_cmd, volume_paths, "test_archive"
             )
-            
+
             assert "test_archive" in archive_path
             assert ".tar.gz" in archive_path
-            
+
             # Check that exclusions were applied
             call_args = mock_run.call_args[0][0]
             command_str = " ".join(call_args) if isinstance(call_args, list) else str(call_args)
@@ -127,7 +129,7 @@ invalid: yaml: content
     async def test_create_volume_archive_empty_paths(self, migration_manager):
         """Test creating archive with no paths raises error."""
         ssh_cmd = ["ssh", "user@host"]
-        
+
         with pytest.raises(Exception, match="No volumes to archive"):
             await migration_manager.archive_utils.create_archive(ssh_cmd, [], "test")
 
@@ -143,20 +145,20 @@ invalid: yaml: content
             hostname="target.example.com",
             user="user2"
         )
-        
+
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout="sent 1000 bytes  received 35 bytes  2070.00 bytes/sec\ntotal size is 1000  speedup is 0.97",
                 stderr=""
             )
-            
+
             result = await migration_manager.rsync_transfer.transfer(
                 source_host, target_host,
                 "/source/path", "/target/path",
                 compress=True, delete=False, dry_run=False
             )
-            
+
             assert result["success"] is True
             assert "source" in result
             assert "target" in result
@@ -167,14 +169,14 @@ invalid: yaml: content
         """Test rsync transfer failure handling."""
         source_host = DockerHost(hostname="source.example.com", user="user1")
         target_host = DockerHost(hostname="target.example.com", user="user2")
-        
+
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=1,
                 stdout="",
                 stderr="Connection refused"
             )
-            
+
             with pytest.raises(Exception, match="Rsync failed"):
                 await migration_manager.rsync_transfer.transfer(
                     source_host, target_host,
@@ -194,7 +196,7 @@ sent 1,234 bytes  received 56 bytes  2,580.00 bytes/sec
 total size is 1,024  speedup is 0.79
 """
         stats = migration_manager.rsync_transfer._parse_stats(output)
-        
+
         assert stats["files_transferred"] == 2
         assert stats["total_size"] == 1024
         assert "580.00 bytes/sec" in stats["transfer_rate"]
@@ -205,16 +207,16 @@ total size is 1,024  speedup is 0.79
         """Test getting Docker volume mount points."""
         ssh_cmd = ["ssh", "user@host"]
         named_volumes = ["app_data", "db_data"]
-        
+
         with patch("subprocess.run") as mock_run:
             # Mock successful volume inspect commands
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="/var/lib/docker/volumes/app_data/_data\n"),
                 MagicMock(returncode=0, stdout="/var/lib/docker/volumes/db_data/_data\n"),
             ]
-            
+
             result = await migration_manager.get_volume_locations(ssh_cmd, named_volumes)
-            
+
             assert result["app_data"] == "/var/lib/docker/volumes/app_data/_data"
             assert result["db_data"] == "/var/lib/docker/volumes/db_data/_data"
 
@@ -223,44 +225,44 @@ total size is 1,024  speedup is 0.79
         """Test verifying no containers are running."""
         ssh_cmd = ["ssh", "user@host"]
         stack_name = "test_stack"
-        
+
         with patch("subprocess.run") as mock_run:
             # No containers running
             mock_run.return_value = MagicMock(returncode=0, stdout="")
-            
+
             all_stopped, running = await migration_manager.verify_containers_stopped(
                 ssh_cmd, stack_name
             )
-            
+
             assert all_stopped is True
             assert running == []
-    
+
     @pytest.mark.asyncio
     async def test_verify_containers_stopped_with_running(self, migration_manager):
         """Test verifying with running containers."""
         ssh_cmd = ["ssh", "user@host"]
         stack_name = "test_stack"
-        
+
         with patch("subprocess.run") as mock_run:
             # Containers are running
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout="test_stack_web_1\ntest_stack_db_1\n"
             )
-            
+
             all_stopped, running = await migration_manager.verify_containers_stopped(
                 ssh_cmd, stack_name
             )
-            
+
             assert all_stopped is False
             assert running == ["test_stack_web_1", "test_stack_db_1"]
-    
+
     @pytest.mark.asyncio
     async def test_verify_containers_stopped_with_force(self, migration_manager):
         """Test force stopping running containers."""
         ssh_cmd = ["ssh", "user@host"]
         stack_name = "test_stack"
-        
+
         with patch("subprocess.run") as mock_run:
             # First check: containers running
             # Kill commands for each container
@@ -271,29 +273,29 @@ total size is 1,024  speedup is 0.79
                 MagicMock(returncode=0, stdout=""),  # kill db
                 MagicMock(returncode=0, stdout=""),  # re-check: all stopped
             ]
-            
+
             all_stopped, running = await migration_manager.verify_containers_stopped(
                 ssh_cmd, stack_name, force_stop=True
             )
-            
+
             assert all_stopped is True
             assert running == []
             assert mock_run.call_count == 4  # check, 2 kills, re-check
-    
+
     @pytest.mark.asyncio
     async def test_prepare_target_directories(self, migration_manager):
         """Test preparing target directories for migration."""
         ssh_cmd = ["ssh", "user@host"]
         appdata_path = "/opt/appdata"
         stack_name = "myapp"
-        
+
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
-            
+
             result = await migration_manager.prepare_target_directories(
                 ssh_cmd, appdata_path, stack_name
             )
-            
+
             assert result == f"{appdata_path}/{stack_name}"
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]
@@ -313,11 +315,11 @@ services:
             "data": "/old/path/data"
         }
         new_base_path = "/new/appdata/myapp"
-        
+
         result = migration_manager.update_compose_for_migration(
             compose_content, old_paths, new_base_path
         )
-        
+
         assert "/old/path/data" not in result
         assert "/new/appdata/myapp/data" in result
         assert "./config" in result  # Relative paths should remain unchanged

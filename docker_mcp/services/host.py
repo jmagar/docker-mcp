@@ -4,8 +4,6 @@ Host Management Service
 Business logic for Docker host management operations.
 """
 
-import asyncio
-import subprocess
 from typing import Any
 
 import structlog

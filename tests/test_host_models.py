@@ -4,16 +4,12 @@ Comprehensive tests for host-related Pydantic models.
 Tests all host models to achieve 95%+ coverage on models/host.py.
 """
 
-import pytest
 from datetime import datetime
+
+import pytest
 from pydantic import ValidationError
 
-from docker_mcp.models.host import (
-    HostInfo,
-    HostStatus,
-    HostResources,
-    AddHostRequest
-)
+from docker_mcp.models.host import AddHostRequest, HostInfo, HostResources, HostStatus
 
 
 class TestHostInfo:
@@ -26,7 +22,7 @@ class TestHostInfo:
             hostname="test.example.com",
             user="testuser"
         )
-        
+
         assert host.host_id == "test-host"
         assert host.hostname == "test.example.com"
         assert host.user == "testuser"
@@ -52,7 +48,7 @@ class TestHostInfo:
             docker_version="24.0.7",
             last_ping="2025-01-15T10:30:00Z"
         )
-        
+
         assert host.host_id == "prod-host-01"
         assert host.hostname == "prod01.example.com"
         assert host.user == "deploy"
@@ -78,9 +74,9 @@ class TestHostInfo:
             docker_version="25.0.0",
             last_ping="2025-01-15T12:00:00Z"
         )
-        
+
         data = host.model_dump()
-        
+
         assert data["host_id"] == "test-host"
         assert data["hostname"] == "test.example.com"
         assert data["user"] == "testuser"
@@ -97,7 +93,7 @@ class TestHostInfo:
         # Test missing required fields
         with pytest.raises(ValidationError) as exc_info:
             HostInfo()
-        
+
         errors = exc_info.value.errors()
         required_fields = {error["loc"][0] for error in errors if error["type"] == "missing"}
         assert "host_id" in required_fields
@@ -126,7 +122,7 @@ class TestHostInfo:
                 user="testuser",
                 port="invalid_port"  # Should be int
             )
-        
+
         with pytest.raises(ValidationError):
             HostInfo(
                 host_id="test-host",
@@ -148,7 +144,7 @@ class TestHostStatus:
             docker_connected=True,
             last_check="2025-01-15T10:00:00Z"
         )
-        
+
         assert status.host_id == "test-host"
         assert status.online is True
         assert status.ssh_connected is True
@@ -168,7 +164,7 @@ class TestHostStatus:
             last_check="2025-01-15T10:30:00Z",
             response_time_ms=1250.5
         )
-        
+
         assert status.host_id == "prod-host-01"
         assert status.online is False
         assert status.ssh_connected is False
@@ -188,9 +184,9 @@ class TestHostStatus:
             last_check="2025-01-15T11:00:00Z",
             response_time_ms=500.25
         )
-        
+
         data = status.model_dump()
-        
+
         assert data["host_id"] == "test-host"
         assert data["online"] is True
         assert data["ssh_connected"] is True
@@ -203,7 +199,7 @@ class TestHostStatus:
         """Test HostStatus validation with invalid data."""
         with pytest.raises(ValidationError) as exc_info:
             HostStatus()
-        
+
         errors = exc_info.value.errors()
         required_fields = {error["loc"][0] for error in errors if error["type"] == "missing"}
         assert "host_id" in required_fields
@@ -232,7 +228,7 @@ class TestHostResources:
         resources = HostResources(
             host_id="test-host"
         )
-        
+
         assert resources.host_id == "test-host"
         assert resources.cpu_count is None
         assert resources.memory_total is None
@@ -258,7 +254,7 @@ class TestHostResources:
             containers_total=25,
             images_count=45
         )
-        
+
         assert resources.host_id == "prod-host-01"
         assert resources.cpu_count == 8
         assert resources.memory_total == 16 * 1024 * 1024 * 1024
@@ -284,9 +280,9 @@ class TestHostResources:
             containers_total=10,
             images_count=15
         )
-        
+
         data = resources.model_dump()
-        
+
         assert data["host_id"] == "test-host"
         assert data["cpu_count"] == 4
         assert data["memory_total"] == 8589934592
@@ -302,7 +298,7 @@ class TestHostResources:
         """Test HostResources validation with invalid data."""
         with pytest.raises(ValidationError) as exc_info:
             HostResources()
-        
+
         errors = exc_info.value.errors()
         required_fields = {error["loc"][0] for error in errors if error["type"] == "missing"}
         assert "host_id" in required_fields
@@ -314,7 +310,7 @@ class TestHostResources:
                 host_id="test-host",
                 cpu_count="invalid",  # Should be int
             )
-        
+
         with pytest.raises(ValidationError):
             HostResources(
                 host_id="test-host",
@@ -335,7 +331,7 @@ class TestHostResources:
             containers_total=8,
             images_count=0
         )
-        
+
         assert resources.host_id == "partial-host"
         assert resources.cpu_count == 4
         assert resources.memory_total is None
@@ -358,7 +354,7 @@ class TestAddHostRequest:
             ssh_host="new.example.com",
             ssh_user="deploy"
         )
-        
+
         assert request.host_id == "new-host"
         assert request.ssh_host == "new.example.com"
         assert request.ssh_user == "deploy"
@@ -380,7 +376,7 @@ class TestAddHostRequest:
             tags=["production", "new", "scaling"],
             test_connection=False
         )
-        
+
         assert request.host_id == "prod-new-host"
         assert request.ssh_host == "prodnew.example.com"
         assert request.ssh_user == "produser"
@@ -402,9 +398,9 @@ class TestAddHostRequest:
             tags=["test", "development", "temporary"],
             test_connection=True
         )
-        
+
         data = request.model_dump()
-        
+
         assert data["host_id"] == "test-new-host"
         assert data["ssh_host"] == "testnew.example.com"
         assert data["ssh_user"] == "testuser"
@@ -418,7 +414,7 @@ class TestAddHostRequest:
         """Test AddHostRequest validation with invalid data."""
         with pytest.raises(ValidationError) as exc_info:
             AddHostRequest()
-        
+
         errors = exc_info.value.errors()
         required_fields = {error["loc"][0] for error in errors if error["type"] == "missing"}
         assert "host_id" in required_fields
@@ -434,7 +430,7 @@ class TestAddHostRequest:
                 ssh_user="testuser",
                 ssh_port="invalid"  # Should be int
             )
-        
+
         with pytest.raises(ValidationError):
             AddHostRequest(
                 host_id="test-host",
@@ -455,7 +451,7 @@ class TestAddHostRequest:
         assert request.host_id == ""
         assert request.ssh_host == "test.example.com"
         assert request.ssh_user == "testuser"
-        
+
         request2 = AddHostRequest(
             host_id="test-host",
             ssh_host="",  # Empty string is allowed
@@ -481,7 +477,7 @@ class TestModelInteraction:
             tags=["production", "converted"],
             enabled=True
         )
-        
+
         # Convert to AddHostRequest-like structure
         request_data = {
             "host_id": host_info.host_id,
@@ -492,9 +488,9 @@ class TestModelInteraction:
             "tags": host_info.tags.copy(),
             "test_connection": False  # Don't retest existing host
         }
-        
+
         request = AddHostRequest(**request_data)
-        
+
         assert request.host_id == host_info.host_id
         assert request.ssh_host == host_info.hostname
         assert request.ssh_user == host_info.user
@@ -513,13 +509,13 @@ class TestModelInteraction:
             last_check=datetime.now().isoformat(),
             response_time_ms=50.25
         )
-        
+
         assert healthy_status.online
         assert healthy_status.ssh_connected
         assert healthy_status.docker_connected
         assert healthy_status.error_message is None
         assert healthy_status.response_time_ms < 100
-        
+
         # Partially degraded
         degraded_status = HostStatus(
             host_id="degraded-host",
@@ -530,12 +526,12 @@ class TestModelInteraction:
             last_check=datetime.now().isoformat(),
             response_time_ms=250.75
         )
-        
+
         assert degraded_status.online
         assert degraded_status.ssh_connected
         assert not degraded_status.docker_connected
         assert "Docker daemon" in degraded_status.error_message
-        
+
         # Completely offline
         offline_status = HostStatus(
             host_id="offline-host",
@@ -546,7 +542,7 @@ class TestModelInteraction:
             last_check=datetime.now().isoformat(),
             response_time_ms=None
         )
-        
+
         assert not offline_status.online
         assert not offline_status.ssh_connected
         assert not offline_status.docker_connected
@@ -568,13 +564,13 @@ class TestModelInteraction:
             containers_total=60,
             images_count=120
         )
-        
+
         assert production_resources.cpu_count == 32
         assert production_resources.memory_total > production_resources.memory_available
         assert production_resources.disk_total > production_resources.disk_available
         assert len(production_resources.load_average) == 3
         assert production_resources.containers_running <= production_resources.containers_total
-        
+
         # Development workstation
         dev_resources = HostResources(
             host_id="dev-workstation",
@@ -588,7 +584,7 @@ class TestModelInteraction:
             containers_total=8,
             images_count=25
         )
-        
+
         assert dev_resources.cpu_count == 8
         assert all(load < 2.0 for load in dev_resources.load_average)
         assert dev_resources.containers_running < 10
@@ -605,16 +601,16 @@ class TestModelDefaults:
             hostname="host1.example.com",
             user="user1"
         )
-        
+
         host2 = HostInfo(
             host_id="host2",
             hostname="host2.example.com",
             user="user2"
         )
-        
+
         # Modify tags on host1
         host1.tags.append("test-tag")
-        
+
         # host2 tags should remain empty (independent instances)
         assert len(host1.tags) == 1
         assert len(host2.tags) == 0
@@ -627,16 +623,16 @@ class TestModelDefaults:
             ssh_host="req1.example.com",
             ssh_user="user1"
         )
-        
+
         request2 = AddHostRequest(
             host_id="req2",
             ssh_host="req2.example.com",
             ssh_user="user2"
         )
-        
+
         # Modify tags on request1
         request1.tags.append("modified")
-        
+
         # request2 tags should remain empty
         assert len(request1.tags) == 1
         assert len(request2.tags) == 0

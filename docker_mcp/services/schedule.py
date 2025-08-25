@@ -4,10 +4,8 @@ Docker Cleanup Scheduling Service
 Business logic for managing scheduled Docker cleanup operations.
 """
 
-import asyncio
-import subprocess
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 
@@ -67,7 +65,7 @@ class ScheduleService:
                     "success": False,
                     "error": f"Invalid schedule_action: {schedule_action}"
                 }
-                
+
         except Exception as e:
             self.logger.error(
                 "Schedule action failed",
@@ -122,7 +120,7 @@ class ScheduleService:
 
         # Generate unique schedule ID
         schedule_id = f"cleanup-{host_id}-{schedule_frequency}"
-        
+
         # Check if schedule already exists
         if hasattr(self.config, 'cleanup_schedules') and schedule_id in self.config.cleanup_schedules:
             return {
@@ -143,7 +141,7 @@ class ScheduleService:
 
         # Generate cron entry
         cron_expression = self._generate_cron_expression(schedule_frequency, schedule_time)
-        
+
         self.logger.info(
             "Adding cleanup schedule",
             schedule_id=schedule_id,
@@ -189,7 +187,7 @@ class ScheduleService:
             }
 
         action = "enabled" if enabled else "disabled"
-        
+
         self.logger.info(
             "Toggling cleanup schedule",
             schedule_id=schedule_id,
@@ -227,10 +225,10 @@ class ScheduleService:
             parts = time_str.split(':')
             if len(parts) != 2:
                 return False
-            
+
             hour = int(parts[0])
             minute = int(parts[1])
-            
+
             return 0 <= hour <= 23 and 0 <= minute <= 59
         except ValueError:
             return False
@@ -246,7 +244,7 @@ class ScheduleService:
             Cron expression string
         """
         hour, minute = time.split(':')
-        
+
         if frequency == "daily":
             return f"{minute} {hour} * * *"
         elif frequency == "weekly":
@@ -273,7 +271,7 @@ class ScheduleService:
         # 1. Reading current crontab
         # 2. Adding/removing entries with schedule_id comments
         # 3. Writing back to crontab
-        
+
         self.logger.info(
             "Crontab update requested",
             schedule_id=schedule_id,
@@ -293,7 +291,7 @@ class ScheduleService:
         host_id = schedule_config["host_id"]
         cleanup_type = schedule_config["cleanup_type"]
         log_path = schedule_config.get("log_path", f"/var/log/docker-cleanup/{host_id}.log")
-        
+
         # This would be the actual command executed by cron
         # It should call back into our MCP server or use a CLI tool
         return (

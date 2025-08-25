@@ -437,34 +437,34 @@ class ComposeManager:
         try:
             import asyncio
             import subprocess
-            
+
             # Get host configuration for SSH details
             host_config = self.config.hosts.get(host_id)
             if not host_config:
                 return False
-                
+
             # Build SSH command to check if file exists
             ssh_host = f"{host_config.user}@{host_config.hostname}"
             ssh_cmd = ["ssh"]
-            
+
             # Add port if not default
             if host_config.port != 22:
                 ssh_cmd.extend(["-p", str(host_config.port)])
-                
+
             # Add identity file if specified
             if host_config.identity_file:
                 ssh_cmd.extend(["-i", host_config.identity_file])
-                
+
             # Add common SSH options for automation
             ssh_cmd.extend([
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "LogLevel=ERROR",
             ])
-            
+
             # Add the test command
             ssh_cmd.extend([ssh_host, f"test -f {file_path}"])
-            
+
             # Execute the command
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -472,10 +472,10 @@ class ComposeManager:
                     ssh_cmd, check=False, capture_output=True, text=True, timeout=10
                 ),
             )
-            
+
             # Return code 0 means file exists, non-zero means it doesn't
             return result.returncode == 0
-            
+
         except Exception as e:
             logger.debug(
                 "Error checking file existence via SSH",
@@ -502,15 +502,15 @@ class ComposeManager:
             Path to existing compose file, or default path if none exist
         """
         compose_base_dir = await self.get_compose_path(host_id)
-        
+
         # Check for common compose file names in order of preference
         possible_files = [
             f"{compose_base_dir}/{stack_name}/docker-compose.yml",
-            f"{compose_base_dir}/{stack_name}/docker-compose.yaml", 
+            f"{compose_base_dir}/{stack_name}/docker-compose.yaml",
             f"{compose_base_dir}/{stack_name}/compose.yml",
             f"{compose_base_dir}/{stack_name}/compose.yaml"
         ]
-        
+
         # Check each possible file path
         for file_path in possible_files:
             if await self._file_exists_via_ssh(host_id, file_path):
@@ -521,7 +521,7 @@ class ComposeManager:
                     file_path=file_path
                 )
                 return file_path
-        
+
         # Default to .yml if none exist (for new deployments)
         default_path = f"{compose_base_dir}/{stack_name}/docker-compose.yml"
         logger.debug(

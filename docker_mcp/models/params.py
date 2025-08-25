@@ -1,96 +1,96 @@
 """Parameter models for FastMCP tool validation."""
 
-from typing import Any, Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field
 
 
 class DockerHostsParams(BaseModel):
     """Parameters for the docker_hosts consolidated tool."""
-    
+
     action: Literal["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule"] = Field(
-        ..., 
+        ...,
         description="Action to perform"
     )
     host_id: str = Field(
-        default="", 
+        default="",
         description="Host identifier"
     )
     ssh_host: str = Field(
-        default="", 
+        default="",
         description="SSH hostname or IP address"
     )
     ssh_user: str = Field(
-        default="", 
+        default="",
         description="SSH username"
     )
     ssh_port: int = Field(
-        default=22, 
-        ge=1, 
-        le=65535, 
+        default=22,
+        ge=1,
+        le=65535,
         description="SSH port number"
     )
-    ssh_key_path: Optional[str] = Field(
-        default=None, 
+    ssh_key_path: str | None = Field(
+        default=None,
         description="Path to SSH private key file"
     )
     description: str = Field(
-        default="", 
+        default="",
         description="Host description"
     )
     tags: list[str] = Field(
-        default_factory=list, 
+        default_factory=list,
         description="Host tags"
     )
     test_connection: bool = Field(
-        default=True, 
+        default=True,
         description="Test connection when adding host"
     )
     include_stopped: bool = Field(
-        default=False, 
+        default=False,
         description="Include stopped containers in listings"
     )
-    compose_path: Optional[str] = Field(
-        default=None, 
+    compose_path: str | None = Field(
+        default=None,
         description="Docker Compose file path"
     )
     enabled: bool = Field(
-        default=True, 
+        default=True,
         description="Whether host is enabled"
     )
-    ssh_config_path: Optional[str] = Field(
-        default=None, 
+    ssh_config_path: str | None = Field(
+        default=None,
         description="Path to SSH config file"
     )
-    selected_hosts: Optional[str] = Field(
-        default=None, 
+    selected_hosts: str | None = Field(
+        default=None,
         description="Comma-separated list of hosts to select"
     )
     compose_path_overrides: dict[str, str] = Field(
-        default_factory=dict, 
+        default_factory=dict,
         description="Per-host compose path overrides"
     )
     auto_confirm: bool = Field(
-        default=False, 
+        default=False,
         description="Auto-confirm operations without prompting"
     )
-    cleanup_type: Optional[str] = Field(
+    cleanup_type: str | None = Field(
         default=None,
         description="Type of cleanup to perform (check, safe, moderate, aggressive) **(used by: cleanup)**"
     )
-    schedule_action: Optional[str] = Field(
+    schedule_action: str | None = Field(
         default=None,
         description="Schedule action to perform (add, remove, list, enable, disable) **(used by: schedule)**"
     )
-    schedule_frequency: Optional[str] = Field(
+    schedule_frequency: str | None = Field(
         default=None,
         description="Cleanup frequency (daily, weekly, monthly, custom) **(used by: schedule add)**"
     )
-    schedule_time: Optional[str] = Field(
+    schedule_time: str | None = Field(
         default=None,
         description="Time to run cleanup (e.g., '02:00') **(used by: schedule add)**"
     )
-    schedule_id: Optional[str] = Field(
+    schedule_id: str | None = Field(
         default=None,
         description="Schedule identifier for management **(used by: schedule remove/enable/disable)**"
     )
@@ -105,118 +105,118 @@ class DockerHostsParams(BaseModel):
 
 class DockerContainerParams(BaseModel):
     """Parameters for the docker_container consolidated tool."""
-    
+
     action: str = Field(
-        ..., 
+        ...,
         description="Action to perform (list, info, start, stop, restart, build, logs, pull)"
     )
     host_id: str = Field(
-        default="", 
+        default="",
         description="Host identifier"
     )
     container_id: str = Field(
-        default="", 
+        default="",
         description="Container identifier"
     )
     all_containers: bool = Field(
-        default=False, 
+        default=False,
         description="Include all containers (not just running ones)"
     )
     limit: int = Field(
-        default=20, 
-        ge=1, 
-        le=1000, 
+        default=20,
+        ge=1,
+        le=1000,
         description="Maximum number of results to return"
     )
     offset: int = Field(
-        default=0, 
-        ge=0, 
+        default=0,
+        ge=0,
         description="Number of results to skip"
     )
     follow: bool = Field(
-        default=False, 
+        default=False,
         description="Follow log output"
     )
     lines: int = Field(
-        default=100, 
-        ge=1, 
-        le=10000, 
+        default=100,
+        ge=1,
+        le=10000,
         description="Number of log lines to retrieve"
     )
     force: bool = Field(
-        default=False, 
+        default=False,
         description="Force the operation"
     )
     timeout: int = Field(
-        default=10, 
-        ge=1, 
-        le=300, 
+        default=10,
+        ge=1,
+        le=300,
         description="Operation timeout in seconds"
     )
 
 
 class DockerComposeParams(BaseModel):
     """Parameters for the docker_compose consolidated tool."""
-    
+
     action: str = Field(
-        ..., 
+        ...,
         description="Action to perform (list, deploy, up, down, restart, build, discover, logs, migrate)"
     )
     host_id: str = Field(
-        default="", 
+        default="",
         description="Host identifier"
     )
     stack_name: str = Field(
-        default="", 
+        default="",
         description="Stack name"
     )
     compose_content: str = Field(
-        default="", 
+        default="",
         description="Docker Compose file content"
     )
     environment: dict[str, str] = Field(
-        default_factory=dict, 
+        default_factory=dict,
         description="Environment variables"
     )
     pull_images: bool = Field(
-        default=True, 
+        default=True,
         description="Pull images before deploying"
     )
     recreate: bool = Field(
-        default=False, 
+        default=False,
         description="Recreate containers"
     )
     follow: bool = Field(
-        default=False, 
+        default=False,
         description="Follow log output"
     )
     lines: int = Field(
-        default=100, 
-        ge=1, 
-        le=10000, 
+        default=100,
+        ge=1,
+        le=10000,
         description="Number of log lines to retrieve"
     )
     dry_run: bool = Field(
-        default=False, 
+        default=False,
         description="Perform a dry run without making changes"
     )
-    options: Optional[dict[str, str]] = Field(
-        default=None, 
+    options: dict[str, str] | None = Field(
+        default=None,
         description="Additional options for the operation"
     )
     target_host_id: str = Field(
-        default="", 
+        default="",
         description="Target host ID for migration operations"
     )
     remove_source: bool = Field(
-        default=False, 
+        default=False,
         description="Remove source stack after migration"
     )
     skip_stop_source: bool = Field(
-        default=False, 
+        default=False,
         description="Skip stopping source stack before migration"
     )
     start_target: bool = Field(
-        default=True, 
+        default=True,
         description="Start target stack after migration"
     )

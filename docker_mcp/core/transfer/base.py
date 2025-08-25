@@ -12,10 +12,10 @@ logger = structlog.get_logger()
 
 class BaseTransfer(ABC):
     """Abstract base class for all transfer methods."""
-    
+
     def __init__(self):
         self.logger = logger.bind(component=self.__class__.__name__.lower())
-    
+
     @abstractmethod
     async def transfer(
         self,
@@ -38,7 +38,7 @@ class BaseTransfer(ABC):
             Dictionary with transfer results and statistics
         """
         pass
-    
+
     @abstractmethod
     async def validate_requirements(self, host: DockerHost) -> tuple[bool, str]:
         """Validate that this transfer method can be used on the host.
@@ -50,7 +50,7 @@ class BaseTransfer(ABC):
             Tuple of (is_valid: bool, error_message: str)
         """
         pass
-    
+
     @abstractmethod
     def get_transfer_type(self) -> str:
         """Get the name/type of this transfer method.
@@ -59,7 +59,7 @@ class BaseTransfer(ABC):
             String identifier for this transfer method
         """
         pass
-    
+
     def build_ssh_cmd(self, host: DockerHost) -> list[str]:
         """Build SSH command for a host.
         
@@ -70,13 +70,13 @@ class BaseTransfer(ABC):
             SSH command as list of strings
         """
         ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
-        
+
         if host.identity_file:
             ssh_cmd.extend(["-i", host.identity_file])
-        
+
         if host.port != 22:
             ssh_cmd.extend(["-p", str(host.port)])
-            
+
         ssh_cmd.append(f"{host.user}@{host.hostname}")
-        
+
         return ssh_cmd

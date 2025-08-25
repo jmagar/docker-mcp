@@ -2,22 +2,23 @@
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator, Dict, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import structlog
 from fastmcp import Client, FastMCP
 
 from docker_mcp.core.config_loader import DockerMCPConfig, load_config
-from docker_mcp.server import DockerMCPServer
 from docker_mcp.middleware import (
-    LoggingMiddleware,
     ErrorHandlingMiddleware,
-    TimingMiddleware,
+    LoggingMiddleware,
     RateLimitingMiddleware,
+    TimingMiddleware,
 )
+from docker_mcp.server import DockerMCPServer
 
 
 @pytest.fixture
@@ -54,18 +55,18 @@ def test_host_id() -> str:
 
 
 @pytest.fixture
-async def test_nginx_container(client: Client, test_host_id: str, worker_id: str, 
+async def test_nginx_container(client: Client, test_host_id: str, worker_id: str,
                                dynamic_port: int, request) -> AsyncGenerator[str, None]:
     """Deploy a dedicated test nginx container for testing with guaranteed cleanup."""
     # Create unique names for parallel execution
     container_suffix = worker_id if worker_id != 'master' else 'main'
     container_name = f"test-nginx-mcp-{container_suffix}"
     stack_name = f"test-mcp-nginx-{container_suffix}"
-    
+
     # Track for cleanup
     from tests.cleanup_utils import get_resource_tracker
     tracker = get_resource_tracker()
-    
+
     # Deploy test container using deploy_stack with dynamic port
     compose_content = f"""version: '3.8'
 services:
@@ -80,7 +81,7 @@ services:
       - "worker={worker_id}"
     restart: "no"
 """
-    
+
     # Deploy the stack
     deploy_result = await client.call_tool("deploy_stack", {
         "host_id": test_host_id,
@@ -89,16 +90,16 @@ services:
         "pull_images": False,
         "recreate": False
     })
-    
+
     if not deploy_result.data.get("success", False):
         pytest.skip(f"Failed to deploy test container: {deploy_result.data.get('error', 'Unknown error')}")
-    
+
     # Track the deployed stack
     tracker.add_stack(test_host_id, stack_name)
-    
+
     # Wait a moment for container to be ready
     await asyncio.sleep(2)
-    
+
     try:
         yield container_name
     finally:
@@ -134,10 +135,10 @@ def worker_id(request) -> str:
 def dynamic_port(worker_id: str) -> int:
     """Generate dynamic port based on worker ID to avoid conflicts."""
     import random
-    
+
     # Base port range: 8090-8199 (110 ports available)
     base_port = 8090
-    
+
     if worker_id == 'master':
         # Single worker/sequential execution
         port_offset = 0
@@ -145,7 +146,7 @@ def dynamic_port(worker_id: str) -> int:
         # Extract worker number from workerid (e.g., 'gw0', 'gw1', etc.)
         worker_num = int(worker_id.replace('gw', '')) if worker_id.startswith('gw') else 0
         port_offset = (worker_num * 10) + random.randint(0, 9)
-    
+
     return base_port + port_offset
 
 @pytest.fixture
@@ -213,18 +214,17 @@ integration_test = pytest.mark.integration
 @pytest.fixture(scope="session", autouse=True)
 async def session_cleanup(request):
     """Session-level cleanup to ensure all test resources are removed."""
-    import signal
     import atexit
-    
+    import signal
+
     # Register cleanup for abnormal termination
     def emergency_cleanup_sync():
         """Synchronous cleanup for signal handlers."""
         try:
-            import asyncio
             from tests.cleanup_utils import get_resource_tracker
             tracker = get_resource_tracker()
             report = tracker.get_cleanup_report()
-            
+
             if report["summary"]["total_remaining_containers"] > 0 or \
                report["summary"]["total_remaining_stacks"] > 0:
                 print("\n⚠️  EMERGENCY CLEANUP: Cleaning up test resources on exit...")
@@ -234,13 +234,13 @@ async def session_cleanup(request):
                 print("  Run 'python tests/cleanup.py' to clean up manually")
         except Exception as e:
             print(f"Emergency cleanup error: {e}")
-    
+
     # Register cleanup handlers
     atexit.register(emergency_cleanup_sync)
-    
+
     original_sigint = signal.getsignal(signal.SIGINT)
     original_sigterm = signal.getsignal(signal.SIGTERM)
-    
+
     def cleanup_signal_handler(signum, frame):
         emergency_cleanup_sync()
         # Call original handler
@@ -248,49 +248,49 @@ async def session_cleanup(request):
             original_sigint(signum, frame)
         else:
             exit(1)
-    
+
     signal.signal(signal.SIGINT, cleanup_signal_handler)
     signal.signal(signal.SIGTERM, cleanup_signal_handler)
-    
+
     try:
         yield  # Run tests
     finally:
         # Restore original signal handlers
         signal.signal(signal.SIGINT, original_sigint)
         signal.signal(signal.SIGTERM, original_sigterm)
-        
+
         # After all tests complete, clean up any remaining resources
-        from tests.cleanup_utils import get_resource_tracker, emergency_cleanup
-        
+        from tests.cleanup_utils import emergency_cleanup, get_resource_tracker
+
         tracker = get_resource_tracker()
         report = tracker.get_cleanup_report()
-        
+
         if report["summary"]["total_remaining_containers"] > 0 or \
            report["summary"]["total_remaining_stacks"] > 0:
             print("\n" + "="*60)
             print("SESSION CLEANUP: Cleaning up remaining test resources")
             print("="*60)
-        
+
         # Try to clean up remaining resources
         try:
             # Load config to get hosts
             config_path = Path(__file__).parent.parent / "config" / "hosts.yml"
             from docker_mcp.core.config_loader import load_config
             from docker_mcp.server import DockerMCPServer
-            
+
             config = load_config(str(config_path))
             server = DockerMCPServer(config)
             server._initialize_app()
-            
+
             async with Client(server.app) as client:
                 for host_id in config.hosts.keys():
                     if host_id in tracker.stacks or host_id in tracker.containers:
                         print(f"\nCleaning up resources on {host_id}...")
                         await emergency_cleanup(client, host_id)
-                        
+
         except Exception as e:
             print(f"Session cleanup error: {e}")
-        
+
         # Print final report
         final_report = tracker.get_cleanup_report()
         if final_report["summary"]["total_failures"] > 0:
@@ -309,7 +309,7 @@ async def session_cleanup(request):
 def caplog_setup(caplog):
     """Setup caplog with proper logging configuration."""
     caplog.set_level(logging.DEBUG)
-    
+
     # Configure structlog for testing
     structlog.configure(
         processors=[
@@ -321,7 +321,7 @@ def caplog_setup(caplog):
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True
     )
-    
+
     yield caplog
 
 
@@ -329,39 +329,39 @@ def caplog_setup(caplog):
 def mock_server_base():
     """Create a basic FastMCP server without middleware for testing."""
     server = FastMCP("test-server")
-    
+
     # Add test tools
     @server.tool
-    async def success_tool() -> Dict[str, Any]:
+    async def success_tool() -> dict[str, Any]:
         """Tool that always succeeds."""
         return {"status": "success", "message": "Operation completed"}
-    
-    @server.tool  
-    async def error_tool() -> Dict[str, Any]:
+
+    @server.tool
+    async def error_tool() -> dict[str, Any]:
         """Tool that raises an error."""
         raise ValueError("Test error message")
-    
+
     @server.tool
-    async def slow_tool() -> Dict[str, Any]:
+    async def slow_tool() -> dict[str, Any]:
         """Tool that simulates slow operation."""
         await asyncio.sleep(0.1)  # 100ms delay
         return {"status": "slow", "duration": "100ms"}
-        
+
     @server.tool
-    async def timeout_tool() -> Dict[str, Any]:
+    async def timeout_tool() -> dict[str, Any]:
         """Tool that raises timeout error."""
         raise TimeoutError("Operation timed out")
-        
+
     @server.tool
-    async def permission_tool() -> Dict[str, Any]:
+    async def permission_tool() -> dict[str, Any]:
         """Tool that raises permission error."""
         raise PermissionError("Access denied")
-        
+
     @server.tool
-    async def sensitive_tool(password: str, api_key: str) -> Dict[str, Any]:
+    async def sensitive_tool(password: str, api_key: str) -> dict[str, Any]:
         """Tool with sensitive parameters for testing sanitization."""
         return {"status": "authenticated", "password": password, "api_key": api_key}
-    
+
     return server
 
 
@@ -418,7 +418,7 @@ def server_with_error_handling(mock_server_base, error_handling_middleware):
     return mock_server_base
 
 
-@pytest.fixture  
+@pytest.fixture
 def server_with_timing(mock_server_base, timing_middleware):
     """Server with timing middleware."""
     mock_server_base.add_middleware(timing_middleware)
@@ -452,8 +452,7 @@ def server_with_all_middleware(
 @pytest.fixture
 def mock_context():
     """Create mock MiddlewareContext for unit tests."""
-    from fastmcp.server.middleware import MiddlewareContext
-    
+
     context = MagicMock()
     context.method = "test_method"
     context.source = "test_client"
@@ -464,7 +463,7 @@ def mock_context():
         "method": "test_method",
         "params": {"test_param": "test_value"}
     }
-    
+
     return context
 
 
@@ -480,13 +479,13 @@ def temp_log_dir(tmp_path):
 def setup_logging_config(temp_log_dir):
     """Setup logging configuration for testing."""
     from docker_mcp.core.logging_config import setup_logging
-    
+
     setup_logging(
         log_dir=temp_log_dir,
         log_level="DEBUG",
         max_file_size_mb=1  # Small file size for testing
     )
-    
+
     return temp_log_dir
 
 
@@ -511,42 +510,42 @@ def get_log_messages(caplog, level=None):
 
 class MockCall:
     """Mock call_next function for middleware testing."""
-    
+
     def __init__(self, return_value=None, exception=None, delay=0):
         self.return_value = return_value or {"status": "success"}
         self.exception = exception
         self.delay = delay
         self.call_count = 0
-    
+
     async def __call__(self, context):
         self.call_count += 1
-        
+
         if self.delay > 0:
             await asyncio.sleep(self.delay)
-        
+
         if self.exception:
             raise self.exception
-            
+
         return self.return_value
 
 
 class MockTimestamps:
     """Mock timestamps for predictable timing tests."""
-    
+
     def __init__(self, start_time=1640995200.0):
         self.current_time = start_time
         self.time_increments = []
-    
+
     def add_increment(self, seconds):
         """Add time increment for next call."""
         self.time_increments.append(seconds)
-    
+
     def time(self):
         """Mock time.time() function."""
         if self.time_increments:
             self.current_time += self.time_increments.pop(0)
         return self.current_time
-    
+
     def perf_counter(self):
         """Mock time.perf_counter() function."""
         return self.time()

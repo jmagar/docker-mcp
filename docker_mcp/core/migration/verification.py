@@ -21,10 +21,10 @@ class VerificationError(DockerMCPError):
 
 class MigrationVerifier:
     """Handles verification of Docker stack migrations."""
-    
+
     def __init__(self):
         self.logger = logger.bind(component="migration_verifier")
-    
+
     async def create_source_inventory(
         self,
         ssh_cmd: list[str],
@@ -47,10 +47,10 @@ class MigrationVerifier:
             "critical_files": {},
             "timestamp": time.time()
         }
-        
+
         for path in volume_paths:
             path_inventory = {}
-            
+
             # Get file count
             file_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f 2>/dev/null | wc -l"]
             result = await asyncio.get_event_loop().run_in_executor(
@@ -58,15 +58,15 @@ class MigrationVerifier:
                 lambda cmd=file_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["file_count"] = int(result.stdout.strip()) if result.returncode == 0 else 0
-            
-            # Get directory count  
+
+            # Get directory count
             dir_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type d 2>/dev/null | wc -l"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda cmd=dir_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["dir_count"] = int(result.stdout.strip()) if result.returncode == 0 else 0
-            
+
             # Get total size in bytes
             size_cmd = ssh_cmd + [f"du -sb {shlex.quote(path)} 2>/dev/null | cut -f1"]
             result = await asyncio.get_event_loop().run_in_executor(
@@ -74,7 +74,7 @@ class MigrationVerifier:
                 lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["total_size"] = int(result.stdout.strip()) if result.returncode == 0 else 0
-            
+
             # Get file listing for comparison
             file_list_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f -printf '%P\\n' 2>/dev/null | sort"]
             result = await asyncio.get_event_loop().run_in_executor(
@@ -82,7 +82,7 @@ class MigrationVerifier:
                 lambda cmd=file_list_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["file_list"] = result.stdout.strip().split("\n") if result.returncode == 0 else []
-            
+
             # Find and checksum critical files (databases, configs)
             critical_cmd = ssh_cmd + [
                 f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
@@ -92,7 +92,7 @@ class MigrationVerifier:
                 None,
                 lambda cmd=critical_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
-            
+
             critical_files = {}
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().split("\n"):
@@ -103,26 +103,26 @@ class MigrationVerifier:
                             # Store relative path
                             rel_path = filepath.replace(f"{path}/", "")
                             critical_files[rel_path] = checksum
-            
+
             path_inventory["critical_files"] = critical_files
-            
+
             # Add to inventory
             inventory["paths"][path] = path_inventory
             inventory["total_files"] += path_inventory["file_count"]
             inventory["total_dirs"] += path_inventory["dir_count"]
             inventory["total_size"] += path_inventory["total_size"]
             inventory["critical_files"].update(critical_files)
-        
+
         self.logger.info(
             "Created source inventory",
             total_files=inventory["total_files"],
-            total_dirs=inventory["total_dirs"], 
+            total_dirs=inventory["total_dirs"],
             total_size=inventory["total_size"],
             critical_files=len(inventory["critical_files"]),
         )
-        
+
         return inventory
-    
+
     async def verify_migration_completeness(
         self,
         ssh_cmd: list[str],
@@ -144,7 +144,7 @@ class MigrationVerifier:
                 "success": True,
                 "files_expected": source_inventory["total_files"],
                 "files_found": 0,
-                "dirs_expected": source_inventory["total_dirs"], 
+                "dirs_expected": source_inventory["total_dirs"],
                 "dirs_found": 0,
                 "size_expected": source_inventory["total_size"],
                 "size_found": 0,
@@ -155,7 +155,7 @@ class MigrationVerifier:
             },
             "issues": []
         }
-        
+
         # Use provided target path
         # Get target inventory using same methods as source
         # File count
@@ -166,7 +166,7 @@ class MigrationVerifier:
         )
         target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["files_found"] = target_files
-        
+
         # Directory count
         dir_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type d 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
@@ -175,7 +175,7 @@ class MigrationVerifier:
         )
         target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["dirs_found"] = target_dirs
-        
+
         # Total size
         size_cmd = ssh_cmd + [f"du -sb {shlex.quote(target_path)} 2>/dev/null | cut -f1"]
         result = await asyncio.get_event_loop().run_in_executor(
@@ -184,7 +184,7 @@ class MigrationVerifier:
         )
         target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["size_found"] = target_size
-        
+
         # Get target file listing
         file_list_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f -printf '%P\\n' 2>/dev/null | sort"]
         result = await asyncio.get_event_loop().run_in_executor(
@@ -192,27 +192,27 @@ class MigrationVerifier:
             lambda cmd=file_list_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_file_list = result.stdout.strip().split("\n") if result.returncode == 0 and result.stdout.strip() else []
-        
+
         # Compare file listings to find missing files
         source_files = set()
         for path_data in source_inventory["paths"].values():
             source_files.update(path_data.get("file_list", []))
-        
+
         target_file_set = set(target_file_list)
         missing_files = source_files - target_file_set
         verification["data_transfer"]["missing_files"] = list(missing_files)
-        
+
         # Calculate match percentages
         if source_inventory["total_files"] > 0:
             verification["data_transfer"]["file_match_percentage"] = (
                 target_files / source_inventory["total_files"] * 100
             )
-        
+
         if source_inventory["total_size"] > 0:
             verification["data_transfer"]["size_match_percentage"] = (
                 target_size / source_inventory["total_size"] * 100
             )
-        
+
         # Verify critical files checksums
         critical_files_verified = {}
         for rel_path, source_checksum in source_inventory["critical_files"].items():
@@ -226,12 +226,12 @@ class MigrationVerifier:
                 f"  md5sum {qfile} 2>/dev/null | cut -d' ' -f1; "
                 f"fi"
             ]
-            
+
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda cmd=checksum_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
-            
+
             if result.returncode == 0 and result.stdout.strip():
                 target_checksum = result.stdout.strip()
                 critical_files_verified[rel_path] = {
@@ -246,34 +246,34 @@ class MigrationVerifier:
                     "target_checksum": None,
                     "error": "File not found or inaccessible"
                 }
-        
+
         verification["data_transfer"]["critical_files_verified"] = critical_files_verified
-        
+
         # Determine overall success and collect issues
         issues = []
-        
+
         # File count mismatch
         if target_files != source_inventory["total_files"]:
             diff = target_files - source_inventory["total_files"]
             issues.append(f"File count mismatch: {diff:+d} files ({verification['data_transfer']['file_match_percentage']:.1f}% match)")
-        
+
         # Size mismatch (allow 1% variance for filesystem overhead)
         size_variance = abs(target_size - source_inventory["total_size"]) / source_inventory["total_size"] * 100 if source_inventory["total_size"] > 0 else 0
         if size_variance > 1.0:
             issues.append(f"Size mismatch: {target_size - source_inventory['total_size']:+d} bytes ({verification['data_transfer']['size_match_percentage']:.1f}% match)")
-        
+
         # Missing files
         if missing_files:
             issues.append(f"{len(missing_files)} files missing from target")
-        
+
         # Critical file verification failures
         failed_critical = [f for f, v in critical_files_verified.items() if not v["verified"]]
         if failed_critical:
             issues.append(f"{len(failed_critical)} critical files failed verification")
-        
+
         verification["issues"] = issues
         verification["data_transfer"]["success"] = len(issues) == 0
-        
+
         self.logger.info(
             "Migration completeness verification",
             success=verification["data_transfer"]["success"],
@@ -282,9 +282,9 @@ class MigrationVerifier:
             critical_files_ok=len(critical_files_verified) - len(failed_critical),
             issues=len(issues),
         )
-        
+
         return verification
-    
+
     async def _inspect_container(self, ssh_cmd: list[str], stack_name: str) -> dict[str, Any] | None:
         """Run docker inspect and return parsed container info."""
         inspect_cmd = ssh_cmd + [f"docker inspect {shlex.quote(stack_name)} 2>/dev/null || echo 'NOT_FOUND'"]
@@ -292,15 +292,15 @@ class MigrationVerifier:
             None,
             lambda cmd=inspect_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
-        
+
         if result.returncode != 0 or "NOT_FOUND" in result.stdout:
             return None
-        
+
         try:
             return json.loads(result.stdout)[0]
         except (json.JSONDecodeError, KeyError, IndexError):
             return None
-    
+
     def _collect_mounts(self, container_info: dict[str, Any]) -> list[str]:
         """Extract actual mount strings from container inspect output."""
         actual_mounts = []
@@ -312,7 +312,7 @@ class MigrationVerifier:
                 if source and destination:
                     actual_mounts.append(f"{source}:{destination}")
         return actual_mounts
-    
+
     async def _check_in_container_access(self, ssh_cmd: list[str], stack_name: str) -> bool:
         """Check if data is accessible inside the container."""
         test_cmd = ssh_cmd + [f"docker exec {shlex.quote(stack_name)} ls /data 2>/dev/null || docker exec {shlex.quote(stack_name)} ls / 2>/dev/null"]
@@ -321,7 +321,7 @@ class MigrationVerifier:
             lambda cmd=test_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         return result.returncode == 0
-    
+
     async def _collect_startup_errors(self, ssh_cmd: list[str], stack_name: str) -> list[str]:
         """Collect startup errors from container logs."""
         logs_cmd = ssh_cmd + [f"docker logs {shlex.quote(stack_name)} --tail 50 2>&1 | grep -i error || true"]
@@ -329,12 +329,12 @@ class MigrationVerifier:
             None,
             lambda cmd=logs_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
-        
+
         if result.stdout.strip():
             error_lines = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
             return error_lines[:5]  # Limit to 5 errors
         return []
-    
+
     async def verify_container_integration(
         self,
         ssh_cmd: list[str],
@@ -368,31 +368,31 @@ class MigrationVerifier:
             },
             "issues": []
         }
-        
+
         # Use helper to inspect container
         container_info = await self._inspect_container(ssh_cmd, stack_name)
-        
+
         if not container_info:
             verification["issues"].append(f"Container '{stack_name}' not found")
             verification["container_integration"]["success"] = False
             return verification
-            
+
         verification["container_integration"]["container_exists"] = True
-        
+
         # Check container state
         state = container_info.get("State", {})
         verification["container_integration"]["container_running"] = state.get("Running", False)
-        
+
         # Check health status
         health = state.get("Health", {})
         health_status = health.get("Status")
         verification["container_integration"]["health_status"] = health_status
         verification["container_integration"]["container_healthy"] = health_status == "healthy"
-        
+
         # Get mount information using helper
         actual_mounts = self._collect_mounts(container_info)
         verification["container_integration"]["actual_mounts"] = actual_mounts
-        
+
         # Check if expected mounts are present
         mount_matches = 0
         for expected_mount in expected_volumes:
@@ -409,37 +409,37 @@ class MigrationVerifier:
                             if actual_dest == expected_dest and expected_appdata_path in actual_source:
                                 mount_matches += 1
                                 break
-        
+
         verification["container_integration"]["mount_paths_correct"] = (
             mount_matches == len(expected_volumes) if expected_volumes else True
         )
-        
+
         # Test data accessibility inside container if container is running
         if verification["container_integration"]["container_running"]:
             verification["container_integration"]["data_accessible"] = await self._check_in_container_access(ssh_cmd, stack_name)
             verification["container_integration"]["startup_errors"] = await self._collect_startup_errors(ssh_cmd, stack_name)
-        
+
         # Collect integration issues
         issues = []
-        
+
         if not verification["container_integration"]["container_running"]:
             issues.append("Container is not running")
-            
+
         if not verification["container_integration"]["mount_paths_correct"]:
             issues.append("Container mount paths do not match expected")
-            
+
         if verification["container_integration"]["container_running"] and not verification["container_integration"]["data_accessible"]:
             issues.append("Data not accessible inside container")
-            
+
         if verification["container_integration"]["startup_errors"]:
             issues.append(f"Container has {len(verification['container_integration']['startup_errors'])} startup errors")
-            
+
         if health_status and health_status not in ["healthy", "none"]:
             issues.append(f"Container health check failed: {health_status}")
-        
+
         verification["issues"] = issues
         verification["container_integration"]["success"] = len(issues) == 0
-        
+
         self.logger.info(
             "Container integration verification",
             success=verification["container_integration"]["success"],
@@ -449,5 +449,5 @@ class MigrationVerifier:
             data_accessible=verification["container_integration"]["data_accessible"],
             issues=len(issues),
         )
-        
+
         return verification

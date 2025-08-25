@@ -1,12 +1,11 @@
 """Tests for Docker MCP prompt generation functions."""
 
-import pytest
 
 from docker_mcp.prompts.deployment import (
     compose_optimization_prompt,
-    troubleshooting_prompt,
     deployment_checklist_prompt,
     security_audit_prompt,
+    troubleshooting_prompt,
 )
 
 
@@ -24,24 +23,24 @@ services:
       - "80:80"
 """
         host_id = "prod-1"
-        
+
         result = compose_optimization_prompt(compose_content, host_id)
-        
+
         # Verify basic structure
         assert isinstance(result, str)
         assert len(result) > 100  # Should be substantial prompt
-        
+
         # Verify required content is included
         assert "Analyze this Docker Compose file" in result
         assert compose_content in result
         assert host_id in result
-        
+
         # Verify optimization categories are included
         assert "Security Best Practices" in result
         assert "Resource Efficiency" in result
         assert "Production Readiness" in result
         assert "Multi-host Deployment Considerations" in result
-        
+
         # Verify output specifications
         assert "Specific recommendations" in result
         assert "Modified YAML sections" in result
@@ -57,13 +56,13 @@ services:
             "disk_available": 500_000_000_000,
             "containers_running": 5
         }
-        
+
         result = compose_optimization_prompt(compose_content, host_id, host_resources)
-        
+
         # Verify basic content
         assert compose_content in result
         assert host_id in result
-        
+
         # Verify resource information is included
         assert "Available resources on staging-2" in result
         assert "CPU cores: 8" in result
@@ -75,14 +74,14 @@ services:
         """Test that prompt works without host resources."""
         compose_content = "version: '3.8'"
         host_id = "test-host"
-        
+
         result = compose_optimization_prompt(compose_content, host_id, None)
-        
+
         # Should not contain resource information
         assert "Available resources" not in result
         assert "CPU cores:" not in result
         assert "Memory:" not in result
-        
+
         # But should still contain basic content
         assert compose_content in result
         assert host_id in result
@@ -93,9 +92,9 @@ services:
         compose_content = "version: '3.8'"
         host_id = "test-host"
         host_resources = {}  # Empty dict
-        
+
         result = compose_optimization_prompt(compose_content, host_id, host_resources)
-        
+
         # Should include resource section but with "Unknown" values
         assert "Available resources on test-host" in result
         assert "CPU cores: Unknown" in result
@@ -109,18 +108,18 @@ class TestTroubleshootingPrompt:
         """Test troubleshooting prompt with minimal parameters."""
         error_message = "Container failed to start: port already in use"
         host_id = "prod-1"
-        
+
         result = troubleshooting_prompt(error_message, host_id)
-        
+
         # Verify basic structure
         assert isinstance(result, str)
         assert len(result) > 200  # Should be comprehensive prompt
-        
+
         # Verify required content
         assert "Help diagnose and resolve this Docker deployment issue" in result
         assert error_message in result
         assert f"Host: {host_id}" in result
-        
+
         # Verify analysis sections
         assert "Root Cause Analysis" in result
         assert "Immediate Solutions" in result
@@ -133,11 +132,11 @@ class TestTroubleshootingPrompt:
         error_message = "Failed to pull image"
         host_id = "staging-1"
         container_id = "web-server-123"
-        
+
         result = troubleshooting_prompt(
             error_message, host_id, container_id=container_id
         )
-        
+
         # Verify container context is included
         assert f"Host: {host_id}" in result
         assert f"Container: {container_id}" in result
@@ -147,11 +146,11 @@ class TestTroubleshootingPrompt:
         error_message = "Stack deployment failed"
         host_id = "prod-2"
         stack_name = "web-application"
-        
+
         result = troubleshooting_prompt(
             error_message, host_id, stack_name=stack_name
         )
-        
+
         # Verify stack context is included
         assert f"Host: {host_id}" in result
         assert f"Stack: {stack_name}" in result
@@ -165,16 +164,16 @@ class TestTroubleshootingPrompt:
             "2025-01-15 10:30:01 WARN: Retrying connection",
             "2025-01-15 10:30:02 ERROR: Max retries exceeded"
         ]
-        
+
         result = troubleshooting_prompt(
             error_message, host_id, recent_logs=recent_logs
         )
-        
+
         # Verify logs are included
         assert "Recent logs:" in result
         assert "Database connection failed" in result
         assert "Max retries exceeded" in result
-        
+
         # Verify logs are in code block
         assert "```" in result
 
@@ -188,11 +187,11 @@ class TestTroubleshootingPrompt:
             "memory_available": 2_000_000_000,
             "disk_available": 10_000_000_000
         }
-        
+
         result = troubleshooting_prompt(
             error_message, host_id, system_info=system_info
         )
-        
+
         # Verify system info is included
         assert "System information:" in result
         assert "Docker version: 24.0.7" in result
@@ -208,7 +207,7 @@ class TestTroubleshootingPrompt:
         stack_name = "main-app"
         recent_logs = ["Error: timeout waiting for condition"]
         system_info = {"docker_version": "24.0.7"}
-        
+
         result = troubleshooting_prompt(
             error_message=error_message,
             host_id=host_id,
@@ -217,7 +216,7 @@ class TestTroubleshootingPrompt:
             recent_logs=recent_logs,
             system_info=system_info
         )
-        
+
         # Verify all context is included
         assert f"Host: {host_id}" in result
         assert f"Container: {container_id}" in result
@@ -233,11 +232,11 @@ class TestTroubleshootingPrompt:
         host_id = "test"
         # Create 25 log lines
         recent_logs = [f"Log line {i}" for i in range(25)]
-        
+
         result = troubleshooting_prompt(
             error_message, host_id, recent_logs=recent_logs
         )
-        
+
         # Should only include last 20 lines (5-24)
         assert "Log line 24" in result  # Last line should be included
         assert "Log line 5" in result   # 20th from last should be included
@@ -253,20 +252,20 @@ class TestDeploymentChecklistPrompt:
         environment = "production"
         services = ["web", "api", "database"]
         host_id = "prod-cluster-1"
-        
+
         result = deployment_checklist_prompt(stack_name, environment, services, host_id)
-        
+
         # Verify basic structure
         assert isinstance(result, str)
         assert len(result) > 300  # Should be comprehensive checklist
-        
+
         # Verify stack information section
         assert "Stack Information:" in result
         assert f"Name: {stack_name}" in result
         assert f"Environment: {environment}" in result
         assert f"Target Host: {host_id}" in result
         assert f"Services: {', '.join(services)}" in result
-        
+
         # Verify checklist categories
         assert "Pre-deployment Verification" in result
         assert "Deployment Process" in result
@@ -281,9 +280,9 @@ class TestDeploymentChecklistPrompt:
         environment = "staging"
         services = ["nginx"]
         host_id = "staging-1"
-        
+
         result = deployment_checklist_prompt(stack_name, environment, services, host_id)
-        
+
         # Verify single service is handled correctly
         assert "Services: nginx" in result
         assert f"Name: {stack_name}" in result
@@ -294,9 +293,9 @@ class TestDeploymentChecklistPrompt:
         environment = "production"
         services = ["auth", "user", "order", "payment", "notification", "gateway"]
         host_id = "k8s-cluster"
-        
+
         result = deployment_checklist_prompt(stack_name, environment, services, host_id)
-        
+
         # Verify all services are listed
         services_line = f"Services: {', '.join(services)}"
         assert services_line in result
@@ -305,7 +304,7 @@ class TestDeploymentChecklistPrompt:
     def test_deployment_checklist_format_requirements(self):
         """Test that checklist format requirements are specified."""
         result = deployment_checklist_prompt("test", "dev", ["app"], "test-host")
-        
+
         # Should specify format requirements
         assert "actionable checklist with checkboxes" in result
         assert "clear instructions" in result
@@ -326,20 +325,20 @@ services:
     environment:
       - SECRET_KEY=hardcoded_secret
 """
-        
+
         result = security_audit_prompt(compose_content)
-        
+
         # Verify basic structure
         assert isinstance(result, str)
         assert len(result) > 400  # Should be comprehensive audit prompt
-        
+
         # Verify compose content is included
         assert compose_content in result
         assert "```yaml" in result
-        
+
         # Verify default environment
         assert "production environment" in result
-        
+
         # Verify security analysis categories
         assert "Container Security" in result
         assert "Network Security" in result
@@ -352,19 +351,19 @@ services:
         """Test security audit prompt with custom environment."""
         compose_content = "version: '3.8'"
         host_environment = "staging"
-        
+
         result = security_audit_prompt(compose_content, host_environment)
-        
+
         # Verify custom environment is used
-        assert f"staging environment" in result
+        assert "staging environment" in result
         assert "production environment" not in result
 
     def test_security_audit_prompt_analysis_requirements(self):
         """Test security audit analysis requirements are included."""
         compose_content = "version: '3.8'"
-        
+
         result = security_audit_prompt(compose_content)
-        
+
         # Verify specific analysis requirements
         assert "Running as root vs non-root users" in result
         assert "Unnecessary capabilities" in result
@@ -376,9 +375,9 @@ services:
     def test_security_audit_prompt_output_requirements(self):
         """Test security audit output requirements are specified."""
         compose_content = "version: '3.8'"
-        
+
         result = security_audit_prompt(compose_content)
-        
+
         # Verify output requirements
         assert "High/Medium/Low risk ratings" in result
         assert "Specific remediation steps" in result
@@ -391,10 +390,10 @@ services:
     def test_security_audit_prompt_environments(self):
         """Test security audit with different environments."""
         compose_content = "version: '3.8'"
-        
+
         # Test different environments
         environments = ["development", "staging", "production", "testing"]
-        
+
         for env in environments:
             result = security_audit_prompt(compose_content, env)
             assert f"{env} environment" in result
@@ -407,14 +406,14 @@ class TestPromptIntegration:
     def test_all_prompts_return_strings(self):
         """Test that all prompt functions return non-empty strings."""
         compose_content = "version: '3.8'\nservices:\n  test:\n    image: nginx"
-        
+
         prompts = [
             compose_optimization_prompt(compose_content, "test-host"),
             troubleshooting_prompt("Error message", "test-host"),
             deployment_checklist_prompt("test", "dev", ["app"], "test-host"),
             security_audit_prompt(compose_content)
         ]
-        
+
         for prompt in prompts:
             assert isinstance(prompt, str)
             assert len(prompt) > 50  # All should be substantial
@@ -424,18 +423,18 @@ class TestPromptIntegration:
         """Test that prompts handle edge cases gracefully."""
         # Empty compose content
         empty_compose = ""
-        
+
         # Should not crash, though output may not be useful
         result1 = compose_optimization_prompt(empty_compose, "host")
         assert isinstance(result1, str)
-        
+
         result2 = security_audit_prompt(empty_compose)
         assert isinstance(result2, str)
-        
+
         # Empty error message
         result3 = troubleshooting_prompt("", "host")
         assert isinstance(result3, str)
-        
+
         # Empty services list
         result4 = deployment_checklist_prompt("stack", "env", [], "host")
         assert isinstance(result4, str)
@@ -450,7 +449,7 @@ services:
     environment:
       - KEY=value with spaces & symbols!
 '''
-        
+
         result = compose_optimization_prompt(special_compose, "test-host")
         assert special_compose in result
         assert "&" in result
@@ -462,10 +461,10 @@ services:
         """Test that prompts don't interfere with each other."""
         compose1 = "version: '3.8'\nservices:\n  app1:\n    image: app1"
         compose2 = "version: '3.8'\nservices:\n  app2:\n    image: app2"
-        
+
         result1 = compose_optimization_prompt(compose1, "host1")
         result2 = compose_optimization_prompt(compose2, "host2")
-        
+
         # Each should contain only its own content
         assert "app1" in result1
         assert "app1" not in result2

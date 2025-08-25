@@ -7,9 +7,9 @@ from typing import Any
 
 import structlog
 
-from .base import BaseTransfer
 from ..config_loader import DockerHost
 from ..exceptions import DockerMCPError
+from .base import BaseTransfer
 
 logger = structlog.get_logger()
 
@@ -21,15 +21,15 @@ class RsyncError(DockerMCPError):
 
 class RsyncTransfer(BaseTransfer):
     """Transfer files between hosts using rsync."""
-    
+
     def __init__(self):
         super().__init__()
         self.logger = logger.bind(component="rsync_transfer")
-    
+
     def get_transfer_type(self) -> str:
         """Get the name/type of this transfer method."""
         return "rsync"
-    
+
     async def validate_requirements(self, host: DockerHost) -> tuple[bool, str]:
         """Validate that rsync is available on the host.
         
@@ -41,7 +41,7 @@ class RsyncTransfer(BaseTransfer):
         """
         ssh_cmd = self.build_ssh_cmd(host)
         check_cmd = ssh_cmd + ["which rsync > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
-        
+
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -49,15 +49,15 @@ class RsyncTransfer(BaseTransfer):
                     check_cmd, check=False, capture_output=True, text=True
                 ),
             )
-            
+
             if "OK" in result.stdout:
                 return True, ""
             else:
                 return False, f"rsync not available on host {host.hostname}"
-                
+
         except Exception as e:
             return False, f"Failed to check rsync availability: {str(e)}"
-    
+
     async def transfer(
         self,
         source_host: DockerHost,
@@ -86,7 +86,7 @@ class RsyncTransfer(BaseTransfer):
         """
         # Build SSH command to connect to source host
         ssh_cmd = self.build_ssh_cmd(source_host)
-        
+
         # Build rsync options
         rsync_opts = ["-avP", "--stats"]  # Add --stats for consistent output parsing
         if compress:
@@ -95,20 +95,20 @@ class RsyncTransfer(BaseTransfer):
             rsync_opts.append("--delete")
         if dry_run:
             rsync_opts.append("--dry-run")
-        
+
         # Build target URL for rsync running ON source host
         target_url = f"{target_host.user}@{target_host.hostname}:{target_path}"
-        
+
         # Build rsync command that will run on the source host
         rsync_inner_cmd = f"rsync {' '.join(rsync_opts)} {source_path} {target_url}"
-        
+
         # Handle SSH key for target host connection (nested SSH)
         if target_host.identity_file:
             rsync_inner_cmd = f"rsync {' '.join(rsync_opts)} -e 'ssh -i {target_host.identity_file}' {source_path} {target_url}"
-        
+
         # Full command: SSH into source, then run rsync from there to target
         rsync_cmd = ssh_cmd + [rsync_inner_cmd]
-        
+
         self.logger.info(
             "Starting rsync transfer",
             source=f"{source_host.hostname}:{source_path}",
@@ -117,7 +117,7 @@ class RsyncTransfer(BaseTransfer):
             delete=delete,
             dry_run=dry_run,
         )
-        
+
         # Execute rsync
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -125,14 +125,14 @@ class RsyncTransfer(BaseTransfer):
                 rsync_cmd, check=False, capture_output=True, text=True
             ),
         )
-        
+
         if result.returncode != 0:
             snippet = (result.stdout or "")[:500]
             raise RsyncError(f"Rsync failed: {result.stderr or snippet}")
-        
+
         # Parse rsync output for statistics
         stats = self._parse_stats(result.stdout)
-        
+
         return {
             "success": True,
             "transfer_type": "rsync",
@@ -142,7 +142,7 @@ class RsyncTransfer(BaseTransfer):
             "dry_run": dry_run,
             "output": result.stdout,
         }
-    
+
     def _parse_stats(self, output: str) -> dict[str, Any]:
         """Parse rsync output for transfer statistics.
         
@@ -158,7 +158,7 @@ class RsyncTransfer(BaseTransfer):
             "transfer_rate": "",
             "speedup": 1.0,
         }
-        
+
         # Parse rsync summary statistics
         for line in output.split("\n"):
             if "Number of files transferred:" in line or "Number of regular files transferred:" in line:
@@ -178,5 +178,5 @@ class RsyncTransfer(BaseTransfer):
                 match = re.search(r"speedup is (\d+\.?\d*)", line)
                 if match:
                     stats["speedup"] = float(match.group(1))
-        
+
         return stats

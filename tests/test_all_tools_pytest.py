@@ -4,11 +4,10 @@ Comprehensive pytest test suite for all 13 Docker MCP Tools.
 Tests all tools with various parameter combinations using FastMCP in-memory testing.
 """
 
-import pytest
-from fastmcp import Client
 from unittest.mock import patch
 
-from docker_mcp.server import DockerMCPServer
+import pytest
+from fastmcp import Client
 
 
 class TestHostManagement:
@@ -126,19 +125,19 @@ class TestContainerOperations:
         with patch('docker_mcp.core.docker_context.DockerContextManager.execute_docker_command') as mock_execute:
             # Configure mock to return success
             mock_execute.return_value = {"output": ""}
-            
+
             result = await client.call_tool("docker_container", {
             "action": "restart",
                 "host_id": test_host_id,
                 "container_id": test_container_id
             })
-            
+
             # Verify Docker restart command was called
             mock_execute.assert_called_once()
             call_args = mock_execute.call_args
             assert call_args[0][0] == test_host_id
             assert f"restart {test_container_id}" in call_args[0][1]
-            
+
             assert result.data["success"] is True
             assert result.data["container_id"] == test_container_id
             assert result.data["action"] == "restart"
@@ -171,7 +170,7 @@ class TestStackOperations:
     async def test_deploy_simple_stack(self, client: Client, test_host_id: str, simple_compose_content: str):
         """Test deploying a simple test stack."""
         stack_name = "test-mcp-simple"
-        
+
         result = await client.call_tool("docker_compose", {
             "action": "deploy",
             "host_id": test_host_id,
@@ -180,10 +179,10 @@ class TestStackOperations:
             "pull_images": False,
             "recreate": False
         })
-        
+
         assert result.data["success"] is True
         assert result.data["stack_name"] == stack_name
-        
+
         # Clean up
         await client.call_tool("docker_compose", {
             "action": "down",
@@ -193,11 +192,11 @@ class TestStackOperations:
         })
 
     @pytest.mark.asyncio
-    async def test_deploy_complex_stack(self, client: Client, test_host_id: str, 
+    async def test_deploy_complex_stack(self, client: Client, test_host_id: str,
                                        complex_compose_content: str, test_environment: dict[str, str]):
         """Test deploying a complex stack with environment variables."""
         stack_name = "test-mcp-complex"
-        
+
         result = await client.call_tool("docker_compose", {
             "action": "deploy",
             "host_id": test_host_id,
@@ -207,10 +206,10 @@ class TestStackOperations:
             "pull_images": False,
             "recreate": False
         })
-        
+
         assert result.data["success"] is True
         assert result.data["stack_name"] == stack_name
-        
+
         # Clean up
         await client.call_tool("docker_compose", {
             "action": "down",
@@ -223,7 +222,7 @@ class TestStackOperations:
     async def test_manage_stack_operations(self, client: Client, test_host_id: str, simple_compose_content: str):
         """Test complete stack lifecycle: deploy -> ps -> down."""
         stack_name = "test-mcp-lifecycle"
-        
+
         # Deploy stack
         deploy_result = await client.call_tool("docker_compose", {
             "action": "deploy",
@@ -234,7 +233,7 @@ class TestStackOperations:
             "recreate": False
         })
         assert deploy_result.data["success"] is True
-        
+
         # Check stack status (ps)
         ps_result = await client.call_tool("docker_compose", {
             "action": "ps",
@@ -243,7 +242,7 @@ class TestStackOperations:
         })
         assert ps_result.data["success"] is True
         assert ps_result.data["execution_method"] == "ssh"  # Verify SSH execution
-        
+
         # Stop and remove stack (down)
         down_result = await client.call_tool("docker_compose", {
             "action": "down",
@@ -322,7 +321,7 @@ class TestErrorHandling:
         assert "error" in result.data
         assert "error" in result.data  # Just verify error is present
 
-        # Test get logs for nonexistent container 
+        # Test get logs for nonexistent container
         result = await client.call_tool("docker_container", {
             "action": "logs",
             "host_id": test_host_id,
@@ -367,7 +366,7 @@ class TestErrorHandling:
         })
         # Application handles negative values gracefully rather than erroring
         assert "success" in result.data
-        
+
         # Test extremely large pagination values - may be handled gracefully
         result = await client.call_tool("docker_container", {
             "action": "list",
@@ -377,7 +376,7 @@ class TestErrorHandling:
         # Large limits may be accepted and handled gracefully
         assert "success" in result.data
 
-    @pytest.mark.asyncio 
+    @pytest.mark.asyncio
     async def test_resource_not_found_scenarios(self, client: Client):
         """Test resource not found error handling."""
         # Test operations on completely invalid host
@@ -470,7 +469,7 @@ services:
       - "test=logs-functionality"
 """
         stack_name = "test-logs-stack"
-        
+
         # Deploy
         deploy_result = await client.call_tool("docker_compose", {
             "action": "deploy",
@@ -479,22 +478,22 @@ services:
             "compose_content": compose_content,
             "pull_images": False
         })
-        
+
         try:
             assert deploy_result.data["success"] is True
-            
+
             # Test logs functionality
             logs_result = await client.call_tool("docker_compose", {
                 "action": "logs",
                 "host_id": test_host_id,
                 "stack_name": stack_name
             })
-            
+
             # Should either succeed or fail gracefully
             assert "success" in logs_result.data
             if logs_result.data["success"]:
                 assert "logs" in logs_result.data or "output" in logs_result.data
-                
+
         finally:
             # Clean up
             await client.call_tool("docker_compose", {
@@ -510,8 +509,8 @@ services:
         result = await client.call_tool("docker_hosts", {"action": "import"})
         # Should either succeed or fail gracefully
         assert "success" in result.data
-        
-    @pytest.mark.asyncio 
+
+    @pytest.mark.asyncio
     async def test_action_case_sensitivity(self, client: Client, test_host_id: str):
         """Test that actions are case sensitive."""
         # Test uppercase action (should fail)
@@ -527,25 +526,25 @@ services:
 @pytest.mark.slow
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_all_tools_integration(client: Client, test_host_id: str, test_container_id: str, 
+async def test_all_tools_integration(client: Client, test_host_id: str, test_container_id: str,
                                    simple_compose_content: str, worker_id: str, dynamic_port: int):
     """Integration test that exercises all 3 consolidated tools."""
-    
+
     # Host Management (docker_hosts)
     hosts = await client.call_tool("docker_hosts", {"action": "list"})
     assert hosts.data["success"] is True
-    
+
     # Container Operations (docker_container)
     containers = await client.call_tool("docker_container", {"action": "list", "host_id": test_host_id})
     assert containers.data["success"] is True
-    
+
     info = await client.call_tool("docker_container", {
         "action": "info",
-        "host_id": test_host_id, 
+        "host_id": test_host_id,
         "container_id": test_container_id
     })
     assert info.data["success"] is True
-    
+
     logs = await client.call_tool("docker_container", {
         "action": "logs",
         "host_id": test_host_id,
@@ -553,16 +552,16 @@ async def test_all_tools_integration(client: Client, test_host_id: str, test_con
         "lines": 5
     })
     assert logs.data["success"] is True
-    
+
     # Stack Operations (docker_compose)
     stacks = await client.call_tool("docker_compose", {"action": "list", "host_id": test_host_id})
     assert stacks.data["success"] is True
-    
+
     # Quick stack deployment test with unique stack name
     integration_port = dynamic_port + 50  # Offset to avoid conflicts with test container
     stack_suffix = worker_id if worker_id != 'master' else 'main'
     stack_name = f"test-integration-{stack_suffix}"
-    
+
     # Create unique compose content with dynamic port
     integration_compose = f"""version: '3.8'
 services:
@@ -574,7 +573,7 @@ services:
       - "test=mcp-validation-integration"
       - "worker={worker_id}"
 """
-    
+
     deploy = await client.call_tool("docker_compose", {
         "action": "deploy",
         "host_id": test_host_id,
@@ -583,7 +582,7 @@ services:
         "pull_images": False
     })
     assert deploy.data["success"] is True
-    
+
     # Test manage_stack (the fixed SSH-based execution)
     ps_result = await client.call_tool("docker_compose", {
         "action": "ps",
@@ -591,7 +590,7 @@ services:
         "stack_name": stack_name
     })
     assert ps_result.data["success"] is True
-    
+
     # Clean up
     await client.call_tool("docker_compose", {
         "action": "down",
@@ -599,5 +598,5 @@ services:
         "stack_name": stack_name,
         "options": {"volumes": True}
     })
-    
+
     # All 3 consolidated tools tested successfully!

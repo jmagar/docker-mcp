@@ -5,14 +5,14 @@ from pydantic import ValidationError
 
 from docker_mcp.models.params import (
     DockerComposeParams,
-    DockerContainerParams, 
+    DockerContainerParams,
     DockerHostsParams,
 )
 
 
 class TestDockerHostsParams:
     """Test DockerHostsParams model validation."""
-    
+
     def test_valid_params_minimal(self):
         """Test with minimal required parameters."""
         params = DockerHostsParams(action="list")
@@ -22,13 +22,13 @@ class TestDockerHostsParams:
         assert params.enabled is True
         assert params.tags == []
         assert params.compose_path_overrides == {}
-        
+
     def test_valid_params_full(self):
         """Test with all parameters provided."""
         params = DockerHostsParams(
             action="add",
             host_id="test-host",
-            ssh_host="server.example.com", 
+            ssh_host="server.example.com",
             ssh_user="dockeruser",
             ssh_port=2222,
             ssh_key_path="/path/to/key",
@@ -47,32 +47,32 @@ class TestDockerHostsParams:
         assert params.ssh_port == 2222
         assert params.tags == ["prod", "web"]
         assert params.compose_path_overrides == {"host1": "/custom/path"}
-        
+
     def test_port_validation(self):
         """Test SSH port validation."""
         # Valid port
         params = DockerHostsParams(action="add", ssh_port=8022)
         assert params.ssh_port == 8022
-        
+
         # Invalid ports should raise validation error
         with pytest.raises(ValidationError):
             DockerHostsParams(action="add", ssh_port=0)
-            
+
         with pytest.raises(ValidationError):
             DockerHostsParams(action="add", ssh_port=70000)
-            
+
     def test_missing_required_action(self):
         """Test that action parameter is required."""
         with pytest.raises(ValidationError) as exc_info:
             DockerHostsParams()
-        
+
         errors = exc_info.value.errors()
         assert any(error["type"] == "missing" and "action" in str(error) for error in errors)
 
 
 class TestDockerContainerParams:
     """Test DockerContainerParams model validation."""
-    
+
     def test_valid_params_minimal(self):
         """Test with minimal required parameters."""
         params = DockerContainerParams(action="list")
@@ -82,7 +82,7 @@ class TestDockerContainerParams:
         assert params.offset == 0
         assert params.lines == 100
         assert params.timeout == 10
-        
+
     def test_valid_params_full(self):
         """Test with all parameters provided."""
         params = DockerContainerParams(
@@ -102,29 +102,29 @@ class TestDockerContainerParams:
         assert params.all_containers is True
         assert params.limit == 50
         assert params.lines == 500
-        
+
     def test_limit_validation(self):
         """Test limit parameter validation."""
         # Valid limits
         params = DockerContainerParams(action="list", limit=1)
         assert params.limit == 1
-        
+
         params = DockerContainerParams(action="list", limit=1000)
         assert params.limit == 1000
-        
+
         # Invalid limits should raise validation error
         with pytest.raises(ValidationError):
             DockerContainerParams(action="list", limit=0)
-            
+
         with pytest.raises(ValidationError):
             DockerContainerParams(action="list", limit=1001)
-            
+
     def test_offset_validation(self):
         """Test offset parameter validation."""
         # Valid offset
         params = DockerContainerParams(action="list", offset=0)
         assert params.offset == 0
-        
+
         # Invalid offset should raise validation error
         with pytest.raises(ValidationError):
             DockerContainerParams(action="list", offset=-1)
@@ -132,7 +132,7 @@ class TestDockerContainerParams:
 
 class TestDockerComposeParams:
     """Test DockerComposeParams model validation."""
-    
+
     def test_valid_params_minimal(self):
         """Test with minimal required parameters."""
         params = DockerComposeParams(action="list")
@@ -142,7 +142,7 @@ class TestDockerComposeParams:
         assert params.environment == {}
         assert params.pull_images is True
         assert params.lines == 100
-        
+
     def test_valid_params_full(self):
         """Test with all parameters provided."""
         compose_content = '''
@@ -173,40 +173,40 @@ services:
         assert params.environment == {"ENV": "prod", "DEBUG": "false"}
         assert params.recreate is True
         assert params.options == {"timeout": "30s"}
-        
+
     def test_lines_validation(self):
         """Test lines parameter validation."""
         # Valid lines count
         params = DockerComposeParams(action="logs", lines=1)
         assert params.lines == 1
-        
+
         params = DockerComposeParams(action="logs", lines=10000)
         assert params.lines == 10000
-        
+
         # Invalid lines count should raise validation error
         with pytest.raises(ValidationError):
             DockerComposeParams(action="logs", lines=0)
-            
+
         with pytest.raises(ValidationError):
             DockerComposeParams(action="logs", lines=10001)
 
 
 class TestParameterModelIntegration:
     """Test integration aspects of parameter models."""
-    
+
     def test_all_models_have_action_field(self):
         """Ensure all parameter models have required action field."""
         models = [DockerHostsParams, DockerContainerParams, DockerComposeParams]
-        
+
         for model_class in models:
             # Should require action field
             with pytest.raises(ValidationError):
                 model_class()
-                
+
             # Should accept action field
             instance = model_class(action="test")
             assert instance.action == "test"
-            
+
     def test_model_serialization(self):
         """Test that models can be serialized to dict."""
         params = DockerHostsParams(
@@ -215,7 +215,7 @@ class TestParameterModelIntegration:
             tags=["tag1", "tag2"],
             compose_path_overrides={"host1": "/path"}
         )
-        
+
         # Should serialize to dict
         data = params.model_dump()
         assert isinstance(data, dict)
@@ -223,7 +223,7 @@ class TestParameterModelIntegration:
         assert data["host_id"] == "test"
         assert data["tags"] == ["tag1", "tag2"]
         assert data["compose_path_overrides"] == {"host1": "/path"}
-        
+
     def test_model_deserialization(self):
         """Test that models can be created from dict."""
         data = {
@@ -233,21 +233,21 @@ class TestParameterModelIntegration:
             "tags": ["prod"],
             "compose_path_overrides": {}
         }
-        
+
         params = DockerHostsParams(**data)
         assert params.action == "list"
-        assert params.host_id == "test-host" 
+        assert params.host_id == "test-host"
         assert params.ssh_port == 2222
         assert params.tags == ["prod"]
-        
+
     def test_field_descriptions_present(self):
         """Test that all fields have descriptions for API documentation."""
         models = [DockerHostsParams, DockerContainerParams, DockerComposeParams]
-        
+
         for model_class in models:
             schema = model_class.model_json_schema()
             properties = schema.get("properties", {})
-            
+
             # All fields should have descriptions
             for field_name, field_info in properties.items():
                 assert "description" in field_info, f"Field '{field_name}' in {model_class.__name__} missing description"
