@@ -40,7 +40,6 @@ def setup_logging(
     logging.getLogger().handlers.clear()
     
     # Create formatters
-    json_formatter = structlog.testing.LogCapture()
     console_formatter = logging.Formatter(
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
@@ -87,19 +86,25 @@ def setup_logging(
     middleware_logger.propagate = True  # Also send to console via root logger
     
     # Configure structlog to use standard library logging
+    from structlog.stdlib import LoggerFactory, BoundLogger, ProcessorFormatter
+    renderer = structlog.dev.ConsoleRenderer() if sys.stdout.isatty() else structlog.processors.JSONRenderer()
+    # Integrate with stdlib handlers so file and console both receive events
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.StackInfoRenderer(),
-            structlog.dev.set_exc_info,
             structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer() if sys.stdout.isatty() else structlog.processors.JSONRenderer(),
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(log_level_num),
-        logger_factory=structlog.WriteLoggerFactory(),
+        logger_factory=LoggerFactory(),
+        wrapper_class=BoundLogger,
         cache_logger_on_first_use=True,
     )
+    # Apply structlog formatting via ProcessorFormatter on each handler
+    console_handler.setFormatter(ProcessorFormatter(processor=renderer))
+    server_file_handler.setFormatter(ProcessorFormatter(processor=structlog.processors.JSONRenderer()))
+    middleware_file_handler.setFormatter(ProcessorFormatter(processor=structlog.processors.JSONRenderer()))
     
     # Log initialization
     logger = structlog.get_logger("server")

@@ -62,8 +62,8 @@ COPY docker_mcp/ ./docker_mcp/
 COPY config/ ./config/
 
 # Create directories and set permissions in one layer
-RUN mkdir -p /home/dockermcp/.ssh /app/data /app/logs && \
-    chown -R dockermcp:dockermcp /home/dockermcp/.ssh /app/data /app/logs /app && \
+RUN mkdir -p /home/dockermcp/.ssh /app/data && \
+    chown -R dockermcp:dockermcp /home/dockermcp/.ssh /app/data /app && \
     chmod 700 /home/dockermcp/.ssh
 
 # Switch to non-root user

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     
     ports:
-      - "${FASTMCP_PORT:-8011}:${FASTMCP_PORT:-8011}"
+      - "${FASTMCP_PORT:-8000}:${FASTMCP_PORT:-8000}"
     
     volumes:
       # Docker MCP SSH keys only - mounted read-only for security
@@ -47,7 +47,7 @@ services:
     
     # Health check (using internal endpoint check)
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=5)"]
+      test: ["CMD-SHELL", "python -c \"import os,socket; socket.create_connection(('localhost', int(os.getenv('FASTMCP_PORT','8000'))), timeout=5)\""]
       interval: 30s
       timeout: 10s
       retries: 3

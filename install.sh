@@ -417,10 +417,6 @@ download_compose_file() {
             if available_port=$(find_available_port $desired_port); then
                 print_success "Found available port: $available_port"
                 
-                # Update docker-compose.yaml with new port
-                sed -i.bak "s|\"8000:8000\"|\"${available_port}:8000\"|g" "$compose_file"
-                sed -i.bak "s|FASTMCP_PORT: \"8000\"|FASTMCP_PORT: \"8000\"|g" "$compose_file"
-                rm -f "${compose_file}.bak"
                 
                 # Store the port for later use
                 echo "FASTMCP_PORT=${available_port}" > "${DOCKER_MCP_DIR}/.env"
@@ -512,11 +508,18 @@ setup_ssh_with_standalone_script() {
     echo -e "${BLUE}Setting up SSH keys...${NC}"
     echo
     
-    local script_path="$(dirname "$0")/scripts/setup-ssh-keys.sh"
+    # Fix SC2155: declare then assign to avoid command substitution in local
+    local script_dir
+    local script_path
+    
+    # Robust script directory computation supporting sourcing
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+    script_path="$script_dir/scripts/setup-ssh-keys.sh"
     
     if [ -f "$script_path" ]; then
         print_info "Using standalone SSH setup script"
-        if "$script_path" --batch; then
+        # Use bash to invoke script (no dependency on executable bit)
+        if bash "$script_path" --batch; then
             print_success "SSH key distribution completed successfully"
         else
             print_warning "SSH setup script encountered issues, falling back to embedded functions"

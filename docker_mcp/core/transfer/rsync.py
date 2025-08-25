@@ -127,7 +127,8 @@ class RsyncTransfer(BaseTransfer):
         )
         
         if result.returncode != 0:
-            raise RsyncError(f"Rsync failed: {result.stderr}")
+            snippet = (result.stdout or "")[:500]
+            raise RsyncError(f"Rsync failed: {result.stderr or snippet}")
         
         # Parse rsync output for statistics
         stats = self._parse_stats(result.stdout)

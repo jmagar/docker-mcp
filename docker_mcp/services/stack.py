@@ -5,6 +5,8 @@ Business logic for Docker Compose stack operations with formatted output.
 """
 
 import asyncio
+import shlex
+import subprocess
 from typing import Any
 
 import structlog
@@ -314,9 +316,11 @@ class StackService:
             ssh_cmd_source.append(f"{source_host.user}@{source_host.hostname}")
             
             # Read compose file
-            read_cmd = ssh_cmd_source + [f"cat {compose_file_path}"]
-            import subprocess
-            result = subprocess.run(read_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            read_cmd = ssh_cmd_source + [f"cat {shlex.quote(compose_file_path)}"]
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, lambda: subprocess.run(read_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            )
             
             if result.returncode != 0:
                 return ToolResult(
@@ -344,8 +348,14 @@ class StackService:
                 
                 # Verify all containers are actually stopped
                 migration_steps.append("🔍 Verifying all containers are stopped...")
-                verify_cmd = ssh_cmd_source + [f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"]
-                verify_result = subprocess.run(verify_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                verify_cmd = ssh_cmd_source + [(
+                    f"docker ps --filter "
+                    f"'label=com.docker.compose.project={shlex.quote(stack_name)}' "
+                    f"--format '{{{{.Names}}}}'"
+                )]
+                verify_result = await loop.run_in_executor(
+                    None, lambda: subprocess.run(verify_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                )
                 
                 if verify_result.stdout.strip():
                     running_containers = verify_result.stdout.strip().split('\n')
@@ -368,14 +378,18 @@ class StackService:
                 
                 # Additional safety: Force filesystem sync
                 sync_cmd = ssh_cmd_source + ["sync"]
-                subprocess.run(sync_cmd, capture_output=True, check=False)  # nosec B603
+                await loop.run_in_executor(
+                    None, lambda: subprocess.run(sync_cmd, capture_output=True, check=False)  # nosec B603
+                )
                 migration_steps.append("✅ Filesystem sync completed")
                 
             elif skip_stop_source and not dry_run:
                 # If explicitly skipping stop, verify containers are already down
                 migration_steps.append("⚠️  Checking if stack containers are running...")
                 check_cmd = ssh_cmd_source + [f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"]
-                check_result = subprocess.run(check_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                check_result = await loop.run_in_executor(
+                    None, lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                )
                 
                 if check_result.stdout.strip():
                     running_containers = check_result.stdout.strip().split('\n')
@@ -425,7 +439,9 @@ class StackService:
                 
                 # Verify archive integrity
                 verify_archive_cmd = ssh_cmd_source + [f"tar tzf {archive_path} > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
-                verify_archive = subprocess.run(verify_archive_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                verify_archive = await loop.run_in_executor(
+                    None, lambda: subprocess.run(verify_archive_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                )
                 
                 if "FAILED" in verify_archive.stdout:
                     return ToolResult(
@@ -448,9 +464,11 @@ class StackService:
             
             # Create the target directory
             mkdir_cmd = f"mkdir -p {target_stack_dir}"
-            result = subprocess.run(
-                self._build_ssh_cmd(target_host) + [mkdir_cmd], 
-                capture_output=True, text=True, check=False  # nosec B603
+            result = await loop.run_in_executor(
+                None, lambda: subprocess.run(
+                    self._build_ssh_cmd(target_host) + [mkdir_cmd], 
+                    capture_output=True, text=True, check=False  # nosec B603
+                )
             )
             if result.returncode != 0:
                 return ToolResult(
@@ -478,7 +496,9 @@ class StackService:
                     else:
                         # Check if directory has existing files before backing up
                         check_existing_cmd = self._build_ssh_cmd(target_host) + [f"find {target_stack_dir} -type f 2>/dev/null | head -1"]
-                        check_result = subprocess.run(check_existing_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                        check_result = await loop.run_in_executor(
+                            None, lambda: subprocess.run(check_existing_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                        )
                         has_existing_data = bool(check_result.stdout.strip())
                         
                         if has_existing_data:
@@ -512,7 +532,9 @@ class StackService:
                     
                     # Log archive details before extraction
                     archive_size_cmd = ssh_cmd_source + [f"stat -c%s {archive_path} 2>/dev/null || echo 0"]
-                    archive_size_result = subprocess.run(archive_size_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                    archive_size_result = await loop.run_in_executor(
+                        None, lambda: subprocess.run(archive_size_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                    )
                     archive_size = int(archive_size_result.stdout.strip()) if archive_size_result.returncode == 0 else 0
                     
                     self.logger.info("Archive ready for extraction",
@@ -528,7 +550,9 @@ class StackService:
                 
                 # Check target directory before extraction
                 check_before_cmd = self._build_ssh_cmd(target_host) + [f"find {target_stack_dir} -type f 2>/dev/null | wc -l"]
-                before_result = subprocess.run(check_before_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                before_result = await loop.run_in_executor(
+                    None, lambda: subprocess.run(check_before_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                )
                 files_before = int(before_result.stdout.strip()) if before_result.returncode == 0 else 0
                 
                 migration_steps.append(f"🔍 Pre-extraction: {files_before} files in {target_stack_dir}")
@@ -554,7 +578,9 @@ class StackService:
                 )
                 migration_steps.append(f"⚙️  Phase 1: Extracting archive to staging directory...")
                 
-                extraction_result = subprocess.run(extract_to_staging_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                extraction_result = await loop.run_in_executor(
+                    None, lambda: subprocess.run(extract_to_staging_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                )
                 
                 # Log Phase 1 extraction results
                 self.logger.info("Phase 1: Extraction to staging completed",
@@ -583,7 +609,9 @@ class StackService:
                 # PHASE 2: Verify staging directory has files 
                 migration_steps.append("🔍 Phase 2: Verifying files extracted to staging directory...")
                 check_staging_cmd = self._build_ssh_cmd(target_host) + [f"find {target_stack_dir}.tmp -type f 2>/dev/null | wc -l"]
-                staging_result = subprocess.run(check_staging_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                staging_result = await loop.run_in_executor(
+                    None, lambda: subprocess.run(check_staging_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                )
                 staging_files_count = int(staging_result.stdout.strip()) if staging_result.returncode == 0 else 0
                 
                 self.logger.info("Phase 2: Staging directory verification",
@@ -624,7 +652,9 @@ class StackService:
                     target_dir=target_stack_dir
                 )
                 
-                move_result = subprocess.run(atomic_move_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                move_result = await loop.run_in_executor(
+                    None, lambda: subprocess.run(atomic_move_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                )
                 
                 self.logger.info("Phase 3: Atomic move completed",
                     return_code=move_result.returncode,
@@ -649,7 +679,9 @@ class StackService:
                 
                 # Verify final directory
                 check_after_cmd = self._build_ssh_cmd(target_host) + [f"find {target_stack_dir} -type f 2>/dev/null | wc -l"]
-                after_result = subprocess.run(check_after_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                after_result = await loop.run_in_executor(
+                    None, lambda: subprocess.run(check_after_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                )
                 files_after = int(after_result.stdout.strip()) if after_result.returncode == 0 else 0
                 
                 # Log successful split-phase extraction results
@@ -828,8 +860,8 @@ class StackService:
             if remove_source and not dry_run and verification_results and verification_results["overall_success"]:
                 migration_steps.append(f"🗑️  Migration successful - removing stack from {source_host_id}...")
                 # SAFETY: Only remove compose file, not entire directory
-                remove_cmd = ssh_cmd_source + [f"rm -f {compose_file_path}"]  # Changed from rm -rf to rm -f
-                subprocess.run(remove_cmd, check=False)  # nosec B603
+                remove_cmd = ssh_cmd_source + [f"rm -f {shlex.quote(compose_file_path)}"]  # Changed from rm -rf to rm -f
+                await loop.run_in_executor(None, lambda: subprocess.run(remove_cmd, check=False))  # nosec B603
             elif remove_source and not dry_run:
                 migration_steps.append(f"⚠️  Skipping source removal - migration verification failed")
             

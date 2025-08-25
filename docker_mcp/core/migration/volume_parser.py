@@ -1,6 +1,7 @@
 """Volume parsing utilities for Docker Compose files."""
 
 import asyncio
+import shlex
 import subprocess
 from typing import Any
 
@@ -102,14 +103,15 @@ class VolumeParser:
         if source_appdata_path and "${APPDATA_PATH}" in volume_str:
             expanded_volume_str = volume_str.replace("${APPDATA_PATH}", source_appdata_path)
         
-        parts = expanded_volume_str.split(":")
+        # Split into at most [source, dest, mode]; don't explode extra colons
+        parts = expanded_volume_str.split(":", 2)
         
         if len(parts) < 2:
             # Simple volume without destination
             return {"type": "named", "name": parts[0], "destination": ""}
         
         # Check if first part is absolute path (bind mount)
-        if parts[0].startswith("/") or parts[0].startswith("./") or parts[0].startswith("~"):
+        if parts[0].startswith(("/", "./", "~")):
             return {
                 "type": "bind",
                 "source": parts[0],
@@ -124,6 +126,7 @@ class VolumeParser:
                 "name": parts[0],
                 "destination": parts[1] if len(parts) > 1 else "",
                 "mode": parts[2] if len(parts) > 2 else "rw",
+                "original": volume_str,
             }
     
     async def get_volume_locations(
@@ -143,14 +146,14 @@ class VolumeParser:
         volume_paths = {}
         
         for volume_name in named_volumes:
-            # Docker volume inspect to get mount point
-            inspect_cmd = f"docker volume inspect {volume_name} --format '{{{{.Mountpoint}}}}'"
+            # Docker volume inspect to get mount point (with shell injection protection)
+            inspect_cmd = f"docker volume inspect {shlex.quote(volume_name)} --format '{{{{.Mountpoint}}}}'"
             full_cmd = ssh_cmd + [inspect_cmd]
             
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
-                    full_cmd, check=False, capture_output=True, text=True
+                lambda cmd=full_cmd: subprocess.run(  # nosec B603
+                    cmd, check=False, capture_output=True, text=True
                 ),
             )
             

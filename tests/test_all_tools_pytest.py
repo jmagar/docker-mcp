@@ -39,7 +39,7 @@ class TestHostManagement:
     async def test_update_host_config(self, client: Client, test_host_id: str):
         """Test updating host configuration."""
         result = await client.call_tool("docker_hosts", {
-            "action": "update",
+            "action": "compose_path",
             "host_id": test_host_id,
             "compose_path": "/tmp/test-compose"
         })

@@ -168,10 +168,11 @@ class ArchiveUtils:
         common_parent, relative_paths = self._find_common_parent(volume_paths)
         
         # Build tar command with -C to change directory
+        import shlex
         tar_cmd = ["tar", "czf", archive_file, "-C", common_parent] + exclude_flags + relative_paths
         
         # Execute tar command on remote host
-        remote_cmd = " ".join(tar_cmd)
+        remote_cmd = " ".join(map(shlex.quote, tar_cmd))
         full_cmd = ssh_cmd + [remote_cmd]
         
         self.logger.info(
@@ -204,7 +205,8 @@ class ArchiveUtils:
         Returns:
             True if archive is valid, False otherwise
         """
-        verify_cmd = ssh_cmd + [f"tar tzf {archive_path} > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
+        import shlex
+        verify_cmd = ssh_cmd + [f"tar tzf {shlex.quote(archive_path)} > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
         
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -231,7 +233,8 @@ class ArchiveUtils:
         Returns:
             True if extraction successful, False otherwise
         """
-        extract_cmd = ssh_cmd + [f"cd {extract_dir} && tar xzf {archive_path}"]
+        import shlex
+        extract_cmd = ssh_cmd + [f"tar xzf {shlex.quote(archive_path)} -C {shlex.quote(extract_dir)}"]
         
         result = await asyncio.get_event_loop().run_in_executor(
             None,

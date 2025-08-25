@@ -87,12 +87,6 @@ class DockerMCPServer:
         self.config = config
         self._config_path: str = config_path or os.getenv("DOCKER_HOSTS_CONFIG") or "config/hosts.yml"
         
-        # Setup dual logging system first (before any logging)
-        setup_logging(
-            log_dir=os.getenv("LOG_DIR", str(get_data_dir() / "logs")),
-            log_level=os.getenv("LOG_LEVEL"),
-            max_file_size_mb=int(os.getenv("LOG_FILE_SIZE_MB", "10"))
-        )
         
         # Use server logger (writes to mcp_server.log)
         self.logger = get_server_logger()
@@ -844,11 +838,14 @@ def main() -> None:
     """Main entry point."""
     args = parse_args()
 
-    # setup_logging() is called during DockerMCPServer initialization
-    # No additional structlog.configure() needed here to avoid conflicts
-
-    logger = structlog.get_logger()
-    # structlog doesn't have setLevel - log level is configured during setup_logging()
+    # Setup unified logging (console + files)
+    from docker_mcp.core.logging_config import setup_logging, get_server_logger
+    setup_logging(
+        log_dir=os.getenv("LOG_DIR", str(get_data_dir() / "logs")),
+        log_level=args.log_level,
+        max_file_size_mb=int(os.getenv("LOG_FILE_SIZE_MB", "10"))
+    )
+    logger = get_server_logger()
 
     try:
         # Load configuration

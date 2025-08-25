@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
+import shlex
 
 from .base import BaseTransfer
 from ..config_loader import DockerHost
@@ -113,7 +114,7 @@ class ZFSTransfer(BaseTransfer):
         ssh_cmd = self.build_ssh_cmd(host)
         
         # Use df to check filesystem type and mount point
-        df_cmd = ssh_cmd + [f"df -T {path} | tail -1"]
+        df_cmd = ssh_cmd + [f"df -T {shlex.quote(path)} | tail -1"]
         
         try:
             result = await asyncio.get_event_loop().run_in_executor(
@@ -184,7 +185,8 @@ class ZFSTransfer(BaseTransfer):
                 snapshot=full_snapshot,
                 dataset=dataset
             )
-        snap_cmd = ssh_cmd + [f"zfs snapshot {snap_flags} {full_snapshot}".strip()]
+        quoted_snapshot = shlex.quote(f"{dataset}@{snapshot_name}")
+        snap_cmd = ssh_cmd + [f"zfs snapshot {snap_flags} {quoted_snapshot}".strip()]
         
         self.logger.info(
             "Creating ZFS snapshot",

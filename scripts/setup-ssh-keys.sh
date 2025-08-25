@@ -4,7 +4,9 @@
 # Robust, standalone SSH key setup with automatic host discovery
 # Usage: ./scripts/setup-ssh-keys.sh [options]
 
-set -e
+set -Eeuo pipefail
+# Minimal ERR trap (don't rely on functions not yet defined here)
+trap 'echo "[ERROR] Unexpected failure at line $LINENO (exit=$?): ${BASH_COMMAND}" >&2' ERR
 
 # Configuration (matching install.sh conventions)
 DOCKER_MCP_DIR="${HOME}/.docker-mcp"
@@ -16,7 +18,7 @@ DATA_DIR="${DOCKER_MCP_DIR}/data"
 # Additional settings
 SSH_CONFIG="${SSH_CONFIG:-${HOME}/.ssh/config}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-10}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# (removed) SCRIPT_DIR was unused
 
 # Color codes (matching install.sh)
 RED='\033[0;31m'
@@ -28,7 +30,7 @@ NC='\033[0m' # No Color
 # Command line options
 BATCH_MODE=false
 DRY_RUN=false
-VERIFY_ONLY=false
+VERIFY_AFTER=false
 CUSTOM_KEY=""
 HOST_FILTER=""
 VERBOSE=false
@@ -122,7 +124,7 @@ parse_arguments() {
                 shift
                 ;;
             -v|--verify)
-                VERIFY_ONLY=true
+                VERIFY_AFTER=true
                 shift
                 ;;
             -f|--filter)
@@ -374,7 +376,8 @@ generate_or_find_key() {
             key_to_use="$SSH_KEY_PATH"
         else
             print_info "Generating new Docker MCP SSH key..."
-            ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "docker-mcp@$(hostname)"
+            chmod 700 "$(dirname "$SSH_KEY_PATH")" || true
+            ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "docker-mcp:$(hostname -f 2>/dev/null || hostname)"
             chmod 600 "$SSH_KEY_PATH"
             chmod 644 "$SSH_KEY_PATH.pub"
             key_to_use="$SSH_KEY_PATH"

@@ -144,14 +144,5 @@ exclude_lines = [
     "if TYPE_CHECKING:",
 ]
 
-[dependency-groups]
-dev = [
-    "pytest-asyncio>=1.1.0",
-    "pytest-cov>=6.2.1",
-    "pytest-stub>=1.1.0",
-    "pytest-xdist>=3.8.0",
-    "pytest-timeout>=2.3.0",
-    "types-pyyaml>=6.0.12.20250809",
-    "types-requests>=2.32.4.20250809",
-]
+# Dependency groups removed to avoid duplication with [project.optional-dependencies].dev
 
