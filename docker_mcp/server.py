@@ -9,7 +9,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any, Annotated, Optional, List, Dict
+from typing import Any, Annotated, Literal
 
 import structlog
 from fastmcp import FastMCP
@@ -51,33 +51,162 @@ except ImportError:
 
 
 def get_data_dir() -> Path:
-    """Get data directory based on environment."""
-    # Check for explicit data directory override first
-    if fastmcp_data_dir := os.getenv("FASTMCP_DATA_DIR"):
-        return Path(fastmcp_data_dir)
+    """Get data directory based on environment with comprehensive validation.
     
-    # Check if running in container with explicit truthy check
-    docker_container = os.getenv("DOCKER_CONTAINER", "").lower()
-    if docker_container in ("1", "true", "yes", "on"):
-        return Path("/app/data")
-    else:
-        # Local development path
-        return Path.home() / ".docker-mcp" / "data"
+    Priority order:
+    1. FASTMCP_DATA_DIR (explicit override)
+    2. DOCKER_MCP_DATA_DIR (application-specific)
+    3. XDG_DATA_HOME (Linux/Unix standard)
+    4. Container detection (/app/data)
+    5. User home fallback (~/.docker-mcp/data)
+    6. System temp fallback (/tmp/docker-mcp)
+    """
+    # Environment variable candidates in priority order
+    env_candidates = [
+        os.getenv("FASTMCP_DATA_DIR"),
+        os.getenv("DOCKER_MCP_DATA_DIR"),
+        os.getenv("XDG_DATA_HOME") and Path(os.getenv("XDG_DATA_HOME")) / "docker-mcp",
+    ]
+    
+    # Check explicit environment overrides
+    for candidate in env_candidates:
+        if candidate:
+            candidate_path = Path(candidate)
+            # Validate the path can be created and is writable
+            try:
+                candidate_path.mkdir(parents=True, exist_ok=True)
+                # Test write permissions
+                test_file = candidate_path / ".write_test"
+                test_file.touch()
+                test_file.unlink()
+                return candidate_path
+            except (OSError, PermissionError, FileNotFoundError):
+                # If we can't create/write, continue to next candidate
+                continue
+    
+    # Check if running in container with comprehensive detection
+    container_indicators = [
+        os.getenv("DOCKER_CONTAINER", "").lower() in ("1", "true", "yes", "on"),
+        os.path.exists("/.dockerenv"),
+        os.path.exists("/app"),
+        os.getenv("container") is not None,  # systemd container detection
+    ]
+    
+    if any(container_indicators):
+        container_path = Path("/app/data")
+        try:
+            container_path.mkdir(parents=True, exist_ok=True)
+            return container_path
+        except (OSError, PermissionError):
+            # Container path failed, fall through to other options
+            pass
+    
+    # Standard user data directory fallbacks
+    fallback_candidates = [
+        Path.home() / ".docker-mcp" / "data",  # Primary user directory
+        Path.home() / ".local" / "share" / "docker-mcp",  # XDG-style fallback
+        Path("/tmp") / "docker-mcp" / str(os.getuid() if hasattr(os, 'getuid') else 'user'),  # Temp with user isolation
+        Path("/tmp") / "docker-mcp",  # Final fallback
+    ]
+    
+    for fallback_path in fallback_candidates:
+        try:
+            fallback_path.mkdir(parents=True, exist_ok=True)
+            # Test write permissions
+            test_file = fallback_path / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+            return fallback_path
+        except (OSError, PermissionError, FileNotFoundError):
+            continue
+    
+    # If all else fails, return the primary fallback even if not writable
+    # Let the calling code handle the permission error
+    return Path.home() / ".docker-mcp" / "data"
 
 
 def get_config_dir() -> Path:
-    """Get config directory based on environment."""
-    # Check for explicit config directory override first
-    if fastmcp_config_dir := os.getenv("FASTMCP_CONFIG_DIR"):
-        return Path(fastmcp_config_dir)
+    """Get config directory based on environment with comprehensive validation.
     
-    # Check if running in container with explicit truthy check
-    docker_container = os.getenv("DOCKER_CONTAINER", "").lower()
-    if docker_container in ("1", "true", "yes", "on"):
-        return Path("/app/config")
-    else:
-        # Local development - use project config dir
-        return Path("config")
+    Priority order:
+    1. FASTMCP_CONFIG_DIR (explicit override)
+    2. DOCKER_MCP_CONFIG_DIR (application-specific)
+    3. XDG_CONFIG_HOME (Linux/Unix standard)
+    4. Container detection (/app/config)
+    5. Local project config (./config)
+    6. User config fallback (~/.config/docker-mcp)
+    7. System config fallback (/etc/docker-mcp)
+    """
+    # Environment variable candidates in priority order
+    env_candidates = [
+        os.getenv("FASTMCP_CONFIG_DIR"),
+        os.getenv("DOCKER_MCP_CONFIG_DIR"),
+        os.getenv("XDG_CONFIG_HOME") and Path(os.getenv("XDG_CONFIG_HOME")) / "docker-mcp",
+    ]
+    
+    # Check explicit environment overrides
+    for candidate in env_candidates:
+        if candidate:
+            candidate_path = Path(candidate)
+            # For config directories, we only need read access, not write
+            try:
+                if candidate_path.exists() and candidate_path.is_dir():
+                    return candidate_path
+                # Try to create if it doesn't exist
+                candidate_path.mkdir(parents=True, exist_ok=True)
+                return candidate_path
+            except (OSError, PermissionError):
+                # If we can't create, continue to next candidate
+                continue
+    
+    # Check if running in container with comprehensive detection
+    container_indicators = [
+        os.getenv("DOCKER_CONTAINER", "").lower() in ("1", "true", "yes", "on"),
+        os.path.exists("/.dockerenv"),
+        os.path.exists("/app"),
+        os.getenv("container") is not None,  # systemd container detection
+    ]
+    
+    if any(container_indicators):
+        container_path = Path("/app/config")
+        try:
+            if container_path.exists() or container_path.parent.exists():
+                container_path.mkdir(parents=True, exist_ok=True)
+                return container_path
+        except (OSError, PermissionError):
+            # Container path failed, fall through to other options
+            pass
+    
+    # Config directory fallbacks with preference for existing directories
+    fallback_candidates = [
+        Path("config"),  # Local project config (for development)
+        Path.cwd() / "config",  # Current working directory config
+        Path.home() / ".config" / "docker-mcp",  # User config directory
+        Path.home() / ".docker-mcp" / "config",  # Alternative user config
+        Path("/etc/docker-mcp"),  # System-wide config (read-only usually)
+    ]
+    
+    # First pass: look for existing config directories
+    for candidate_path in fallback_candidates:
+        if candidate_path.exists() and candidate_path.is_dir():
+            try:
+                # Test if we can read from the directory
+                list(candidate_path.iterdir())
+                return candidate_path
+            except (OSError, PermissionError):
+                continue
+    
+    # Second pass: try to create config directories
+    for candidate_path in fallback_candidates[:-1]:  # Skip system dir for creation
+        try:
+            candidate_path.mkdir(parents=True, exist_ok=True)
+            return candidate_path
+        except (OSError, PermissionError):
+            continue
+    
+    # If all else fails, return the primary fallback even if not accessible
+    # Let the calling code handle the permission error
+    return Path("config")
 
 
 class DockerMCPServer:
@@ -85,7 +214,7 @@ class DockerMCPServer:
 
     def __init__(self, config: DockerMCPConfig, config_path: str | None = None):
         self.config = config
-        self._config_path: str = config_path or os.getenv("DOCKER_HOSTS_CONFIG") or "config/hosts.yml"
+        self._config_path: str = config_path or os.getenv("DOCKER_HOSTS_CONFIG") or str(get_config_dir() / "hosts.yml")
         
         
         # Use server logger (writes to mcp_server.log)
@@ -170,27 +299,27 @@ class DockerMCPServer:
     
     async def docker_hosts(
         self,
-        action: Annotated[str, Field(description="Action to perform (list, add, ports, compose_path, import_ssh, cleanup, disk_usage, schedule)")],
+        action: Annotated[Literal["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule"], Field(description="Action to perform")],
         host_id: Annotated[str, Field(default="", description="Host identifier **(used by: add, ports, compose_path)**")] = "",
         ssh_host: Annotated[str, Field(default="", description="SSH hostname or IP address **(used by: add)**")] = "",
         ssh_user: Annotated[str, Field(default="", description="SSH username **(used by: add)**")] = "",
         ssh_port: Annotated[int, Field(default=22, ge=1, le=65535, description="SSH port number **(used by: add)**")] = 22,
-        ssh_key_path: Annotated[Optional[str], Field(default=None, description="Path to SSH private key file **(used by: add)**")] = None,
+        ssh_key_path: Annotated[str | None, Field(default=None, description="Path to SSH private key file **(used by: add)**")] = None,
         description: Annotated[str, Field(default="", description="Host description **(used by: add)**")] = "",
-        tags: Annotated[List[str], Field(default_factory=list, description="Host tags **(used by: add)**")] = None,
+        tags: Annotated[list[str], Field(default_factory=list, description="Host tags **(used by: add)**")] = None,
         test_connection: Annotated[bool, Field(default=True, description="Test connection when adding host **(used by: add)**")] = True,
         include_stopped: Annotated[bool, Field(default=False, description="Include stopped containers in listings **(used by: ports)**")] = False,
-        compose_path: Annotated[Optional[str], Field(default=None, description="Docker Compose file path **(used by: add, compose_path)**")] = None,
+        compose_path: Annotated[str | None, Field(default=None, description="Docker Compose file path **(used by: add, compose_path)**")] = None,
         enabled: Annotated[bool, Field(default=True, description="Whether host is enabled **(used by: add)**")] = True,
-        ssh_config_path: Annotated[Optional[str], Field(default=None, description="Path to SSH config file **(used by: import_ssh)**")] = None,
-        selected_hosts: Annotated[Optional[str], Field(default=None, description="Comma-separated list of hosts to select **(used by: import_ssh)**")] = None,
-        compose_path_overrides: Annotated[Dict[str, str], Field(default_factory=dict, description="Per-host compose path overrides **(used by: import_ssh)**")] = None,
+        ssh_config_path: Annotated[str | None, Field(default=None, description="Path to SSH config file **(used by: import_ssh)**")] = None,
+        selected_hosts: Annotated[str | None, Field(default=None, description="Comma-separated list of hosts to select **(used by: import_ssh)**")] = None,
+        compose_path_overrides: Annotated[dict[str, str], Field(default_factory=dict, description="Per-host compose path overrides **(used by: import_ssh)**")] = None,
         auto_confirm: Annotated[bool, Field(default=False, description="Auto-confirm operations without prompting **(used by: add, import_ssh)**")] = False,
-        cleanup_type: Annotated[Optional[str], Field(default=None, description="Type of cleanup to perform (check, safe, moderate, aggressive) **(used by: cleanup)**")] = None,
-        schedule_action: Annotated[Optional[str], Field(default=None, description="Schedule action to perform (add, remove, list, enable, disable) **(used by: schedule)**")] = None,
-        schedule_frequency: Annotated[Optional[str], Field(default=None, description="Cleanup frequency (daily, weekly, monthly, custom) **(used by: schedule add)**")] = None,
-        schedule_time: Annotated[Optional[str], Field(default=None, description="Time to run cleanup (e.g., '02:00') **(used by: schedule add)**")] = None,
-        schedule_id: Annotated[Optional[str], Field(default=None, description="Schedule identifier for management **(used by: schedule remove/enable/disable)**")] = None,
+        cleanup_type: Annotated[str | None, Field(default=None, description="Type of cleanup to perform (check, safe, moderate, aggressive) **(used by: cleanup)**")] = None,
+        schedule_action: Annotated[str | None, Field(default=None, description="Schedule action to perform (add, remove, list, enable, disable) **(used by: schedule)**")] = None,
+        schedule_frequency: Annotated[str | None, Field(default=None, description="Cleanup frequency (daily, weekly, monthly, custom) **(used by: schedule add)**")] = None,
+        schedule_time: Annotated[str | None, Field(default=None, description="Time to run cleanup (e.g., '02:00') **(used by: schedule add)**")] = None,
+        schedule_id: Annotated[str | None, Field(default=None, description="Schedule identifier for management **(used by: schedule remove/enable/disable)**")] = None,
     ) -> dict[str, Any]:
         """Consolidated Docker hosts management tool.
         
@@ -310,7 +439,7 @@ class DockerMCPServer:
 
     async def docker_container(
         self,
-        action: Annotated[str, Field(description="Action to perform (list, info, start, stop, restart, build, logs)")],
+        action: Annotated[Literal["list", "info", "start", "stop", "restart", "build", "logs"], Field(description="Action to perform")],
         host_id: Annotated[str, Field(default="", description="Host identifier **(required for all actions)**")] = "",
         container_id: Annotated[str, Field(default="", description="Container identifier **(used by: info, start, stop, restart, build, logs)**")] = "",
         all_containers: Annotated[bool, Field(default=False, description="Include all containers, not just running **(used by: list)**")] = False,
@@ -328,6 +457,7 @@ class DockerMCPServer:
         - info: Get container information (requires: host_id, container_id)
         - start/stop/restart/build: Manage container (requires: host_id, container_id)
         - logs: Get container logs (requires: host_id, container_id)
+        - pull: Pull container image (requires: host_id, container_id or image name)
         """
         # Validate action parameter
         valid_actions = ["list", "info", "start", "stop", "restart", "build", "logs", "pull"]
@@ -345,8 +475,8 @@ class DockerMCPServer:
                     return {"success": False, "error": "host_id is required for list action"}
                     
                 # Validate pagination parameters
-                if limit < 1 or limit > 100:
-                    return {"success": False, "error": "limit must be between 1 and 100"}
+                if limit < 1 or limit > 1000:
+                    return {"success": False, "error": "limit must be between 1 and 1000"}
                 if offset < 0:
                     return {"success": False, "error": "offset must be >= 0"}
                     
@@ -395,7 +525,7 @@ class DockerMCPServer:
                     
                 # Validate lines parameter
                 if lines < 1 or lines > 1000:
-                    return {"success": False, "error": "lines must be between 1 and 1000"}
+                    return {"success": False, "error": "lines must be between 1 and 10000"}
                     
                 return await self.get_container_logs(host_id, container_id, lines, follow)
                 
@@ -425,17 +555,17 @@ class DockerMCPServer:
 
     async def docker_compose(
         self,
-        action: Annotated[str, Field(description="Action to perform (list, deploy, up, down, restart, build, discover, logs, migrate)")],
+        action: Annotated[Literal["list", "deploy", "up", "down", "restart", "build", "discover", "logs", "migrate"], Field(description="Action to perform")],
         host_id: Annotated[str, Field(default="", description="Host identifier **(required for all actions)**")] = "",
         stack_name: Annotated[str, Field(default="", description="Stack name **(used by: deploy, up, down, restart, build, logs, migrate)**")] = "",
         compose_content: Annotated[str, Field(default="", description="Docker Compose file content **(used by: deploy)**")] = "",
-        environment: Annotated[Dict[str, str], Field(default_factory=dict, description="Environment variables **(used by: deploy, up)**")] = None,
+        environment: Annotated[dict[str, str], Field(default_factory=dict, description="Environment variables **(used by: deploy, up)**")] = None,
         pull_images: Annotated[bool, Field(default=True, description="Pull images before deploying **(used by: deploy, up)**")] = True,
         recreate: Annotated[bool, Field(default=False, description="Recreate containers **(used by: up)**")] = False,
         follow: Annotated[bool, Field(default=False, description="Follow log output **(used by: logs)**")] = False,
         lines: Annotated[int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve **(used by: logs)**")] = 100,
         dry_run: Annotated[bool, Field(default=False, description="Perform a dry run without making changes **(used by: migrate)**")] = False,
-        options: Annotated[Optional[Dict[str, str]], Field(default=None, description="Additional options for the operation **(used by: up, down, restart, build)**")] = None,
+        options: Annotated[dict[str, str] | None, Field(default=None, description="Additional options for the operation **(used by: up, down, restart, build)**")] = None,
         target_host_id: Annotated[str, Field(default="", description="Target host ID for migration **(used by: migrate)**")] = "",
         remove_source: Annotated[bool, Field(default=False, description="Remove source stack after migration **(used by: migrate)**")] = False,
         skip_stop_source: Annotated[bool, Field(default=False, description="Skip stopping source stack before migration **(used by: migrate)**")] = False,
@@ -533,7 +663,7 @@ class DockerMCPServer:
                     
                 # Validate lines parameter
                 if lines < 1 or lines > 1000:
-                    return {"success": False, "error": "lines must be between 1 and 1000"}
+                    return {"success": False, "error": "lines must be between 1 and 10000"}
                     
                 # Implement stack logs using docker-compose logs command
                 try:
@@ -659,7 +789,11 @@ class DockerMCPServer:
 
             # Use log tools to get logs
             logs_result = await self.log_tools.get_container_logs(
-                host_id, container_id, lines, None, False
+                host_id=host_id, 
+                container_id=container_id, 
+                lines=lines, 
+                since=None, 
+                timestamps=False
             )
             
             # Extract logs array from ContainerLogs model for cleaner API
@@ -753,6 +887,11 @@ class DockerMCPServer:
             ssh_config_path, selected_hosts, compose_path_overrides, auto_confirm, self._config_path
         )
 
+    def _to_dict(self, result: Any, fallback_msg: str = "No structured content") -> dict[str, Any]:
+        """Convert ToolResult to dictionary for programmatic access."""
+        if hasattr(result, "structured_content"):
+            return result.structured_content or {"success": True, "data": fallback_msg}
+        return result
 
     def update_configuration(self, new_config: DockerMCPConfig) -> None:
         """Update server configuration and reinitialize components."""
@@ -815,7 +954,7 @@ def parse_args() -> argparse.Namespace:
     default_host = os.getenv("FASTMCP_HOST", "127.0.0.1")  # nosec B104 - Use 0.0.0.0 for container deployment
     default_port = int(os.getenv("FASTMCP_PORT", "8000"))
     default_log_level = os.getenv("LOG_LEVEL", "INFO")
-    default_config = os.getenv("DOCKER_HOSTS_CONFIG", "config/hosts.yml")
+    default_config = os.getenv("DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml"))
 
     parser = argparse.ArgumentParser(description="FastMCP Docker SSH Manager")
     parser.add_argument("--host", default=default_host, help="Server host")
@@ -838,14 +977,67 @@ def main() -> None:
     """Main entry point."""
     args = parse_args()
 
-    # Setup unified logging (console + files)
+    # Setup unified logging (console + files) with enhanced configuration
     from docker_mcp.core.logging_config import setup_logging, get_server_logger
-    setup_logging(
-        log_dir=os.getenv("LOG_DIR", str(get_data_dir() / "logs")),
-        log_level=args.log_level,
-        max_file_size_mb=int(os.getenv("LOG_FILE_SIZE_MB", "10"))
-    )
-    logger = get_server_logger()
+    
+    # Determine log directory with fallback options
+    log_dir_candidates = [
+        os.getenv("LOG_DIR"),  # Explicit environment override
+        str(get_data_dir() / "logs"),  # Primary data directory
+        str(Path.home() / ".local" / "share" / "docker-mcp" / "logs"),  # User fallback
+        "/tmp/docker-mcp-logs"  # System fallback
+    ]
+    
+    log_dir = None
+    for candidate in log_dir_candidates:
+        if candidate:
+            try:
+                candidate_path = Path(candidate)
+                candidate_path.mkdir(parents=True, exist_ok=True)
+                if candidate_path.is_dir() and os.access(candidate_path, os.W_OK):
+                    log_dir = str(candidate_path)
+                    break
+            except (OSError, PermissionError):
+                continue
+    
+    if not log_dir:
+        print("Warning: Unable to create log directory, using console-only logging")
+        log_dir = None
+    
+    # Parse log file size with validation
+    try:
+        max_file_size_mb = int(os.getenv("LOG_FILE_SIZE_MB", "10"))
+        if max_file_size_mb < 1 or max_file_size_mb > 100:
+            max_file_size_mb = 10  # Reset to default if out of range
+    except ValueError:
+        max_file_size_mb = 10
+    
+    # Setup logging with error handling
+    try:
+        setup_logging(
+            log_dir=log_dir,
+            log_level=args.log_level,
+            max_file_size_mb=max_file_size_mb
+        )
+        logger = get_server_logger()
+        
+        # Log successful initialization with configuration details
+        logger.info(
+            "Logging system initialized",
+            log_dir=log_dir,
+            log_level=args.log_level,
+            max_file_size_mb=max_file_size_mb,
+            console_logging=True,
+            file_logging=log_dir is not None
+        )
+    except Exception as e:
+        print(f"Warning: Logging setup failed ({e}), using basic console logging")
+        import logging
+        logging.basicConfig(
+            level=getattr(logging, args.log_level.upper(), logging.INFO),
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        logger = logging.getLogger("docker_mcp")
 
     try:
         # Load configuration
@@ -863,7 +1055,7 @@ def main() -> None:
             return
 
         # Create and run server (hot reload always enabled)
-        config_path_for_reload = args.config or os.getenv("DOCKER_HOSTS_CONFIG", "config/hosts.yml")
+        config_path_for_reload = args.config or os.getenv("DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml"))
 
         logger.info(
             "Hot reload configuration",

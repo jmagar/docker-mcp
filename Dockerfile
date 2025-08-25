@@ -79,5 +79,9 @@ ENV FASTMCP_HOST=0.0.0.0 \
 # Expose port
 EXPOSE 8000
 
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD python -c "import os,socket; socket.create_connection(('localhost', int(os.getenv('FASTMCP_PORT','8000'))), timeout=5)"
+
 # Entry point
 ENTRYPOINT ["/opt/venv/bin/python", "-m", "docker_mcp.server"]

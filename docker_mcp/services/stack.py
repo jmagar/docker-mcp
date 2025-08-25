@@ -5,8 +5,10 @@ Business logic for Docker Compose stack operations with formatted output.
 """
 
 import asyncio
+import os
 import shlex
 import subprocess
+import tempfile
 from typing import Any
 
 import structlog
@@ -16,7 +18,7 @@ from mcp.types import TextContent
 from ..core.backup import BackupManager
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
-from ..core.migration import MigrationManager
+from ..core.migration.manager import MigrationManager
 from ..tools.stacks import StackTools
 
 
@@ -309,11 +311,8 @@ class StackService:
             # Use compose manager to detect the actual compose file name (.yml or .yaml)
             compose_file_path = await self.stack_tools.compose_manager.get_compose_file_path(source_host_id, stack_name)
             
-            # Build SSH command for source
-            ssh_cmd_source = ["ssh", "-o", "StrictHostKeyChecking=no"]
-            if source_host.identity_file:
-                ssh_cmd_source.extend(["-i", source_host.identity_file])
-            ssh_cmd_source.append(f"{source_host.user}@{source_host.hostname}")
+            # Build SSH command for source (reuses port/identity handling)
+            ssh_cmd_source = self._build_ssh_cmd(source_host)
             
             # Read compose file
             read_cmd = ssh_cmd_source + [f"cat {shlex.quote(compose_file_path)}"]
@@ -386,7 +385,7 @@ class StackService:
             elif skip_stop_source and not dry_run:
                 # If explicitly skipping stop, verify containers are already down
                 migration_steps.append("⚠️  Checking if stack containers are running...")
-                check_cmd = ssh_cmd_source + [f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"]
+                check_cmd = ssh_cmd_source + [f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}'"]
                 check_result = await loop.run_in_executor(
                     None, lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False)  # nosec B603
                 )
@@ -463,7 +462,7 @@ class StackService:
                 target_stack_dir = f"{target_appdata}/{stack_name}"
             
             # Create the target directory
-            mkdir_cmd = f"mkdir -p {target_stack_dir}"
+            mkdir_cmd = f"mkdir -p {shlex.quote(target_stack_dir)}"
             result = await loop.run_in_executor(
                 None, lambda: subprocess.run(
                     self._build_ssh_cmd(target_host) + [mkdir_cmd], 
@@ -481,7 +480,7 @@ class StackService:
             # Step 5.1: CRITICAL - Backup existing target data before ANY changes
             backup_info = None
             if not dry_run:
-                migration_steps.append(f"💾 Creating backup of existing target data...")
+                migration_steps.append("💾 Creating backup of existing target data...")
                 try:
                     # Determine backup method based on transfer type
                     transfer_type, _ = await self.migration_manager.choose_transfer_method(source_host, target_host)
@@ -522,8 +521,11 @@ class StackService:
             # Step 6: Transfer archive to target
             if all_paths and not dry_run and archive_path:
                 migration_steps.append("🚀 Transferring data to target host...")
+                temp_suffix = os.urandom(8).hex()[:8]
+                target_archive_path = f"/tmp/{stack_name}_migration_{temp_suffix}.tar.gz"
+                
                 transfer_result = await self.migration_manager.rsync_transfer.transfer(
-                    source_host, target_host, archive_path, f"/tmp/{stack_name}_migration.tar.gz",
+                    source_host, target_host, archive_path, target_archive_path,
                     compress=True, delete=False, dry_run=dry_run
                 )
                 
@@ -564,16 +566,16 @@ class StackService:
                 # PHASE 1: Extract to staging directory
                 extract_to_staging_cmd = self._build_ssh_cmd(target_host) + [
                     f"set -e && "  # Exit on any error
-                    f"rm -rf {target_stack_dir}.tmp && "  # Clean staging
-                    f"mkdir -p {target_stack_dir}.tmp && "
-                    f"tar xzf /tmp/{stack_name}_migration.tar.gz -C {target_stack_dir}.tmp && "
+                    f"rm -rf {shlex.quote(target_stack_dir)}.tmp && "  # Clean staging
+                    f"mkdir -p {shlex.quote(target_stack_dir)}.tmp && "
+                    f"tar xzf {shlex.quote(target_archive_path)} -C {shlex.quote(target_stack_dir)}.tmp && "
                     f"echo 'EXTRACTION_COMPLETE'"
                 ]
                 
                 self.logger.info("Phase 1: Extracting to staging directory",
                     command=" ".join(extract_to_staging_cmd),
                     method="split_phase_extraction",
-                    archive=f"/tmp/{stack_name}_migration.tar.gz",
+                    archive=target_archive_path,
                     staging_dir=f"{target_stack_dir}.tmp"
                 )
                 migration_steps.append(f"⚙️  Phase 1: Extracting archive to staging directory...")
@@ -640,9 +642,9 @@ class StackService:
                 migration_steps.append("🔄 Phase 3: Performing atomic move to final location...")
                 atomic_move_cmd = self._build_ssh_cmd(target_host) + [
                     f"set -e && "
-                    f"if [ -d {target_stack_dir} ]; then mv {target_stack_dir} {target_stack_dir}.old; fi && "
-                    f"mv {target_stack_dir}.tmp {target_stack_dir} && "
-                    f"rm -rf {target_stack_dir}.old && "
+                    f"if [ -d {shlex.quote(target_stack_dir)} ]; then mv {shlex.quote(target_stack_dir)} {shlex.quote(target_stack_dir)}.old; fi && "
+                    f"mv {shlex.quote(target_stack_dir)}.tmp {shlex.quote(target_stack_dir)} && "
+                    f"rm -rf {shlex.quote(target_stack_dir)}.old && "
                     f"echo 'ATOMIC_MOVE_SUCCESS'"
                 ]
                 
@@ -695,10 +697,10 @@ class StackService:
                 )
                 
                 # Add success summary for split-phase extraction
-                migration_steps.append(f"✅ Split-phase extraction completed successfully:")
+                migration_steps.append("✅ Split-phase extraction completed successfully:")
                 migration_steps.append(f"   • Phase 1: ✓ Archive extracted to staging ({staging_files_count} files)")
-                migration_steps.append(f"   • Phase 2: ✓ Staging directory verified")
-                migration_steps.append(f"   • Phase 3: ✓ Atomic move to final location")
+                migration_steps.append("   • Phase 2: ✓ Staging directory verified")
+                migration_steps.append("   • Phase 3: ✓ Atomic move to final location")
                 migration_steps.append(f"   • Final state: {files_after} files in {target_stack_dir}")
             
             # Step 7: Update compose file for target paths
@@ -712,7 +714,7 @@ class StackService:
             data_verification_passed = False  # MUST explicitly pass verification
             
             if not dry_run and source_inventory:
-                migration_steps.append(f"🔍 Verifying split-phase extraction success...")
+                migration_steps.append("🔍 Verifying split-phase extraction success...")
                 
                 # Log verification using split-phase results
                 expected_files = source_inventory.get("total_files", 0)
@@ -769,12 +771,12 @@ class StackService:
                 }
                 
                 if data_verification_passed:
-                    migration_steps.append(f"✅ Verification PASSED: Split-phase extraction successful")
+                    migration_steps.append("✅ Verification PASSED: Split-phase extraction successful")
                     migration_steps.append(f"   • Phase 1: ✓ Archive extracted (exit code {extraction_result.returncode})")  
                     migration_steps.append(f"   • Phase 2: ✓ Staging verified ({staging_files_count} files)")
                     migration_steps.append(f"   • Phase 3: ✓ Atomic move completed (exit code {move_result.returncode})")
                 else:
-                    migration_steps.append(f"❌ Verification FAILED: Split-phase extraction incomplete")
+                    migration_steps.append("❌ Verification FAILED: Split-phase extraction incomplete")
                     migration_steps.append(f"   Expected files: {expected_files}")
                     migration_steps.append(f"   Phase 1: {'✓' if extraction_result.returncode == 0 else '✗'} (exit {extraction_result.returncode})")
                     migration_steps.append(f"   Phase 2: {'✓' if staging_files_count > 0 else '✗'} ({staging_files_count} staging files)")
@@ -863,7 +865,7 @@ class StackService:
                 remove_cmd = ssh_cmd_source + [f"rm -f {shlex.quote(compose_file_path)}"]  # Changed from rm -rf to rm -f
                 await loop.run_in_executor(None, lambda: subprocess.run(remove_cmd, check=False))  # nosec B603
             elif remove_source and not dry_run:
-                migration_steps.append(f"⚠️  Skipping source removal - migration verification failed")
+                migration_steps.append("⚠️  Skipping source removal - migration verification failed")
             
             # Build detailed migration summary
             migration_summary = "\n".join(migration_steps)
@@ -990,6 +992,33 @@ class StackService:
             size_bytes /= 1024.0
         return f"{size_bytes:.1f} PB"
     
+    def _normalize_volume_entry(self, volume, target_appdata: str, stack_name: str) -> str | None:
+        """Normalize a single volume entry to source:destination format."""
+        if isinstance(volume, str) and ":" in volume:
+            parts = volume.split(":", 2)
+            if len(parts) >= 2:
+                source_path = parts[0]
+                container_path = parts[1]
+                
+                # Convert relative paths to absolute
+                if source_path.startswith("."):
+                    source_path = f"{target_appdata}/{stack_name}/{source_path[2:]}"
+                elif not source_path.startswith("/"):
+                    # Named volume - needs resolution
+                    source_path = f"{target_appdata}/{stack_name}"
+                
+                return f"{source_path}:{container_path}"
+        
+        elif isinstance(volume, dict) and volume.get("type") == "bind":
+            source = volume.get("source", "")
+            target = volume.get("target", "")
+            if source and target:
+                if not source.startswith("/"):
+                    source = f"{target_appdata}/{stack_name}/{source}"
+                return f"{source}:{target}"
+        
+        return None
+
     def _extract_expected_mounts(self, compose_content: str, target_appdata: str, stack_name: str) -> list[str]:
         """Extract expected volume mounts from compose file content.
         
@@ -1008,44 +1037,12 @@ class StackService:
             
             # Parse services for volume mounts
             services = compose_data.get("services", {})
-            for service_name, service_config in services.items():
+            for _service_name, service_config in services.items():
                 volumes = service_config.get("volumes", [])
-                
                 for volume in volumes:
-                    if isinstance(volume, str):
-                        # Parse string format volume
-                        if ":" in volume:
-                            parts = volume.split(":", 2)  # Handle mode like "rw"
-                            if len(parts) >= 2:
-                                source_path = parts[0]
-                                container_path = parts[1]
-                                
-                                # Convert relative paths to absolute
-                                if source_path.startswith("."):
-                                    source_path = f"{target_appdata}/{stack_name}/{source_path[2:]}"
-                                elif not source_path.startswith("/"):
-                                    # Named volume - convert to expected bind mount
-                                    source_path = f"{target_appdata}/{stack_name}"
-                                
-                                expected_mount = f"{source_path}:{container_path}"
-                                if expected_mount not in expected_mounts:
-                                    expected_mounts.append(expected_mount)
-                                    
-                    elif isinstance(volume, dict):
-                        # Parse dictionary format volume
-                        volume_type = volume.get("type", "bind")
-                        if volume_type == "bind":
-                            source = volume.get("source", "")
-                            target = volume.get("target", "")
-                            
-                            if source and target:
-                                # Convert relative source to absolute
-                                if not source.startswith("/"):
-                                    source = f"{target_appdata}/{stack_name}/{source}"
-                                
-                                expected_mount = f"{source}:{target}"
-                                if expected_mount not in expected_mounts:
-                                    expected_mounts.append(expected_mount)
+                    mount = self._normalize_volume_entry(volume, target_appdata, stack_name)
+                    if mount and mount not in expected_mounts:
+                        expected_mounts.append(mount)
             
             if expected_mounts:
                 self.logger.info(

@@ -50,35 +50,26 @@ class VolumeParser:
             if "volumes" in compose_data:
                 volumes_info["volume_definitions"] = compose_data["volumes"]
             
-            # Parse service volumes
-            services = compose_data.get("services", {})
-            for service_name, service_config in services.items():
-                if "volumes" not in service_config:
-                    continue
-                
-                for volume in service_config["volumes"]:
-                    if isinstance(volume, str):
-                        # Parse volume string format
-                        volume_parsed = self._parse_volume_string(volume, source_appdata_path)
-                        if volume_parsed["type"] == "named":
-                            volumes_info["named_volumes"].append(volume_parsed["name"])
-                        elif volume_parsed["type"] == "bind":
-                            volumes_info["bind_mounts"].append(volume_parsed["source"])
-                    elif isinstance(volume, dict):
-                        # Parse volume dictionary format
-                        if volume.get("type") == "volume":
-                            volumes_info["named_volumes"].append(volume.get("source", ""))
-                        elif volume.get("type") == "bind":
-                            volumes_info["bind_mounts"].append(volume.get("source", ""))
+            # Parse service volumes using helper method
+            service_volumes = self._collect_service_volumes(compose_data, source_appdata_path)
+            volumes_info["named_volumes"].extend(service_volumes["named"])
+            volumes_info["bind_mounts"].extend(service_volumes["bind"])
             
             # Remove duplicates
             volumes_info["named_volumes"] = list(set(volumes_info["named_volumes"]))
             volumes_info["bind_mounts"] = list(set(volumes_info["bind_mounts"]))
             
+            # Enhanced logging with detailed breakdown
             self.logger.info(
-                "Parsed compose volumes",
-                named_volumes=len(volumes_info["named_volumes"]),
-                bind_mounts=len(volumes_info["bind_mounts"]),
+                "Parsed compose volumes successfully",
+                total_services=len(compose_data.get("services", {})),
+                named_volumes_count=len(volumes_info["named_volumes"]),
+                bind_mounts_count=len(volumes_info["bind_mounts"]),
+                top_level_volumes=len(volumes_info["volume_definitions"]),
+                named_volumes_list=volumes_info["named_volumes"],
+                bind_mounts_list=volumes_info["bind_mounts"],
+                source_appdata_path=source_appdata_path,
+                environment_expansion=source_appdata_path is not None,
             )
             
             return volumes_info
@@ -87,6 +78,112 @@ class VolumeParser:
             raise VolumeParsingError(f"Failed to parse compose file: {e}")
         except Exception as e:
             raise VolumeParsingError(f"Error extracting volumes: {e}")
+    
+    def _collect_service_volumes(self, compose_data: dict[str, Any], source_appdata_path: str = None) -> dict[str, list[str]]:
+        """Collect and categorize volumes from all services.
+        
+        Args:
+            compose_data: Parsed Docker Compose YAML data
+            source_appdata_path: Source host's appdata path for variable expansion
+            
+        Returns:
+            Dictionary with 'named' and 'bind' volume lists
+        """
+        result = {"named": [], "bind": []}
+        
+        services = compose_data.get("services", {})
+        services_with_volumes = 0
+        volume_entries_processed = 0
+        
+        for service_name, service_config in services.items():
+            if "volumes" not in service_config:
+                continue
+            
+            services_with_volumes += 1
+            service_volumes = {"named": 0, "bind": 0, "skipped": 0}
+            
+            for volume in service_config["volumes"]:
+                volume_entries_processed += 1
+                volume_info = self._normalize_volume_entry(volume, source_appdata_path)
+                
+                if volume_info:
+                    if volume_info["type"] == "named":
+                        result["named"].append(volume_info["name"])
+                        service_volumes["named"] += 1
+                        self.logger.debug(
+                            "Found named volume",
+                            service=service_name,
+                            volume_name=volume_info["name"],
+                            destination=volume_info.get("destination", ""),
+                            original=str(volume)
+                        )
+                    elif volume_info["type"] == "bind":
+                        result["bind"].append(volume_info["source"])
+                        service_volumes["bind"] += 1
+                        self.logger.debug(
+                            "Found bind mount",
+                            service=service_name,
+                            source_path=volume_info["source"],
+                            destination=volume_info.get("destination", ""),
+                            original=str(volume)
+                        )
+                else:
+                    service_volumes["skipped"] += 1
+                    self.logger.debug(
+                        "Skipped volume entry",
+                        service=service_name,
+                        volume=str(volume),
+                        reason="Unable to normalize"
+                    )
+            
+            # Log service summary if it has volumes
+            if sum(service_volumes.values()) > 0:
+                self.logger.debug(
+                    "Service volume summary",
+                    service=service_name,
+                    named_volumes=service_volumes["named"],
+                    bind_mounts=service_volumes["bind"],
+                    skipped=service_volumes["skipped"],
+                    total=sum(service_volumes.values())
+                )
+        
+        self.logger.info(
+            "Service volume collection completed",
+            total_services=len(services),
+            services_with_volumes=services_with_volumes,
+            volume_entries_processed=volume_entries_processed,
+            named_collected=len(result["named"]),
+            bind_collected=len(result["bind"])
+        )
+        
+        return result
+    
+    def _normalize_volume_entry(self, volume: Any, source_appdata_path: str = None) -> dict[str, str] | None:
+        """Normalize a single volume entry into standard dict structure.
+        
+        Args:
+            volume: Volume entry (string or dict)
+            source_appdata_path: Source host's appdata path for variable expansion
+            
+        Returns:
+            Normalized volume dict or None if invalid
+        """
+        if isinstance(volume, str):
+            return self._parse_volume_string(volume, source_appdata_path)
+        elif isinstance(volume, dict):
+            if volume.get("type") == "volume":
+                return {
+                    "type": "named",
+                    "name": volume.get("source", ""),
+                    "destination": volume.get("target", "")
+                }
+            elif volume.get("type") == "bind":
+                return {
+                    "type": "bind", 
+                    "source": volume.get("source", ""),
+                    "destination": volume.get("target", "")
+                }
+        return None
     
     def _parse_volume_string(self, volume_str: str, source_appdata_path: str = None) -> dict[str, str]:
         """Parse Docker volume string format with environment variable expansion.

@@ -1,16 +1,16 @@
 """Parameter models for FastMCP tool validation."""
 
-from typing import Dict, List, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class DockerHostsParams(BaseModel):
     """Parameters for the docker_hosts consolidated tool."""
     
-    action: str = Field(
+    action: Literal["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule"] = Field(
         ..., 
-        description="Action to perform (list, add, ports, compose_path, import_ssh, cleanup, disk_usage, schedule)"
+        description="Action to perform"
     )
     host_id: str = Field(
         default="", 
@@ -38,7 +38,7 @@ class DockerHostsParams(BaseModel):
         default="", 
         description="Host description"
     )
-    tags: List[str] = Field(
+    tags: list[str] = Field(
         default_factory=list, 
         description="Host tags"
     )
@@ -66,7 +66,7 @@ class DockerHostsParams(BaseModel):
         default=None, 
         description="Comma-separated list of hosts to select"
     )
-    compose_path_overrides: Dict[str, str] = Field(
+    compose_path_overrides: dict[str, str] = Field(
         default_factory=dict, 
         description="Per-host compose path overrides"
     )
@@ -95,13 +95,20 @@ class DockerHostsParams(BaseModel):
         description="Schedule identifier for management **(used by: schedule remove/enable/disable)**"
     )
 
+    @computed_field(return_type=list[str])
+    @property
+    def selected_hosts_list(self) -> list[str]:
+        if not self.selected_hosts:
+            return []
+        return [h.strip() for h in self.selected_hosts.split(",") if h.strip()]
+
 
 class DockerContainerParams(BaseModel):
     """Parameters for the docker_container consolidated tool."""
     
     action: str = Field(
         ..., 
-        description="Action to perform (list, info, start, stop, restart, build, logs)"
+        description="Action to perform (list, info, start, stop, restart, build, logs, pull)"
     )
     host_id: str = Field(
         default="", 
@@ -167,7 +174,7 @@ class DockerComposeParams(BaseModel):
         default="", 
         description="Docker Compose file content"
     )
-    environment: Dict[str, str] = Field(
+    environment: dict[str, str] = Field(
         default_factory=dict, 
         description="Environment variables"
     )
@@ -193,7 +200,7 @@ class DockerComposeParams(BaseModel):
         default=False, 
         description="Perform a dry run without making changes"
     )
-    options: Optional[Dict[str, str]] = Field(
+    options: Optional[dict[str, str]] = Field(
         default=None, 
         description="Additional options for the operation"
     )

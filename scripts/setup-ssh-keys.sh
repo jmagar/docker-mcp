@@ -31,6 +31,7 @@ NC='\033[0m' # No Color
 BATCH_MODE=false
 DRY_RUN=false
 VERIFY_AFTER=false
+VERIFY_ONLY=false
 CUSTOM_KEY=""
 HOST_FILTER=""
 VERBOSE=false
@@ -78,6 +79,7 @@ OPTIONS:
     -b, --batch             Batch mode - no interactive prompts
     -d, --dry-run           Show what would be done without making changes
     -v, --verify            Verify SSH connectivity after setup
+    -V, --verify-only       Only verify existing configuration, don't set up keys
     -f, --filter PATTERN    Filter hosts by pattern (supports wildcards)
     -j, --jobs N            Number of parallel jobs (default: 10)
     --verbose               Enable verbose logging
@@ -85,6 +87,9 @@ OPTIONS:
 EXAMPLES:
     # Basic usage - auto-discover and setup
     ./setup-ssh-keys.sh
+    
+    # Verify existing configuration only
+    ./setup-ssh-keys.sh --verify-only
     
     # Use custom SSH config
     ./setup-ssh-keys.sh --config /path/to/ssh/config
@@ -125,6 +130,10 @@ parse_arguments() {
                 ;;
             -v|--verify)
                 VERIFY_AFTER=true
+                shift
+                ;;
+            -V|--verify-only)
+                VERIFY_ONLY=true
                 shift
                 ;;
             -f|--filter)
@@ -181,10 +190,16 @@ check_prerequisites() {
         print_success "ssh-keyscan is available"
     fi
     
-    if ! command -v timeout &> /dev/null; then
-        print_warning "timeout command not found - ssh-keyscan may hang on unreachable hosts"
-    else
+    # Prefer GNU timeout; fall back to gtimeout (macOS coreutils)
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_CMD="timeout"
         print_success "timeout is available"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT_CMD="gtimeout"
+        print_success "gtimeout is available (using as timeout)"
+    else
+        TIMEOUT_CMD=""
+        print_warning "timeout/gtimeout not found - ssh-keyscan may hang on unreachable hosts"
     fi
     
     # Check for GNU parallel (optional)
@@ -214,19 +229,112 @@ create_directories() {
         return
     fi
     
-    mkdir -p "${DOCKER_MCP_DIR}"
-    mkdir -p "${DOCKER_MCP_DIR}/ssh"
-    mkdir -p "${CONFIG_DIR}"
-    mkdir -p "${DATA_DIR}/logs"
+    # Create directories with error checking
+    local dirs=(
+        "${DOCKER_MCP_DIR}"
+        "${DOCKER_MCP_DIR}/ssh"
+        "${CONFIG_DIR}"
+        "${DATA_DIR}/logs"
+        "${HOME}/.ssh"
+    )
     
+    for dir in "${dirs[@]}"; do
+        if ! mkdir -p "$dir" 2>/dev/null; then
+            print_error "Failed to create directory: $dir"
+            return 1
+        fi
+        print_verbose "Created directory: $dir"
+    done
+
+    # Set proper permissions with verification
+    local secure_dirs=(
+        "${DOCKER_MCP_DIR}/ssh:700"
+        "${HOME}/.ssh:700"
+        "${DOCKER_MCP_DIR}:755"
+        "${CONFIG_DIR}:755"
+        "${DATA_DIR}:755"
+    )
+    
+    for dir_perm in "${secure_dirs[@]}"; do
+        local dir
+        dir="${dir_perm%:*}"
+        local perm
+        perm="${dir_perm##*:}"
+        
+        if [ -d "$dir" ]; then
+            if chmod "$perm" "$dir" 2>/dev/null; then
+                print_verbose "Set permissions $perm on $dir"
+            else
+                print_warning "Failed to set permissions $perm on $dir"
+            fi
+            
+            # Verify permissions were set correctly
+            if [ "$VERBOSE" = true ]; then
+                local actual_perm
+                actual_perm=$(stat -c "%a" "$dir" 2>/dev/null || stat -f "%Lp" "$dir" 2>/dev/null || echo "unknown")
+                if [ "$actual_perm" != "$perm" ] && [ "$actual_perm" != "unknown" ]; then
+                    print_warning "Directory $dir has permissions $actual_perm, expected $perm"
+                fi
+            fi
+        fi
+    done
+
     # Create symlink to SSH config if it exists (for host resolution)
     if [ -f "${HOME}/.ssh/config" ]; then
-        ln -sf "${HOME}/.ssh/config" "${DOCKER_MCP_DIR}/ssh/config" 2>/dev/null || true
-        print_verbose "Linked SSH config for host resolution"
+        if ln -sf "${HOME}/.ssh/config" "${DOCKER_MCP_DIR}/ssh/config" 2>/dev/null; then
+            print_verbose "Linked SSH config for host resolution"
+        else
+            print_warning "Failed to link SSH config"
+        fi
     fi
     
     print_success "Created directory structure at ${DOCKER_MCP_DIR}"
     echo
+}
+
+get_ssh_options() {
+    local purpose="${1:-default}"  # default, verification, key_distribution
+    local port="${2:-22}"
+    local -a ssh_opts
+    
+    # Common base options for all SSH operations
+    ssh_opts=(
+        -o BatchMode=yes
+        -o ConnectTimeout=10
+        -o LogLevel=ERROR
+        -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
+        -o IdentitiesOnly=yes
+    )
+    
+    # StrictHostKeyChecking - prefer accept-new where supported; fall back to no
+    if ssh -G localhost 2>/dev/null | grep -qi 'stricthostkeychecking.*accept-new'; then
+        ssh_opts+=(-o StrictHostKeyChecking=accept-new)
+    else
+        ssh_opts+=(-o StrictHostKeyChecking=no)
+    fi
+    
+    # Port-specific options
+    if [ "$port" != "22" ]; then
+        ssh_opts+=(-p "$port")
+    fi
+    
+    # Purpose-specific options
+    case "$purpose" in
+        "verification")
+            # Additional options for connectivity verification
+            ssh_opts+=(-o PasswordAuthentication=no)
+            ssh_opts+=(-o PubkeyAuthentication=yes)
+            ;;
+        "key_distribution")
+            # More permissive for initial key setup
+            ssh_opts+=(-o PreferredAuthentications=password,publickey)
+            ;;
+        *)
+            # Default SSH options
+            ;;
+    esac
+    
+    printf '%s\n' "${ssh_opts[@]}"
 }
 
 parse_ssh_config() {
@@ -312,7 +420,9 @@ parse_ssh_config() {
     if [ -n "$HOST_FILTER" ]; then
         local filtered_hosts=()
         for host_entry in "${hosts[@]}"; do
-            local host_name=$(echo "$host_entry" | cut -d'|' -f1)
+            local host_name
+            host_name="$(echo "$host_entry" | cut -d'|' -f1)"
+            # Intentionally unquoted to allow wildcard matching in --filter (SC2053)
             if [[ "$host_name" == $HOST_FILTER ]]; then
                 filtered_hosts+=("$host_entry")
             fi
@@ -376,12 +486,55 @@ generate_or_find_key() {
             key_to_use="$SSH_KEY_PATH"
         else
             print_info "Generating new Docker MCP SSH key..."
-            chmod 700 "$(dirname "$SSH_KEY_PATH")" || true
-            ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "docker-mcp:$(hostname -f 2>/dev/null || hostname)"
-            chmod 600 "$SSH_KEY_PATH"
-            chmod 644 "$SSH_KEY_PATH.pub"
+            
+            # Ensure parent directory exists with proper permissions
+            if ! mkdir -p "$(dirname "$SSH_KEY_PATH")" 2>/dev/null; then
+                print_error "Failed to create SSH key directory: $(dirname "$SSH_KEY_PATH")"
+                return 1
+            fi
+            
+            if ! chmod 700 "$(dirname "$SSH_KEY_PATH")"; then
+                print_error "Failed to set permissions on SSH key directory"
+                return 1
+            fi
+            
+            # Generate key with enhanced security
+            local hostname_info
+            hostname_info="$(hostname -f 2>/dev/null || hostname || echo "unknown")"
+            local key_comment="docker-mcp:${hostname_info}:$(date +%Y%m%d)"
+            
+            print_verbose "Generating Ed25519 SSH key with comment: $key_comment"
+            
+            if ! ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "$key_comment" -q; then
+                print_error "Failed to generate SSH key"
+                return 1
+            fi
+            
+            # Set strict permissions on both private and public key
+            if ! chmod 600 "$SSH_KEY_PATH"; then
+                print_error "Failed to set permissions on private key"
+                return 1
+            fi
+            
+            if ! chmod 644 "$SSH_KEY_PATH.pub"; then
+                print_error "Failed to set permissions on public key"
+                return 1
+            fi
+            
+            # Validate the generated key
+            if ! ssh-keygen -l -f "$SSH_KEY_PATH" >/dev/null 2>&1; then
+                print_error "Generated SSH key validation failed"
+                return 1
+            fi
+            
+            # Get key fingerprint for verification
+            local key_fingerprint
+            key_fingerprint=$(ssh-keygen -l -f "$SSH_KEY_PATH" 2>/dev/null | awk '{print $2}')
+            
             key_to_use="$SSH_KEY_PATH"
             print_success "Generated new SSH key: $SSH_KEY_PATH"
+            print_verbose "Key fingerprint: $key_fingerprint"
+            print_verbose "Key comment: $key_comment"
         fi
     fi
     
@@ -411,23 +564,80 @@ scan_host_keys() {
     for host_entry in "${DISCOVERED_HOSTS[@]}"; do
         IFS='|' read -r host_name hostname user port <<< "$host_entry"
         
-        # Use appropriate port option
-        local scan_opts=""
+        # Build ssh-keyscan args
+        local -a scan_cmd=(ssh-keyscan -H)
         if [ "$port" != "22" ]; then
-            scan_opts="-p $port"
+            scan_cmd+=(-p "$port")
         fi
         
         echo -n "Scanning keys for $host_name ($hostname:$port)... "
-        print_verbose "Running: timeout 10 ssh-keyscan -H ${scan_opts:-} $hostname"
+        print_verbose "Running: ssh-keyscan with 10s timeout if available"
         
-        # Scan and add to known_hosts (with 10 second timeout)
-        if timeout 10 ssh-keyscan -H $scan_opts "$hostname" >> ~/.ssh/known_hosts 2>/dev/null; then
-            print_success "OK"
-            : $((scanned++))
+        # Ensure ~/.ssh exists and create known_hosts if needed
+        mkdir -p "${HOME}/.ssh"
+        touch "${HOME}/.ssh/known_hosts"
+        chmod 600 "${HOME}/.ssh/known_hosts"
+        
+        # Remove any existing entries for this host
+        if [ "$port" = "22" ]; then
+            ssh-keygen -R "$hostname" >/dev/null 2>&1 || true
+        else
+            ssh-keygen -R "[$hostname]:$port" >/dev/null 2>&1 || true
+        fi
+
+        # Scan and add to known_hosts with enhanced timeout and validation
+        local scan_success=false
+        local scan_output
+        local temp_scan_file
+        temp_scan_file=$(mktemp)
+        
+        # Try scan with timeout (up to 2 retries)
+        for attempt in 1 2; do
+            if [ -n "${TIMEOUT_CMD:-}" ]; then
+                if scan_output=$("${TIMEOUT_CMD}" 10 "${scan_cmd[@]}" "$hostname" 2>&1); then
+                    scan_success=true
+                    break
+                fi
+            else
+                if scan_output=$("${scan_cmd[@]}" "$hostname" 2>&1); then
+                    scan_success=true
+                    break
+                fi
+            fi
+            
+            # Brief pause before retry
+            [ "$attempt" = "1" ] && sleep 1
+        done
+        
+        if [ "$scan_success" = "true" ] && [ -n "$scan_output" ]; then
+            # Validate scan output contains key data
+            if echo "$scan_output" | grep -q "ssh-"; then
+                # Add to known_hosts and remove duplicates
+                echo "$scan_output" >> "${HOME}/.ssh/known_hosts"
+                
+                # Deduplicate known_hosts file
+                if [ -f "${HOME}/.ssh/known_hosts" ]; then
+                    sort "${HOME}/.ssh/known_hosts" | uniq > "$temp_scan_file"
+                    mv "$temp_scan_file" "${HOME}/.ssh/known_hosts"
+                    chmod 600 "${HOME}/.ssh/known_hosts"
+                fi
+                
+                print_success "OK"
+                : $((scanned++))
+                
+                print_verbose "Added $(echo "$scan_output" | wc -l) key(s) for $hostname"
+            else
+                print_warning "Invalid key data returned"
+                : $((failed++))
+            fi
         else
             print_warning "Failed (will prompt during distribution)"
+            print_verbose "Scan error: ${scan_output:-timeout or connection failed}"
             : $((failed++))
         fi
+        
+        # Clean up temp file
+        rm -f "$temp_scan_file"
         
         print_verbose "Completed scan for $host_name"
     done
@@ -455,7 +665,8 @@ show_distribution_plan() {
         echo "  • $host_name ($user@$hostname:$port)"
     done
     echo
-    local actual_jobs=$((${#DISCOVERED_HOSTS[@]} < PARALLEL_JOBS ? ${#DISCOVERED_HOSTS[@]} : PARALLEL_JOBS))
+    local actual_jobs
+    actual_jobs=$((${#DISCOVERED_HOSTS[@]} < PARALLEL_JOBS ? ${#DISCOVERED_HOSTS[@]} : PARALLEL_JOBS))
     echo "Parallel jobs: $actual_jobs (max: $PARALLEL_JOBS)"
     echo
 }
@@ -495,7 +706,8 @@ distribute_keys_parallel() {
     local failed_hosts=()
     
     # Create temporary files for tracking
-    local temp_dir=$(mktemp -d)
+    local temp_dir
+    temp_dir=$(mktemp -d)
     local success_file="$temp_dir/success"
     local failure_file="$temp_dir/failure"
     
@@ -505,10 +717,9 @@ distribute_keys_parallel() {
         IFS='|' read -r host_name hostname user port <<< "$host_entry"
         
         local ssh_target="$user@$hostname"
-        local ssh_opts=(-o BatchMode=yes)
-        if [ "$port" != "22" ]; then
-            ssh_opts+=(-p "$port")
-        fi
+        # Get standardized SSH options for key distribution
+        local -a ssh_opts
+        mapfile -t ssh_opts < <(get_ssh_options "key_distribution" "$port")
         
         echo -n "Distributing to $host_name... "
         
@@ -522,7 +733,7 @@ distribute_keys_parallel() {
         fi
         
         # Fallback to manual method
-        if cat "${ACTIVE_SSH_KEY}.pub" | ssh "${ssh_opts[@]}" "$ssh_target" "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" >/dev/null 2>&1; then
+        if ssh "${ssh_opts[@]}" "$ssh_target" "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" < "${ACTIVE_SSH_KEY}.pub" >/dev/null 2>&1; then
             echo "$host_entry" >> "$success_file"
             print_success "Success"
             return 0
@@ -632,26 +843,98 @@ EOF
         return 1
     fi
     
-    # Add each successful host
+    # Add each successful host with proper YAML quoting
     for host_entry in "${SUCCESSFUL_HOSTS[@]}"; do
         IFS='|' read -r host_name hostname user port <<< "$host_entry"
         
+        # Escape and quote values for YAML safety
+        local safe_host_name
+        local safe_hostname
+        local safe_user
+        local safe_identity_file
+        local safe_description
+        
+        # Quote host name if it contains special characters
+        if [[ "$host_name" =~ [[:space:][:punct:]] ]]; then
+            safe_host_name="\"$host_name\""
+        else
+            safe_host_name="$host_name"
+        fi
+        
+        # Always quote hostname, user, and paths for safety
+        safe_hostname="\"${hostname//\"/\\\"}\""
+        safe_user="\"${user//\"/\\\"}\""
+        safe_identity_file="\"${ACTIVE_SSH_KEY//\"/\\\"}\""
+        safe_description="\"Auto-imported from SSH config on $(date '+%Y-%m-%d %H:%M:%S')\""
+        
         cat >> "$config_file" << EOF
-  ${host_name}:
-    hostname: ${hostname}
-    user: ${user}
+  ${safe_host_name}:
+    hostname: ${safe_hostname}
+    user: ${safe_user}
     port: ${port}
-    identity_file: ${SSH_KEY_PATH}
-    description: "Auto-imported from SSH config"
+    identity_file: ${safe_identity_file}
+    description: ${safe_description}
     tags: ["auto-imported", "ssh-config"]
     enabled: true
-    
+
 EOF
     done
     
     print_success "Generated hosts configuration with ${#SUCCESSFUL_HOSTS[@]} host(s)"
     print_info "Configuration saved to: $config_file"
     echo
+}
+
+load_hosts_from_config() {
+    local config_file="${CONFIG_DIR}/hosts.yml"
+    local -a config_hosts=()
+    
+    if [ ! -f "$config_file" ]; then
+        print_error "No existing configuration found at $config_file"
+        return 1
+    fi
+    
+    print_info "Loading hosts from existing configuration..."
+    
+    # Simple YAML parsing for hosts (assumes basic structure)
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ -z "${line// }" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # Look for host entries (indented, followed by colon)
+        if [[ "$line" =~ ^[[:space:]]+([^:[:space:]]+):[[:space:]]*$ ]]; then
+            local host_name="${BASH_REMATCH[1]}"
+            local hostname="" user="" port="22"
+            
+            # Read the next few lines to get hostname, user, port
+            while IFS= read -r subline; do
+                [[ -z "${subline// }" ]] && break
+                [[ ! "$subline" =~ ^[[:space:]]+ ]] && break
+                
+                if [[ "$subline" =~ ^[[:space:]]+hostname:[[:space:]]*(.+)$ ]]; then
+                    hostname="${BASH_REMATCH[1]// }"
+                elif [[ "$subline" =~ ^[[:space:]]+user:[[:space:]]*(.+)$ ]]; then
+                    user="${BASH_REMATCH[1]// }"
+                elif [[ "$subline" =~ ^[[:space:]]+port:[[:space:]]*([0-9]+)$ ]]; then
+                    port="${BASH_REMATCH[1]}"
+                fi
+            done <<< "$(tail -n +$(($(grep -n "^[[:space:]]*${host_name}:" "$config_file" | cut -d: -f1) + 1)) "$config_file")"
+            
+            if [ -n "$hostname" ] && [ -n "$user" ]; then
+                config_hosts+=("${host_name}|${hostname}|${user}|${port}")
+            fi
+        fi
+    done < "$config_file"
+    
+    if [ ${#config_hosts[@]} -eq 0 ]; then
+        print_warning "No valid host configurations found"
+        return 1
+    fi
+    
+    # Copy to SUCCESSFUL_HOSTS for verification
+    SUCCESSFUL_HOSTS=("${config_hosts[@]}")
+    print_info "Loaded ${#SUCCESSFUL_HOSTS[@]} host(s) from configuration"
+    return 0
 }
 
 verify_connectivity() {
@@ -665,18 +948,29 @@ verify_connectivity() {
     
     local verified=0
     local failed=0
+    local ssh_key_to_use="$ACTIVE_SSH_KEY"
+    
+    # For verify-only mode, try to find the SSH key from config
+    if [ "$VERIFY_ONLY" = true ] && [ -z "$CUSTOM_KEY" ]; then
+        if [ -f "$SSH_KEY_PATH" ]; then
+            ssh_key_to_use="$SSH_KEY_PATH"
+            print_info "Using SSH key: $ssh_key_to_use"
+        else
+            print_error "SSH key not found at $SSH_KEY_PATH"
+            return 1
+        fi
+    fi
     
     for host_entry in "${SUCCESSFUL_HOSTS[@]}"; do
         IFS='|' read -r host_name hostname user port <<< "$host_entry"
         
-        echo -n "Testing $host_name... "
+        echo -n "Testing $host_name ($user@$hostname:$port)... "
         
-        local ssh_opts=(-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no)
-        if [ "$port" != "22" ]; then
-            ssh_opts+=(-p "$port")
-        fi
+        # Get standardized SSH options for verification
+        local -a ssh_opts
+        mapfile -t ssh_opts < <(get_ssh_options "verification" "$port")
         
-        if ssh "${ssh_opts[@]}" -i "$ACTIVE_SSH_KEY" "$user@$hostname" "echo 'Connection successful'" >/dev/null 2>&1; then
+        if ssh "${ssh_opts[@]}" -i "$ssh_key_to_use" "$user@$hostname" "echo 'Connection successful'" >/dev/null 2>&1; then
             print_success "OK"
             : $((verified++))
         else
@@ -690,9 +984,11 @@ verify_connectivity() {
     
     if [ $failed -gt 0 ]; then
         print_warning "$failed host(s) failed connectivity test"
+        return 1
     fi
     
     echo
+    return 0
 }
 
 print_completion() {
@@ -722,14 +1018,17 @@ main() {
     
     # Special case for verify-only mode
     if [ "$VERIFY_ONLY" = true ]; then
-        if [ -f "${CONFIG_DIR}/hosts.yml" ]; then
-            # Parse existing config and verify
-            print_info "Verifying existing configuration..."
-            # Implementation would parse existing config
-            print_warning "Verify-only mode not fully implemented yet"
+        print_info "Verify-only mode: checking existing configuration..."
+        
+        if ! load_hosts_from_config; then
+            exit 1
+        fi
+        
+        if verify_connectivity; then
+            print_success "All configured hosts are accessible!"
             exit 0
         else
-            print_error "No existing configuration found to verify"
+            print_error "Some hosts failed connectivity test"
             exit 1
         fi
     fi

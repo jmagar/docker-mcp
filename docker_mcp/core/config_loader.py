@@ -82,7 +82,8 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
     _load_config_file(config, user_config_path)
 
     # Load project config (from env var or default)
-    default_config_file = os.getenv("DOCKER_HOSTS_CONFIG", "config/hosts.yml")
+    from ..server import get_config_dir  # Import at use to avoid circular imports
+    default_config_file = os.getenv("DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml"))
     project_config_path = Path(config_path or default_config_file)
     _load_config_file(config, project_config_path)
 
@@ -100,6 +101,7 @@ def _load_config_file(config: DockerMCPConfig, config_path: Path) -> None:
     yaml_config = _load_yaml_config(config_path)
     _apply_host_config(config, yaml_config)
     _apply_server_config(config, yaml_config)
+    _apply_cleanup_schedules(config, yaml_config)
 
 
 def _apply_host_config(config: DockerMCPConfig, yaml_config: dict[str, Any]) -> None:
@@ -115,6 +117,17 @@ def _apply_server_config(config: DockerMCPConfig, yaml_config: dict[str, Any]) -
         for key, value in yaml_config["server"].items():
             if hasattr(config.server, key):
                 setattr(config.server, key, value)
+
+
+def _apply_cleanup_schedules(config: DockerMCPConfig, yaml_config: dict[str, Any]) -> None:
+    """Apply cleanup schedules from YAML data."""
+    schedules = yaml_config.get("cleanup_schedules")
+    if not schedules:
+        return
+    config.cleanup_schedules = {
+        schedule_id: CleanupSchedule(**sched_data)
+        for schedule_id, sched_data in schedules.items()
+    }
 
 
 def _apply_env_overrides(config: DockerMCPConfig) -> None:
@@ -167,6 +180,7 @@ def save_config(config: DockerMCPConfig, config_path: str | None = None) -> None
         with open(config_path, "w", encoding="utf-8") as f:
             _write_yaml_header(f)
             _write_hosts_section(f, yaml_data["hosts"])
+            _write_cleanup_schedules_section(f, yaml_data["cleanup_schedules"])
 
         logger.info("Configuration saved", path=str(config_path), hosts=len(config.hosts))
 
@@ -177,10 +191,17 @@ def save_config(config: DockerMCPConfig, config_path: str | None = None) -> None
 
 def _build_yaml_data(config: DockerMCPConfig) -> dict[str, Any]:
     """Build YAML data structure from configuration."""
-    yaml_data: dict[str, Any] = {"hosts": {}}
+    yaml_data: dict[str, Any] = {"hosts": {}, "cleanup_schedules": {}}
 
     for host_id, host_config in config.hosts.items():
         yaml_data["hosts"][host_id] = _build_host_data(host_config)
+
+    # Persist schedules as plain dicts
+    if getattr(config, "cleanup_schedules", None):
+        for sched_id, sched in config.cleanup_schedules.items():
+            yaml_data["cleanup_schedules"][sched_id] = (
+                sched.model_dump() if hasattr(sched, "model_dump") else dict(sched)
+            )
 
     return yaml_data
 
@@ -204,6 +225,18 @@ def _build_host_data(host_config: DockerHost) -> dict[str, Any]:
 
     if host_config.compose_path:
         host_data["compose_path"] = host_config.compose_path
+
+    if host_config.docker_context:
+        host_data["docker_context"] = host_config.docker_context
+
+    if host_config.appdata_path:
+        host_data["appdata_path"] = host_config.appdata_path
+
+    if host_config.zfs_capable:
+        host_data["zfs_capable"] = host_config.zfs_capable
+
+    if host_config.zfs_dataset:
+        host_data["zfs_dataset"] = host_config.zfs_dataset
 
     if not host_config.enabled:
         host_data["enabled"] = host_config.enabled
@@ -231,6 +264,21 @@ def _write_hosts_section(f, hosts_data: dict[str, Any]) -> None:
         for key, value in host_data.items():
             _write_yaml_value(f, key, value)
         f.write("\n")
+
+
+def _write_cleanup_schedules_section(f, schedules: dict[str, Any]) -> None:
+    """Write cleanup_schedules section to YAML file."""
+    f.write("cleanup_schedules:\n")
+    if not schedules:
+        f.write("  {}\n")
+        return
+    # Use safe_dump for nested mapping serialization
+    dumped = yaml.safe_dump(
+        schedules, default_flow_style=False, sort_keys=False, indent=2
+    )
+    # Indent by two spaces under the section key
+    indented = "".join(f"  {line}" for line in dumped.splitlines(True))
+    f.write(indented)
 
 
 def _write_yaml_value(f, key: str, value: Any) -> None:

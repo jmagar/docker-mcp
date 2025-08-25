@@ -347,14 +347,14 @@ class ComposeManager:
             )
 
             # First, create the directory on remote host
-            mkdir_cmd = ssh_cmd_base + [ssh_host, f"mkdir -p {stack_dir}"]
+            mkdir_cmd = ssh_cmd_base + [ssh_host, f"mkdir -p {shlex.quote(stack_dir)}"]
 
             logger.debug("Creating remote directory", host_id=host_id, stack_dir=stack_dir)
 
             mkdir_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
-                    mkdir_cmd, check=False, capture_output=True, text=True, timeout=30
+                lambda cmd=mkdir_cmd: subprocess.run(  # nosec B603
+                    cmd, check=False, capture_output=True, text=True, timeout=30
                 ),
             )
 

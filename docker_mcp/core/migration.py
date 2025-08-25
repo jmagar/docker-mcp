@@ -1,7 +1,10 @@
 """Migration orchestration and Docker stack transfer coordination."""
 
 import asyncio
+import os
+import shlex
 import subprocess
+import tempfile
 import time
 from typing import Any
 
@@ -31,108 +34,8 @@ class MigrationManager:
         self.rsync_transfer = RsyncTransfer()
         self.zfs_transfer = ZFSTransfer()
     
-    async def parse_compose_volumes(self, compose_content: str, source_appdata_path: str = None) -> dict[str, Any]:
-        """Parse Docker Compose file to extract volume information.
-        
-        Args:
-            compose_content: Docker Compose YAML content
-            source_appdata_path: Source host's appdata path from hosts.yml for expanding ${APPDATA_PATH}
-            
-        Returns:
-            Dictionary with volume information:
-            - named_volumes: List of named volume names
-            - bind_mounts: List of bind mount paths
-            - volume_definitions: Volume configuration from compose
-        """
-        try:
-            compose_data = yaml.safe_load(compose_content)
-            
-            volumes_info = {
-                "named_volumes": [],
-                "bind_mounts": [],
-                "volume_definitions": {},
-            }
-            
-            # Extract top-level volume definitions
-            if "volumes" in compose_data:
-                volumes_info["volume_definitions"] = compose_data["volumes"]
-            
-            # Parse service volumes
-            services = compose_data.get("services", {})
-            for service_name, service_config in services.items():
-                if "volumes" not in service_config:
-                    continue
-                
-                for volume in service_config["volumes"]:
-                    if isinstance(volume, str):
-                        # Parse volume string format
-                        volume_parsed = self._parse_volume_string(volume, source_appdata_path)
-                        if volume_parsed["type"] == "named":
-                            volumes_info["named_volumes"].append(volume_parsed["name"])
-                        elif volume_parsed["type"] == "bind":
-                            volumes_info["bind_mounts"].append(volume_parsed["source"])
-                    elif isinstance(volume, dict):
-                        # Parse volume dictionary format
-                        if volume.get("type") == "volume":
-                            volumes_info["named_volumes"].append(volume.get("source", ""))
-                        elif volume.get("type") == "bind":
-                            volumes_info["bind_mounts"].append(volume.get("source", ""))
-            
-            # Remove duplicates
-            volumes_info["named_volumes"] = list(set(volumes_info["named_volumes"]))
-            volumes_info["bind_mounts"] = list(set(volumes_info["bind_mounts"]))
-            
-            self.logger.info(
-                "Parsed compose volumes",
-                named_volumes=len(volumes_info["named_volumes"]),
-                bind_mounts=len(volumes_info["bind_mounts"]),
-            )
-            
-            return volumes_info
-            
-        except yaml.YAMLError as e:
-            raise MigrationError(f"Failed to parse compose file: {e}")
-        except Exception as e:
-            raise MigrationError(f"Error extracting volumes: {e}")
-    
-    def _parse_volume_string(self, volume_str: str, source_appdata_path: str = None) -> dict[str, str]:
-        """Parse Docker volume string format with environment variable expansion.
-        
-        Args:
-            volume_str: Volume string like "data:/app/data" or "/host/path:/container/path" or "${APPDATA_PATH}/service:/data"
-            source_appdata_path: Source host's appdata path from hosts.yml for expanding ${APPDATA_PATH}
-            
-        Returns:
-            Dictionary with volume type and details
-        """
-        # Expand environment variables using host configuration
-        expanded_volume_str = volume_str
-        if source_appdata_path and "${APPDATA_PATH}" in volume_str:
-            expanded_volume_str = volume_str.replace("${APPDATA_PATH}", source_appdata_path)
-        
-        parts = expanded_volume_str.split(":")
-        
-        if len(parts) < 2:
-            # Simple volume without destination
-            return {"type": "named", "name": parts[0], "destination": ""}
-        
-        # Check if first part is absolute path (bind mount)
-        if parts[0].startswith("/") or parts[0].startswith("./") or parts[0].startswith("~"):
-            return {
-                "type": "bind",
-                "source": parts[0],
-                "destination": parts[1] if len(parts) > 1 else "",
-                "mode": parts[2] if len(parts) > 2 else "rw",
-                "original": volume_str,  # Keep original for path mapping
-            }
-        else:
-            # Named volume
-            return {
-                "type": "named",
-                "name": parts[0],
-                "destination": parts[1] if len(parts) > 1 else "",
-                "mode": parts[2] if len(parts) > 2 else "rw",
-            }
+    # Volume parsing methods have been moved to VolumeParser class
+    # in docker_mcp.core.migration.volume_parser for better organization
     
     async def get_volume_locations(
         self,
@@ -152,7 +55,7 @@ class MigrationManager:
         
         for volume_name in named_volumes:
             # Docker volume inspect to get mount point
-            inspect_cmd = f"docker volume inspect {volume_name} --format '{{{{.Mountpoint}}}}'"
+            inspect_cmd = f"docker volume inspect {shlex.quote(volume_name)} --format '{{{{.Mountpoint}}}}'"
             full_cmd = ssh_cmd + [inspect_cmd]
             
             result = await asyncio.get_event_loop().run_in_executor(
@@ -196,9 +99,8 @@ class MigrationManager:
             Tuple of (all_stopped, list_of_running_containers)
         """
         # Check for running containers
-        check_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"
-        ]
+        label = shlex.quote(f"com.docker.compose.project={stack_name}")
+        check_cmd = ssh_cmd + [f"docker ps --filter label={label} --format '{{{{.Names}}}}'"]
         
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -231,11 +133,11 @@ class MigrationManager:
             
             # Force stop each container
             for container in running_containers:
-                stop_cmd = ssh_cmd + [f"docker kill {container}"]
+                stop_cmd = ssh_cmd + [f"docker kill {shlex.quote(container)}"]
                 await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: subprocess.run(  # nosec B603
-                        stop_cmd, check=False, capture_output=True, text=True
+                    lambda cmd=stop_cmd: subprocess.run(  # nosec B603
+                        cmd, check=False, capture_output=True, text=True
                     ),
                 )
             
@@ -265,13 +167,13 @@ class MigrationManager:
         """
         # Create stack-specific directory
         stack_dir = f"{appdata_path}/{stack_name}"
-        mkdir_cmd = f"mkdir -p {stack_dir}"
+        mkdir_cmd = f"mkdir -p {shlex.quote(stack_dir)}"
         full_cmd = ssh_cmd + [mkdir_cmd]
         
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
-                full_cmd, check=False, capture_output=True, text=True
+            lambda cmd=full_cmd: subprocess.run(  # nosec B603
+                cmd, check=False, capture_output=True, text=True
             ),
         )
         
@@ -292,7 +194,7 @@ class MigrationManager:
         new_base_path: str,
         target_appdata_path: str = None,
     ) -> str:
-        """Update compose file paths for target host.
+        """Update compose file paths for target host using YAML parsing.
         
         Args:
             compose_content: Original compose file content
@@ -302,6 +204,160 @@ class MigrationManager:
             
         Returns:
             Updated compose file content
+        """
+        try:
+            # Parse YAML to manipulate compose file structurally
+            compose_data = yaml.safe_load(compose_content)
+            
+            if not isinstance(compose_data, dict):
+                self.logger.warning("Invalid compose file structure, falling back to string replacement")
+                return self._update_compose_string_fallback(
+                    compose_content, old_paths, new_base_path, target_appdata_path
+                )
+            
+            # Update services section
+            if "services" in compose_data:
+                for service_name, service_config in compose_data["services"].items():
+                    if not isinstance(service_config, dict) or "volumes" not in service_config:
+                        continue
+                    
+                    # Update volume mounts
+                    updated_volumes = []
+                    for volume in service_config["volumes"]:
+                        updated_volume = self._update_volume_definition(
+                            volume, old_paths, new_base_path, target_appdata_path
+                        )
+                        updated_volumes.append(updated_volume)
+                    
+                    compose_data["services"][service_name]["volumes"] = updated_volumes
+            
+            # Update top-level volumes section
+            if "volumes" in compose_data and isinstance(compose_data["volumes"], dict):
+                for volume_name, volume_config in compose_data["volumes"].items():
+                    if isinstance(volume_config, dict) and "driver_opts" in volume_config:
+                        driver_opts = volume_config["driver_opts"]
+                        if "device" in driver_opts:
+                            old_device = driver_opts["device"]
+                            if old_device in old_paths.values():
+                                # Extract relative path component
+                                path_parts = old_device.split("/")
+                                relative_name = path_parts[-1] if path_parts else "data"
+                                new_device = f"{new_base_path}/{relative_name}"
+                                driver_opts["device"] = new_device
+                                
+                                self.logger.debug(
+                                    "Updated volume driver device path",
+                                    volume=volume_name,
+                                    old_device=old_device,
+                                    new_device=new_device,
+                                )
+            
+            # Convert back to YAML with proper formatting
+            return yaml.dump(compose_data, default_flow_style=False, sort_keys=False)
+            
+        except yaml.YAMLError as e:
+            self.logger.warning(
+                "Failed to parse compose file as YAML, falling back to string replacement",
+                error=str(e)
+            )
+            return self._update_compose_string_fallback(
+                compose_content, old_paths, new_base_path, target_appdata_path
+            )
+        except Exception as e:
+            self.logger.error(
+                "Error updating compose file with YAML parsing",
+                error=str(e)
+            )
+            return self._update_compose_string_fallback(
+                compose_content, old_paths, new_base_path, target_appdata_path
+            )
+    
+    def _update_volume_definition(
+        self,
+        volume: str | dict,
+        old_paths: dict[str, str],
+        new_base_path: str,
+        target_appdata_path: str = None,
+    ) -> str | dict:
+        """Update a single volume definition for migration.
+        
+        Args:
+            volume: Volume definition (string or dict format)
+            old_paths: Mapping of old volume paths
+            new_base_path: New base path for volumes
+            target_appdata_path: Target appdata path for environment variable replacement
+            
+        Returns:
+            Updated volume definition
+        """
+        if isinstance(volume, str):
+            # Handle string volume format
+            updated_volume = volume
+            
+            # Replace environment variables
+            if target_appdata_path and "${APPDATA_PATH}" in updated_volume:
+                updated_volume = updated_volume.replace("${APPDATA_PATH}", target_appdata_path)
+            
+            # Replace old paths
+            for old_path in old_paths.values():
+                if old_path in updated_volume:
+                    path_parts = old_path.split("/")
+                    relative_name = path_parts[-1] if path_parts else "data"
+                    new_path = f"{new_base_path}/{relative_name}"
+                    updated_volume = updated_volume.replace(old_path, new_path)
+                    
+                    self.logger.debug(
+                        "Updated volume string",
+                        old=old_path,
+                        new=new_path,
+                        volume=updated_volume,
+                    )
+            
+            return updated_volume
+        
+        elif isinstance(volume, dict):
+            # Handle dictionary volume format
+            updated_volume = volume.copy()
+            
+            if "source" in updated_volume:
+                source = updated_volume["source"]
+                
+                # Replace environment variables
+                if target_appdata_path and "${APPDATA_PATH}" in source:
+                    source = source.replace("${APPDATA_PATH}", target_appdata_path)
+                
+                # Replace old paths
+                for old_path in old_paths.values():
+                    if old_path in source:
+                        path_parts = old_path.split("/")
+                        relative_name = path_parts[-1] if path_parts else "data"
+                        new_source = f"{new_base_path}/{relative_name}"
+                        source = source.replace(old_path, new_source)
+                        
+                        self.logger.debug(
+                            "Updated volume dict source",
+                            old=old_path,
+                            new=new_source,
+                            volume=updated_volume,
+                        )
+                
+                updated_volume["source"] = source
+            
+            return updated_volume
+        
+        # Return unchanged if not string or dict
+        return volume
+    
+    def _update_compose_string_fallback(
+        self,
+        compose_content: str,
+        old_paths: dict[str, str],
+        new_base_path: str,
+        target_appdata_path: str = None,
+    ) -> str:
+        """Fallback method using string replacement for compose updates.
+        
+        This is used when YAML parsing fails for any reason.
         """
         updated_content = compose_content
         
@@ -323,7 +379,7 @@ class MigrationManager:
                 updated_content = updated_content.replace(old_path, new_path)
                 
                 self.logger.debug(
-                    "Updated compose path",
+                    "Updated compose path (fallback)",
                     old=old_path,
                     new=new_path,
                 )
@@ -384,48 +440,49 @@ class MigrationManager:
         }
         
         for path in volume_paths:
+            qpath = shlex.quote(path)
             path_inventory = {}
             
             # Get file count
-            file_count_cmd = ssh_cmd + [f"find {path} -type f 2>/dev/null | wc -l"]
+            file_count_cmd = ssh_cmd + [f"find {qpath} -type f 2>/dev/null | wc -l"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(file_count_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=file_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["file_count"] = int(result.stdout.strip()) if result.returncode == 0 else 0
             
             # Get directory count  
-            dir_count_cmd = ssh_cmd + [f"find {path} -type d 2>/dev/null | wc -l"]
+            dir_count_cmd = ssh_cmd + [f"find {qpath} -type d 2>/dev/null | wc -l"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(dir_count_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=dir_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["dir_count"] = int(result.stdout.strip()) if result.returncode == 0 else 0
             
             # Get total size in bytes
-            size_cmd = ssh_cmd + [f"du -sb {path} 2>/dev/null | cut -f1"]
+            size_cmd = ssh_cmd + [f"du -sb {qpath} 2>/dev/null | cut -f1"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["total_size"] = int(result.stdout.strip()) if result.returncode == 0 else 0
             
             # Get file listing for comparison
-            file_list_cmd = ssh_cmd + [f"find {path} -type f -printf '%P\\n' 2>/dev/null | sort"]
+            file_list_cmd = ssh_cmd + [f"find {qpath} -type f -printf '%P\\n' 2>/dev/null | sort"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(file_list_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=file_list_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["file_list"] = result.stdout.strip().split("\n") if result.returncode == 0 else []
             
             # Find and checksum critical files (databases, configs)
             critical_cmd = ssh_cmd + [
-                f"find {path} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
+                f"find {qpath} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
                 f"-exec md5sum {{}} + 2>/dev/null"
             ]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(critical_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=critical_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             
             critical_files = {}
@@ -495,40 +552,41 @@ class MigrationManager:
         
         # Calculate expected target path
         target_path = f"{target_appdata}/{stack_name}"
+        qtarget = shlex.quote(target_path)
         
         # Get target inventory using same methods as source
         # File count
-        file_count_cmd = ssh_cmd + [f"find {target_path} -type f 2>/dev/null | wc -l"]
+        file_count_cmd = ssh_cmd + [f"find {qtarget} -type f 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(file_count_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=file_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["files_found"] = target_files
         
         # Directory count
-        dir_count_cmd = ssh_cmd + [f"find {target_path} -type d 2>/dev/null | wc -l"]
+        dir_count_cmd = ssh_cmd + [f"find {qtarget} -type d 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(dir_count_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=dir_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["dirs_found"] = target_dirs
         
         # Total size
-        size_cmd = ssh_cmd + [f"du -sb {target_path} 2>/dev/null | cut -f1"]
+        size_cmd = ssh_cmd + [f"du -sb {qtarget} 2>/dev/null | cut -f1"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["size_found"] = target_size
         
         # Get target file listing
-        file_list_cmd = ssh_cmd + [f"find {target_path} -type f -printf '%P\\n' 2>/dev/null | sort"]
+        file_list_cmd = ssh_cmd + [f"find {qtarget} -type f -printf '%P\\n' 2>/dev/null | sort"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(file_list_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=file_list_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_file_list = result.stdout.strip().split("\n") if result.returncode == 0 and result.stdout.strip() else []
         
@@ -555,12 +613,20 @@ class MigrationManager:
         # Verify critical files checksums
         critical_files_verified = {}
         for rel_path, source_checksum in source_inventory["critical_files"].items():
-            target_file_path = f"{target_path}/{rel_path}"
-            checksum_cmd = ssh_cmd + [f"md5sum {target_file_path} 2>/dev/null | cut -d' ' -f1"]
+            target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
+            qfile = shlex.quote(target_file_path)
+            # Try SHA256 first, fallback to MD5
+            checksum_cmd = ssh_cmd + [
+                f"if command -v sha256sum >/dev/null 2>&1; then "
+                f"  sha256sum {qfile} 2>/dev/null | cut -d' ' -f1; "
+                f"else "
+                f"  md5sum {qfile} 2>/dev/null | cut -d' ' -f1; "
+                f"fi"
+            ]
             
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(checksum_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=checksum_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             
             if result.returncode == 0 and result.stdout.strip():
@@ -651,10 +717,11 @@ class MigrationManager:
         }
         
         # Check if container exists and get its info
-        inspect_cmd = ssh_cmd + [f"docker inspect {stack_name} 2>/dev/null || echo 'NOT_FOUND'"]
+        qname = shlex.quote(stack_name)
+        inspect_cmd = ssh_cmd + [f"docker inspect {qname} 2>/dev/null || echo 'NOT_FOUND'"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(inspect_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=inspect_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         
         if result.returncode != 0 or "NOT_FOUND" in result.stdout:
@@ -714,18 +781,18 @@ class MigrationManager:
             # Test data accessibility inside container if container is running
             if verification["container_integration"]["container_running"]:
                 # Try to access a common path inside the container
-                test_cmd = ssh_cmd + [f"docker exec {stack_name} ls /data 2>/dev/null || docker exec {stack_name} ls / 2>/dev/null"]
+                test_cmd = ssh_cmd + [f"docker exec {qname} ls /data 2>/dev/null || docker exec {qname} ls / 2>/dev/null"]
                 result = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: subprocess.run(test_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                    lambda cmd=test_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
                 )
                 verification["container_integration"]["data_accessible"] = result.returncode == 0
                 
                 # Check for startup errors in logs
-                logs_cmd = ssh_cmd + [f"docker logs {stack_name} --tail 50 2>&1 | grep -i error || true"]
+                logs_cmd = ssh_cmd + [f"docker logs {qname} --tail 50 2>&1 | grep -i error || true"]
                 result = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: subprocess.run(logs_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                    lambda cmd=logs_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
                 )
                 if result.stdout.strip():
                     error_lines = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
@@ -819,12 +886,15 @@ class MigrationManager:
                 ssh_cmd_source, source_paths, f"{stack_name}_migration"
             )
             
-            # Transfer archive to target
+            # Transfer archive to target with random suffix for security
+            temp_suffix = os.urandom(8).hex()[:8]
+            target_archive_path = f"/tmp/{stack_name}_migration_{temp_suffix}.tar.gz"
+            
             transfer_result = await transfer_instance.transfer(
                 source_host=source_host,
                 target_host=target_host,
                 source_path=archive_path,
-                target_path=f"/tmp/{stack_name}_migration.tar.gz"
+                target_path=target_archive_path
             )
             
             if transfer_result["success"]:
@@ -832,14 +902,14 @@ class MigrationManager:
                 ssh_cmd_target = self._build_ssh_cmd(target_host)
                 extracted = await self.archive_utils.extract_archive(
                     ssh_cmd_target, 
-                    f"/tmp/{stack_name}_migration.tar.gz",
+                    target_archive_path,
                     target_path
                 )
                 
                 if extracted:
                     # Cleanup archive on target
                     await self.archive_utils.cleanup_archive(
-                        ssh_cmd_target, f"/tmp/{stack_name}_migration.tar.gz"
+                        ssh_cmd_target, target_archive_path
                     )
             
             # Cleanup archive on source

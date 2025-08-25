@@ -55,7 +55,7 @@ class MigrationVerifier:
             file_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f 2>/dev/null | wc -l"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(file_count_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=file_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["file_count"] = int(result.stdout.strip()) if result.returncode == 0 else 0
             
@@ -63,7 +63,7 @@ class MigrationVerifier:
             dir_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type d 2>/dev/null | wc -l"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(dir_count_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=dir_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["dir_count"] = int(result.stdout.strip()) if result.returncode == 0 else 0
             
@@ -71,7 +71,7 @@ class MigrationVerifier:
             size_cmd = ssh_cmd + [f"du -sb {shlex.quote(path)} 2>/dev/null | cut -f1"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["total_size"] = int(result.stdout.strip()) if result.returncode == 0 else 0
             
@@ -79,7 +79,7 @@ class MigrationVerifier:
             file_list_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f -printf '%P\\n' 2>/dev/null | sort"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(file_list_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=file_list_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             path_inventory["file_list"] = result.stdout.strip().split("\n") if result.returncode == 0 else []
             
@@ -90,7 +90,7 @@ class MigrationVerifier:
             ]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(critical_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=critical_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             
             critical_files = {}
@@ -162,7 +162,7 @@ class MigrationVerifier:
         file_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(file_count_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=file_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["files_found"] = target_files
@@ -171,7 +171,7 @@ class MigrationVerifier:
         dir_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type d 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(dir_count_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=dir_count_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["dirs_found"] = target_dirs
@@ -180,7 +180,7 @@ class MigrationVerifier:
         size_cmd = ssh_cmd + [f"du -sb {shlex.quote(target_path)} 2>/dev/null | cut -f1"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["size_found"] = target_size
@@ -189,7 +189,7 @@ class MigrationVerifier:
         file_list_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f -printf '%P\\n' 2>/dev/null | sort"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(file_list_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda cmd=file_list_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
         )
         target_file_list = result.stdout.strip().split("\n") if result.returncode == 0 and result.stdout.strip() else []
         
@@ -216,7 +216,7 @@ class MigrationVerifier:
         # Verify critical files checksums
         critical_files_verified = {}
         for rel_path, source_checksum in source_inventory["critical_files"].items():
-            target_file_path = f"{target_path}/{rel_path}"
+            target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
             qfile = shlex.quote(target_file_path)
             # Try SHA256 first, fallback to MD5
             checksum_cmd = ssh_cmd + [
@@ -229,7 +229,7 @@ class MigrationVerifier:
             
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(checksum_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda cmd=checksum_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
             )
             
             if result.returncode == 0 and result.stdout.strip():

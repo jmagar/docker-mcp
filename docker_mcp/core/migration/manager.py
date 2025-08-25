@@ -1,7 +1,10 @@
 """Main migration orchestrator for Docker stack transfers."""
 
 import asyncio
+import os
+import shlex
 import subprocess
+import tempfile
 from typing import Any
 
 import structlog
@@ -83,7 +86,7 @@ class MigrationManager:
         """
         # Check for running containers
         check_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}'"
+            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}'"
         ]
         
         result = await asyncio.get_event_loop().run_in_executor(
@@ -117,11 +120,11 @@ class MigrationManager:
             
             # Force stop each container
             for container in running_containers:
-                stop_cmd = ssh_cmd + [f"docker kill {container}"]
+                stop_cmd = ssh_cmd + [f"docker kill {shlex.quote(container)}"]
                 await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: subprocess.run(  # nosec B603
-                        stop_cmd, check=False, capture_output=True, text=True
+                    lambda cmd=stop_cmd: subprocess.run(  # nosec B603
+                        cmd, check=False, capture_output=True, text=True
                     ),
                 )
             
@@ -151,13 +154,13 @@ class MigrationManager:
         """
         # Create stack-specific directory
         stack_dir = f"{appdata_path}/{stack_name}"
-        mkdir_cmd = f"mkdir -p {stack_dir}"
+        mkdir_cmd = f"mkdir -p {shlex.quote(stack_dir)}"
         full_cmd = ssh_cmd + [mkdir_cmd]
         
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
-                full_cmd, check=False, capture_output=True, text=True
+            lambda cmd=full_cmd: subprocess.run(  # nosec B603
+                cmd, check=False, capture_output=True, text=True
             ),
         )
         
@@ -221,12 +224,15 @@ class MigrationManager:
                 ssh_cmd_source, source_paths, f"{stack_name}_migration"
             )
             
-            # Transfer archive to target
+            # Transfer archive to target with random suffix for security
+            temp_suffix = os.urandom(8).hex()[:8]
+            target_archive_path = f"/tmp/{stack_name}_migration_{temp_suffix}.tar.gz"
+            
             transfer_result = await transfer_instance.transfer(
                 source_host=source_host,
                 target_host=target_host,
                 source_path=archive_path,
-                target_path=f"/tmp/{stack_name}_migration.tar.gz"
+                target_path=target_archive_path
             )
             
             if transfer_result["success"]:
@@ -234,14 +240,14 @@ class MigrationManager:
                 ssh_cmd_target = self._build_ssh_cmd(target_host)
                 extracted = await self.archive_utils.extract_archive(
                     ssh_cmd_target, 
-                    f"/tmp/{stack_name}_migration.tar.gz",
+                    target_archive_path,
                     target_path
                 )
                 
                 if extracted:
                     # Cleanup archive on target
                     await self.archive_utils.cleanup_archive(
-                        ssh_cmd_target, f"/tmp/{stack_name}_migration.tar.gz"
+                        ssh_cmd_target, target_archive_path
                     )
             
             # Cleanup archive on source

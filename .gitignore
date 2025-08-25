@@ -86,3 +86,6 @@ tmp/
 
 # Cache directories
 .cache/
+
+# Fix files
+*-fixes.md

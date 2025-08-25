@@ -2,7 +2,8 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from docker_mcp.core.migration import MigrationManager, MigrationError
+from docker_mcp.core.migration.manager import MigrationManager
+from docker_mcp.core.exceptions import DockerMCPError as MigrationError
 from docker_mcp.core.config_loader import DockerHost
 
 

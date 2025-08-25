@@ -10,7 +10,7 @@ from typing import Any
 
 import structlog
 
-from ..core.config_loader import DockerHost, DockerMCPConfig
+from ..core.config_loader import DockerHost, DockerMCPConfig, save_config
 
 
 class HostService:
@@ -32,6 +32,7 @@ class HostService:
         test_connection: bool = True,
         compose_path: str | None = None,
         enabled: bool = True,
+        persist: bool = False,
     ) -> dict[str, Any]:
         """Add a new Docker host for management.
 
@@ -46,6 +47,7 @@ class HostService:
             test_connection: Test SSH connection before adding
             compose_path: Path where compose files are stored on this host
             enabled: Whether the host is enabled for use
+            persist: Whether to save the configuration to disk
 
         Returns:
             Operation result
@@ -64,11 +66,17 @@ class HostService:
 
             # Test connection if requested
             if test_connection:
-                # Basic validation - in real implementation would test SSH
-                pass
+                # TODO: Implement real SSH check (e.g., async subprocess 'ssh -o BatchMode=yes ... echo ok')
+                self.logger.warning(
+                    "SSH connection test not implemented; skipping",
+                    host_id=host_id, hostname=ssh_host, user=ssh_user, port=ssh_port
+                )
 
-            # Add to configuration (in real implementation would persist)
+            # Add to configuration
             self.config.hosts[host_id] = host_config
+            if persist:
+                # Use configured path or default
+                save_config(self.config, getattr(self.config, "config_file", None))
 
             self.logger.info(
                 "Docker host added", host_id=host_id, hostname=ssh_host, tested=test_connection
