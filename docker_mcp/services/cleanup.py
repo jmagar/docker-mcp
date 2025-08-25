@@ -184,11 +184,15 @@ class CleanupService:
         # Format cleanup summary
         cleanup_summary = self._format_cleanup_summary(summary, cleanup_details)
         
+        # Calculate cleanup level space estimates
+        cleanup_levels = self._calculate_cleanup_levels(summary)
+        
         return {
             "success": True,
             "host_id": host_id,
             "cleanup_type": "check",
             "summary": cleanup_summary,
+            "cleanup_levels": cleanup_levels,
             "total_reclaimable": summary.get("totals", {}).get("total_reclaimable", "0B"),
             "reclaimable_percentage": summary.get("totals", {}).get("reclaimable_percentage", 0),
             "recommendations": disk_usage_data.get("recommendations", []),
@@ -708,6 +712,56 @@ class CleanupService:
             )
         
         return recommendations
+
+    def _calculate_cleanup_levels(self, summary: dict) -> dict[str, Any]:
+        """Calculate cumulative space that each cleanup level would free up."""
+        # Extract byte values from summary
+        containers_bytes = summary.get("containers", {}).get("reclaimable_bytes", 0)
+        build_cache_bytes = summary.get("build_cache", {}).get("reclaimable_bytes", 0)
+        images_bytes = summary.get("images", {}).get("reclaimable_bytes", 0)
+        volumes_bytes = summary.get("volumes", {}).get("reclaimable_bytes", 0)
+        
+        # Calculate total size for percentage calculations
+        total_size_bytes = summary.get("totals", {}).get("total_size_bytes", 0)
+        
+        # Calculate cumulative space for each level
+        safe_bytes = containers_bytes + build_cache_bytes
+        moderate_bytes = safe_bytes + images_bytes
+        aggressive_bytes = moderate_bytes + volumes_bytes
+        
+        # Calculate percentages
+        safe_percentage = int((safe_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
+        moderate_percentage = int((moderate_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
+        aggressive_percentage = int((aggressive_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
+        
+        return {
+            "safe": {
+                "size": self._format_size(safe_bytes),
+                "size_bytes": safe_bytes,
+                "percentage": safe_percentage,
+                "description": "Stopped containers, networks, build cache",
+                "components": {
+                    "containers": self._format_size(containers_bytes),
+                    "build_cache": self._format_size(build_cache_bytes),
+                    "networks": "No size data (count-based cleanup)"
+                }
+            },
+            "moderate": {
+                "size": self._format_size(moderate_bytes),
+                "size_bytes": moderate_bytes,
+                "percentage": moderate_percentage,
+                "description": "Safe cleanup + unused images",
+                "additional_space": self._format_size(images_bytes)
+            },
+            "aggressive": {
+                "size": self._format_size(aggressive_bytes),
+                "size_bytes": aggressive_bytes,
+                "percentage": aggressive_percentage,
+                "description": "Moderate cleanup + unused volumes ⚠️  DATA LOSS RISK",
+                "additional_space": self._format_size(volumes_bytes),
+                "warning": "⚠️  Volume cleanup may permanently delete application data!"
+            }
+        }
 
     async def _get_cleanup_details(self, host: DockerHost, host_id: str) -> dict[str, Any]:
         """Get specific cleanup details beyond disk usage."""
