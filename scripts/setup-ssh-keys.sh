@@ -502,16 +502,16 @@ distribute_keys_parallel() {
         IFS='|' read -r host_name hostname user port <<< "$host_entry"
         
         local ssh_target="$user@$hostname"
-        local ssh_opts="-o BatchMode=yes"
+        local ssh_opts=(-o BatchMode=yes)
         if [ "$port" != "22" ]; then
-            ssh_opts="$ssh_opts -p $port"
+            ssh_opts+=(-p "$port")
         fi
         
         echo -n "Distributing to $host_name... "
         
         # Try ssh-copy-id first
         if command -v ssh-copy-id &> /dev/null; then
-            if ssh-copy-id $ssh_opts -i "${ACTIVE_SSH_KEY}" "$ssh_target" >/dev/null 2>&1; then
+            if ssh-copy-id "${ssh_opts[@]}" -i "${ACTIVE_SSH_KEY}" "$ssh_target" >/dev/null 2>&1; then
                 echo "$host_entry" >> "$success_file"
                 print_success "Success"
                 return 0
@@ -519,7 +519,7 @@ distribute_keys_parallel() {
         fi
         
         # Fallback to manual method
-        if cat "${ACTIVE_SSH_KEY}.pub" | ssh $ssh_opts "$ssh_target" "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" >/dev/null 2>&1; then
+        if cat "${ACTIVE_SSH_KEY}.pub" | ssh "${ssh_opts[@]}" "$ssh_target" "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" >/dev/null 2>&1; then
             echo "$host_entry" >> "$success_file"
             print_success "Success"
             return 0
@@ -591,16 +591,16 @@ distribute_keys_parallel() {
         echo "  ssh-copy-id -i ${ACTIVE_SSH_KEY} user@host"
     fi
     
-    # Cleanup
-    rm -rf "$temp_dir"
-    
-    # Export results for hosts config generation
+    # Export results for hosts config generation BEFORE cleanup
     SUCCESSFUL_HOSTS=()
     if [ -f "$success_file" ]; then
         while IFS= read -r host_entry; do
             SUCCESSFUL_HOSTS+=("$host_entry")
         done < "$success_file"
     fi
+    
+    # Cleanup
+    rm -rf "$temp_dir"
     
     echo
 }
@@ -668,12 +668,12 @@ verify_connectivity() {
         
         echo -n "Testing $host_name... "
         
-        local ssh_opts="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no"
+        local ssh_opts=(-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no)
         if [ "$port" != "22" ]; then
-            ssh_opts="$ssh_opts -p $port"
+            ssh_opts+=(-p "$port")
         fi
         
-        if ssh $ssh_opts -i "$ACTIVE_SSH_KEY" "$user@$hostname" "echo 'Connection successful'" >/dev/null 2>&1; then
+        if ssh "${ssh_opts[@]}" -i "$ACTIVE_SSH_KEY" "$user@$hostname" "echo 'Connection successful'" >/dev/null 2>&1; then
             print_success "OK"
             : $((verified++))
         else

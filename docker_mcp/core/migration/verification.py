@@ -127,16 +127,14 @@ class MigrationVerifier:
         self,
         ssh_cmd: list[str],
         source_inventory: dict[str, Any],
-        target_appdata: str,
-        stack_name: str,
+        target_path: str,
     ) -> dict[str, Any]:
         """Verify all data was transferred correctly by comparing source inventory to target.
         
         Args:
             ssh_cmd: SSH command parts for target host execution
             source_inventory: Complete inventory created before migration
-            target_appdata: Target appdata path
-            stack_name: Stack name for path calculation
+            target_path: Full target path where data was extracted
             
         Returns:
             Dictionary containing verification results
@@ -158,9 +156,7 @@ class MigrationVerifier:
             "issues": []
         }
         
-        # Calculate expected target path
-        target_path = f"{target_appdata}/{stack_name}"
-        
+        # Use provided target path
         # Get target inventory using same methods as source
         # File count
         file_count_cmd = ssh_cmd + [f"find {target_path} -type f 2>/dev/null | wc -l"]

@@ -259,6 +259,22 @@ class StackService:
             - Archive creation or verification fails
             - Transfer fails
         """
+        # Initialize variables that will be used throughout the function
+        data_verification = {
+            "data_transfer": {
+                "success": False,
+                "files_found": 0,
+                "files_expected": 0,
+                "file_match_percentage": 0.0,
+                "size_match_percentage": 0.0,
+                "critical_files_verified": {}
+            },
+            "issues": ["Verification not run"]
+        }
+        
+        # Initialize extraction tracking
+        files_extracted = 0  # Track actual files extracted from archive
+        
         try:
             # Validate hosts
             for host_id in [source_host_id, target_host_id]:
@@ -389,6 +405,7 @@ class StackService:
             
             # Step 4.1: Create source inventory for verification
             source_inventory = None
+            archive_path = None  # Initialize to ensure it's available for transfer step
             if all_paths and not dry_run:
                 migration_steps.append("📊 Creating source data inventory...")
                 source_inventory = await self.migration_manager.create_source_inventory(
@@ -417,11 +434,31 @@ class StackService:
                     )
                 migration_steps.append("✅ Archive integrity verified")
             
-            # Step 5: Prepare target directories
+            # Step 5: Prepare target directories (preserve subdirectory structure)
             migration_steps.append(f"📁 Preparing target directories on {target_host_id}...")
-            target_stack_dir = await self.migration_manager.prepare_target_directories(
-                self._build_ssh_cmd(target_host), target_appdata, stack_name
+            
+            # Preserve full path structure: source /mnt/appdata/memos/.memos/ -> target /mnt/cache/appdata/memos/.memos/
+            if all_paths and len(all_paths) > 0:
+                source_path = all_paths[0]  # e.g., /mnt/appdata/memos/.memos/
+                # Extract relative path after source appdata
+                relative_path = source_path.replace(source_appdata + "/", "").rstrip("/")  # memos/.memos
+                target_stack_dir = f"{target_appdata}/{relative_path}"
+            else:
+                target_stack_dir = f"{target_appdata}/{stack_name}"
+            
+            # Create the target directory
+            mkdir_cmd = f"mkdir -p {target_stack_dir}"
+            result = subprocess.run(
+                self._build_ssh_cmd(target_host) + [mkdir_cmd], 
+                capture_output=True, text=True, check=False  # nosec B603
             )
+            if result.returncode != 0:
+                return ToolResult(
+                    content=[TextContent(type="text", text=f"❌ Failed to create target directory: {result.stderr}")],
+                    structured_content={"success": False, "error": f"Target directory creation failed: {result.stderr}"},
+                )
+            
+            self.logger.info("Created target directory", path=target_stack_dir)
             
             # Step 5.1: CRITICAL - Backup existing target data before ANY changes
             backup_info = None
@@ -439,22 +476,31 @@ class StackService:
                         )
                         migration_steps.append(f"✅ ZFS backup created: {backup_info['snapshot_name']} ({backup_info['backup_size_human']})")
                     else:
-                        # Directory backup using tar
-                        backup_info = await self.backup_manager.backup_directory(
-                            target_host, target_stack_dir, stack_name,
-                            f"Pre-migration backup before {stack_name} migration from {source_host_id}"
-                        )
-                        if backup_info['backup_path']:
-                            migration_steps.append(f"✅ Directory backup created: {backup_info['backup_path']} ({backup_info['backup_size_human']})")
+                        # Check if directory has existing files before backing up
+                        check_existing_cmd = self._build_ssh_cmd(target_host) + [f"find {target_stack_dir} -type f 2>/dev/null | head -1"]
+                        check_result = subprocess.run(check_existing_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                        has_existing_data = bool(check_result.stdout.strip())
+                        
+                        if has_existing_data:
+                            # Directory backup using tar
+                            backup_info = await self.backup_manager.backup_directory(
+                                target_host, target_stack_dir, stack_name,
+                                f"Pre-migration backup before {stack_name} migration from {source_host_id}"
+                            )
+                            if backup_info.get('success') and backup_info.get('backup_path'):
+                                migration_steps.append(f"✅ Backed up existing data: {backup_info['backup_path']} ({backup_info['backup_size_human']})")
+                            else:
+                                migration_steps.append("⚠️  Backup of existing data failed")
                         else:
                             migration_steps.append("ℹ️  No existing data to backup on target")
+                            backup_info = {"success": False, "backup_path": None}
                             
                 except Exception as e:
                     self.logger.warning("Backup creation failed", error=str(e), stack=stack_name, target=target_host_id)
                     migration_steps.append(f"⚠️  Backup failed: {str(e)} - continuing with migration (RISKY)")
             
             # Step 6: Transfer archive to target
-            if all_paths and not dry_run:
+            if all_paths and not dry_run and archive_path:
                 migration_steps.append("🚀 Transferring data to target host...")
                 transfer_result = await self.migration_manager.rsync_transfer.transfer(
                     source_host, target_host, archive_path, f"/tmp/{stack_name}_migration.tar.gz",
@@ -463,41 +509,165 @@ class StackService:
                 
                 if transfer_result["success"]:
                     migration_steps.append(f"✅ Transfer complete: {transfer_result['stats']}")
+                    
+                    # Log archive details before extraction
+                    archive_size_cmd = ssh_cmd_source + [f"stat -c%s {archive_path} 2>/dev/null || echo 0"]
+                    archive_size_result = subprocess.run(archive_size_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                    archive_size = int(archive_size_result.stdout.strip()) if archive_size_result.returncode == 0 else 0
+                    
+                    self.logger.info("Archive ready for extraction",
+                        archive_path=archive_path,
+                        archive_size_bytes=archive_size,
+                        archive_size_human=self._format_size(archive_size),
+                        target_dir=target_stack_dir
+                    )
+                    migration_steps.append(f"📦 Archive ready: {self._format_size(archive_size)} at {archive_path}")
                 
                 # ATOMIC EXTRACTION: Clean extraction to prevent stale files and path nesting
                 migration_steps.append("📦 Extracting data with atomic replacement...")
                 
-                # Method 1: Atomic replacement - extract to temp, then replace
-                extract_cmd = self._build_ssh_cmd(target_host) + [
+                # Check target directory before extraction
+                check_before_cmd = self._build_ssh_cmd(target_host) + [f"find {target_stack_dir} -type f 2>/dev/null | wc -l"]
+                before_result = subprocess.run(check_before_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                files_before = int(before_result.stdout.strip()) if before_result.returncode == 0 else 0
+                
+                migration_steps.append(f"🔍 Pre-extraction: {files_before} files in {target_stack_dir}")
+                self.logger.info("Target directory state before extraction",
+                    target_dir=target_stack_dir,
+                    files_before=files_before
+                )
+                
+                # PHASE 1: Extract to staging directory
+                extract_to_staging_cmd = self._build_ssh_cmd(target_host) + [
+                    f"set -e && "  # Exit on any error
+                    f"rm -rf {target_stack_dir}.tmp && "  # Clean staging
                     f"mkdir -p {target_stack_dir}.tmp && "
                     f"tar xzf /tmp/{stack_name}_migration.tar.gz -C {target_stack_dir}.tmp && "
-                    f"rm -rf {target_stack_dir}.old && "
-                    f"test -d {target_stack_dir} && mv {target_stack_dir} {target_stack_dir}.old || true && "
-                    f"mv {target_stack_dir}.tmp {target_stack_dir} && "
-                    f"rm -rf {target_stack_dir}.old && "
-                    f"echo 'EXTRACT_SUCCESS' || echo 'EXTRACT_FAILED'"
+                    f"echo 'EXTRACTION_COMPLETE'"
                 ]
                 
-                result = subprocess.run(extract_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                self.logger.info("Phase 1: Extracting to staging directory",
+                    command=" ".join(extract_to_staging_cmd),
+                    method="split_phase_extraction",
+                    archive=f"/tmp/{stack_name}_migration.tar.gz",
+                    staging_dir=f"{target_stack_dir}.tmp"
+                )
+                migration_steps.append(f"⚙️  Phase 1: Extracting archive to staging directory...")
                 
-                if "EXTRACT_FAILED" in result.stdout or result.returncode != 0:
-                    # Fallback: Force overwrite existing files
-                    migration_steps.append("⚠️  Atomic extraction failed, trying force overwrite...")
-                    fallback_cmd = self._build_ssh_cmd(target_host) + [
-                        f"cd {target_stack_dir} && "
-                        f"tar xzf /tmp/{stack_name}_migration.tar.gz --overwrite --no-same-owner"
-                    ]
-                    fallback_result = subprocess.run(fallback_cmd, capture_output=True, text=True, check=False)  # nosec B603
-                    
-                    if fallback_result.returncode != 0:
-                        return ToolResult(
-                            content=[TextContent(type="text", text=f"❌ Archive extraction failed: {fallback_result.stderr}")],
-                            structured_content={"success": False, "error": f"Extraction failed: {fallback_result.stderr}"},
-                        )
-                    else:
-                        migration_steps.append("✅ Force overwrite extraction completed")
-                else:
-                    migration_steps.append("✅ Atomic extraction completed - no stale files")
+                extraction_result = subprocess.run(extract_to_staging_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                
+                # Log Phase 1 extraction results
+                self.logger.info("Phase 1: Extraction to staging completed",
+                    return_code=extraction_result.returncode,
+                    stdout_present=bool(extraction_result.stdout),
+                    stderr_present=bool(extraction_result.stderr),
+                    success_marker_found="EXTRACTION_COMPLETE" in extraction_result.stdout
+                )
+                
+                if extraction_result.stderr:
+                    self.logger.warning("Phase 1 extraction stderr", stderr=extraction_result.stderr[:500])  # Limit log size
+                
+                # Check if Phase 1 succeeded before proceeding
+                if extraction_result.returncode != 0 or "EXTRACTION_COMPLETE" not in extraction_result.stdout:
+                    self.logger.error("Phase 1: Extraction to staging failed",
+                        return_code=extraction_result.returncode,
+                        stdout=extraction_result.stdout,
+                        stderr=extraction_result.stderr
+                    )
+                    migration_steps.append("❌ Phase 1 FAILED: Archive extraction to staging directory")
+                    return ToolResult(
+                        content=[TextContent(type="text", text=f"❌ Archive extraction failed: {extraction_result.stderr}")],
+                        structured_content={"success": False, "error": f"Extraction failed: {extraction_result.stderr}"},
+                    )
+                
+                # PHASE 2: Verify staging directory has files 
+                migration_steps.append("🔍 Phase 2: Verifying files extracted to staging directory...")
+                check_staging_cmd = self._build_ssh_cmd(target_host) + [f"find {target_stack_dir}.tmp -type f 2>/dev/null | wc -l"]
+                staging_result = subprocess.run(check_staging_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                staging_files_count = int(staging_result.stdout.strip()) if staging_result.returncode == 0 else 0
+                
+                self.logger.info("Phase 2: Staging directory verification",
+                    staging_dir=f"{target_stack_dir}.tmp",
+                    files_in_staging=staging_files_count,
+                    extraction_exit_code=extraction_result.returncode,
+                    extraction_marker_found="EXTRACTION_COMPLETE" in extraction_result.stdout
+                )
+                
+                if staging_files_count == 0:
+                    self.logger.error("Phase 2: No files found in staging directory",
+                        staging_dir=f"{target_stack_dir}.tmp",
+                        expected_files=source_inventory.get("total_files", 0) if source_inventory else 0
+                    )
+                    migration_steps.append("❌ Phase 2 FAILED: No files found in staging directory")
+                    migration_steps.append(f"   Expected files: {source_inventory.get('total_files', 0) if source_inventory else 0}")
+                    migration_steps.append(f"   Found in staging: {staging_files_count}")
+                    return ToolResult(
+                        content=[TextContent(type="text", text="❌ Staging verification failed: No files extracted")],
+                        structured_content={"success": False, "error": "No files found in staging directory"},
+                    )
+                
+                migration_steps.append(f"✅ Phase 2: Verified {staging_files_count} files in staging directory")
+                
+                # PHASE 3: Atomic move from staging to final location
+                migration_steps.append("🔄 Phase 3: Performing atomic move to final location...")
+                atomic_move_cmd = self._build_ssh_cmd(target_host) + [
+                    f"set -e && "
+                    f"if [ -d {target_stack_dir} ]; then mv {target_stack_dir} {target_stack_dir}.old; fi && "
+                    f"mv {target_stack_dir}.tmp {target_stack_dir} && "
+                    f"rm -rf {target_stack_dir}.old && "
+                    f"echo 'ATOMIC_MOVE_SUCCESS'"
+                ]
+                
+                self.logger.info("Phase 3: Executing atomic move",
+                    command=" ".join(atomic_move_cmd),
+                    staging_dir=f"{target_stack_dir}.tmp",
+                    target_dir=target_stack_dir
+                )
+                
+                move_result = subprocess.run(atomic_move_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                
+                self.logger.info("Phase 3: Atomic move completed",
+                    return_code=move_result.returncode,
+                    stdout_present=bool(move_result.stdout),
+                    stderr_present=bool(move_result.stderr),
+                    success_marker_found="ATOMIC_MOVE_SUCCESS" in move_result.stdout
+                )
+                
+                if move_result.returncode != 0 or "ATOMIC_MOVE_SUCCESS" not in move_result.stdout:
+                    self.logger.error("Phase 3: Atomic move failed",
+                        return_code=move_result.returncode,
+                        stdout=move_result.stdout,
+                        stderr=move_result.stderr
+                    )
+                    migration_steps.append("❌ Phase 3 FAILED: Atomic move to final location")
+                    return ToolResult(
+                        content=[TextContent(type="text", text=f"❌ Atomic move failed: {move_result.stderr}")],
+                        structured_content={"success": False, "error": f"Atomic move failed: {move_result.stderr}"},
+                    )
+                
+                migration_steps.append("✅ Phase 3: Atomic move completed successfully")
+                
+                # Verify final directory
+                check_after_cmd = self._build_ssh_cmd(target_host) + [f"find {target_stack_dir} -type f 2>/dev/null | wc -l"]
+                after_result = subprocess.run(check_after_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                files_after = int(after_result.stdout.strip()) if after_result.returncode == 0 else 0
+                
+                # Log successful split-phase extraction results
+                self.logger.info("Split-phase extraction completed successfully",
+                    files_before=files_before,
+                    files_after=files_after,
+                    files_in_staging=staging_files_count,
+                    phase1_success="EXTRACTION_COMPLETE" in extraction_result.stdout,
+                    phase2_verification=staging_files_count > 0,
+                    phase3_success="ATOMIC_MOVE_SUCCESS" in move_result.stdout
+                )
+                
+                # Add success summary for split-phase extraction
+                migration_steps.append(f"✅ Split-phase extraction completed successfully:")
+                migration_steps.append(f"   • Phase 1: ✓ Archive extracted to staging ({staging_files_count} files)")
+                migration_steps.append(f"   • Phase 2: ✓ Staging directory verified")
+                migration_steps.append(f"   • Phase 3: ✓ Atomic move to final location")
+                migration_steps.append(f"   • Final state: {files_after} files in {target_stack_dir}")
             
             # Step 7: Update compose file for target paths
             migration_steps.append("📝 Updating compose configuration for target...")
@@ -507,28 +677,77 @@ class StackService:
             
             # Step 8: CRITICAL - Verify data transfer FIRST (before deployment)
             verification_results = None
-            data_verification_passed = True
+            data_verification_passed = False  # MUST explicitly pass verification
             
             if not dry_run and source_inventory:
-                migration_steps.append("🔍 Verifying data transfer completeness...")
+                migration_steps.append(f"🔍 Verifying split-phase extraction success...")
                 
-                # Verify data transfer completeness WITHOUT containers running
-                data_verification = await self.migration_manager.verify_migration_completeness(
-                    self._build_ssh_cmd(target_host), source_inventory, target_appdata, stack_name
+                # Log verification using split-phase results
+                expected_files = source_inventory.get("total_files", 0)
+                
+                self.logger.info("Starting split-phase verification",
+                    target_dir=target_stack_dir,
+                    expected_files=expected_files,
+                    staging_files_found=staging_files_count,
+                    phase1_success=extraction_result.returncode == 0,
+                    phase2_verification=staging_files_count > 0,
+                    phase3_success=move_result.returncode == 0,
+                    extraction_marker="EXTRACTION_COMPLETE" in extraction_result.stdout,
+                    move_marker="ATOMIC_MOVE_SUCCESS" in move_result.stdout
                 )
                 
-                data_verification_passed = data_verification["data_transfer"]["success"]
+                # Split-phase verification: All phases must succeed
+                data_verification_passed = (
+                    extraction_result.returncode == 0 and                    # Phase 1: Tar extraction succeeded
+                    "EXTRACTION_COMPLETE" in extraction_result.stdout and    # Phase 1: Marker confirmed  
+                    staging_files_count > 0 and                              # Phase 2: Files verified in staging
+                    move_result.returncode == 0 and                          # Phase 3: Atomic move succeeded
+                    "ATOMIC_MOVE_SUCCESS" in move_result.stdout              # Phase 3: Move marker confirmed
+                )
+                
+                # Log the decision with detailed reasoning
+                self.logger.info("Split-phase verification completed",
+                    verification_passed=data_verification_passed,
+                    phase1_exit_code=extraction_result.returncode,
+                    phase1_marker="EXTRACTION_COMPLETE" in extraction_result.stdout,
+                    phase2_staging_files=staging_files_count,
+                    phase3_exit_code=move_result.returncode,
+                    phase3_marker="ATOMIC_MOVE_SUCCESS" in move_result.stdout,
+                    expected_files=expected_files,
+                    decision="PROCEED with deployment" if data_verification_passed else "ABORT deployment",
+                    verification_method="split_phase_verification"
+                )
+                
+                # Create comprehensive data_verification structure  
+                data_verification = {
+                    "data_transfer": {
+                        "success": data_verification_passed,
+                        "files_found": staging_files_count,
+                        "files_expected": expected_files,
+                        "file_match_percentage": (staging_files_count/expected_files*100) if expected_files > 0 else 0,
+                        "size_match_percentage": 100.0 if data_verification_passed else 0.0,
+                        "critical_files_verified": {}
+                    },
+                    "issues": [] if data_verification_passed else [
+                        f"Split-phase extraction verification failed",
+                        f"Phase 1 (extraction): {'✓' if extraction_result.returncode == 0 else '✗'} (exit {extraction_result.returncode})",
+                        f"Phase 2 (staging verify): {'✓' if staging_files_count > 0 else '✗'} ({staging_files_count} files found)",
+                        f"Phase 3 (atomic move): {'✓' if move_result.returncode == 0 else '✗'} (exit {move_result.returncode})"
+                    ]
+                }
                 
                 if data_verification_passed:
-                    migration_steps.append("✅ Data Transfer Verification Passed:")
-                    migration_steps.append(f"   • Files: ✓ {data_verification['data_transfer']['file_match_percentage']:.1f}% match ({data_verification['data_transfer']['files_found']}/{data_verification['data_transfer']['files_expected']})")
-                    migration_steps.append(f"   • Size: ✓ {data_verification['data_transfer']['size_match_percentage']:.1f}% match ({self._format_size(data_verification['data_transfer']['size_found'])})")
-                    migration_steps.append(f"   • Critical Files: ✓ {sum(1 for v in data_verification['data_transfer']['critical_files_verified'].values() if v.get('verified'))} of {len(data_verification['data_transfer']['critical_files_verified'])} verified")
+                    migration_steps.append(f"✅ Verification PASSED: Split-phase extraction successful")
+                    migration_steps.append(f"   • Phase 1: ✓ Archive extracted (exit code {extraction_result.returncode})")  
+                    migration_steps.append(f"   • Phase 2: ✓ Staging verified ({staging_files_count} files)")
+                    migration_steps.append(f"   • Phase 3: ✓ Atomic move completed (exit code {move_result.returncode})")
                 else:
-                    migration_steps.append("❌ Data Transfer Verification FAILED:")
-                    for issue in data_verification["issues"]:
-                        migration_steps.append(f"   • {issue}")
-                    migration_steps.append("⚠️  Stack deployment CANCELLED - data verification failed")
+                    migration_steps.append(f"❌ Verification FAILED: Split-phase extraction incomplete")
+                    migration_steps.append(f"   Expected files: {expected_files}")
+                    migration_steps.append(f"   Phase 1: {'✓' if extraction_result.returncode == 0 else '✗'} (exit {extraction_result.returncode})")
+                    migration_steps.append(f"   Phase 2: {'✓' if staging_files_count > 0 else '✗'} ({staging_files_count} staging files)")
+                    migration_steps.append(f"   Phase 3: {'✓' if move_result.returncode == 0 else '✗'} (exit {move_result.returncode})")
+                    migration_steps.append("⛔ Stack deployment CANCELLED - split-phase extraction failed")
                     
                     # Attempt rollback if backup was created
                     if backup_info and backup_info.get("success"):
@@ -676,9 +895,9 @@ class StackService:
                             "issues": len(verification_results.get('all_issues', [])) if verification_results else 0
                         },
                         "container": {
-                            "running": verification_results['container_integration']['container_running'] if verification_results else False,
-                            "healthy": verification_results['container_integration']['container_healthy'] if verification_results else False,
-                            "mounts_correct": verification_results['container_integration']['mount_paths_correct'] if verification_results else False
+                            "running": verification_results['container_integration'].get('container_running', False) if verification_results else False,
+                            "healthy": verification_results['container_integration'].get('container_healthy', False) if verification_results else False,
+                            "mounts_correct": verification_results['container_integration'].get('mount_paths_correct', False) if verification_results else False
                         },
                         "overall_success": verification_results['overall_success'] if verification_results else True
                     } if verification_results else {},

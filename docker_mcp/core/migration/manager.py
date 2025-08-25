@@ -288,12 +288,11 @@ class MigrationManager:
         self, 
         ssh_cmd: list[str], 
         source_inventory: dict[str, Any], 
-        target_appdata: str, 
-        stack_name: str
+        target_path: str
     ) -> dict[str, Any]:
         """Delegate to MigrationVerifier."""
         return await self.verifier.verify_migration_completeness(
-            ssh_cmd, source_inventory, target_appdata, stack_name
+            ssh_cmd, source_inventory, target_path
         )
     
     async def verify_container_integration(

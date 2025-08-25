@@ -48,7 +48,13 @@ except ImportError:
 
 def get_data_dir() -> Path:
     """Get data directory based on environment."""
-    if os.getenv("DOCKER_CONTAINER"):
+    # Check for explicit data directory override first
+    if fastmcp_data_dir := os.getenv("FASTMCP_DATA_DIR"):
+        return Path(fastmcp_data_dir)
+    
+    # Check if running in container with explicit truthy check
+    docker_container = os.getenv("DOCKER_CONTAINER", "").lower()
+    if docker_container in ("1", "true", "yes", "on"):
         return Path("/app/data")
     else:
         # Local development path
@@ -56,8 +62,14 @@ def get_data_dir() -> Path:
 
 
 def get_config_dir() -> Path:
-    """Get config directory based on environment.""" 
-    if os.getenv("DOCKER_CONTAINER"):
+    """Get config directory based on environment."""
+    # Check for explicit config directory override first
+    if fastmcp_config_dir := os.getenv("FASTMCP_CONFIG_DIR"):
+        return Path(fastmcp_config_dir)
+    
+    # Check if running in container with explicit truthy check
+    docker_container = os.getenv("DOCKER_CONTAINER", "").lower()
+    if docker_container in ("1", "true", "yes", "on"):
         return Path("/app/config")
     else:
         # Local development - use project config dir
@@ -788,27 +800,11 @@ def main() -> None:
     """Main entry point."""
     args = parse_args()
 
-    # Setup logging
-    structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.UnicodeDecoder(),
-            structlog.processors.JSONRenderer(),
-        ],
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
+    # setup_logging() is called during DockerMCPServer initialization
+    # No additional structlog.configure() needed here to avoid conflicts
 
     logger = structlog.get_logger()
-    logger.setLevel(args.log_level)
+    # structlog doesn't have setLevel - log level is configured during setup_logging()
 
     try:
         # Load configuration

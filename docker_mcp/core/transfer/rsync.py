@@ -88,7 +88,7 @@ class RsyncTransfer(BaseTransfer):
         ssh_cmd = self.build_ssh_cmd(source_host)
         
         # Build rsync options
-        rsync_opts = ["-avP"]
+        rsync_opts = ["-avP", "--stats"]  # Add --stats for consistent output parsing
         if compress:
             rsync_opts.append("-z")
         if delete:
@@ -160,7 +160,7 @@ class RsyncTransfer(BaseTransfer):
         
         # Parse rsync summary statistics
         for line in output.split("\n"):
-            if "Number of files transferred:" in line:
+            if "Number of files transferred:" in line or "Number of regular files transferred:" in line:
                 match = re.search(r"(\d+)", line)
                 if match:
                     stats["files_transferred"] = int(match.group(1))
