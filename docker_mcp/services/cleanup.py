@@ -297,7 +297,7 @@ class CleanupService:
                 "images": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
                 "containers": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
                 "volumes": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
-                "build_cache": {"size": "0B", "size_bytes": 0},
+                "build_cache": {"size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
                 "totals": {
                     "total_size": "0B",
                     "total_size_bytes": 0,
@@ -312,7 +312,7 @@ class CleanupService:
             "images": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
             "containers": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
             "volumes": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
-            "build_cache": {"size": "0B", "size_bytes": 0},
+            "build_cache": {"size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
             "totals": {
                 "total_size": "0B",
                 "total_size_bytes": 0,
@@ -386,13 +386,20 @@ class CleanupService:
                     
             elif "Build Cache" in line:
                 parts = line.split()
-                if len(parts) >= 3:
-                    size_str = parts[2]
+                if len(parts) >= 5:
+                    # Format: Build Cache TOTAL ACTIVE SIZE RECLAIMABLE
+                    # parts[0]="Build", parts[1]="Cache", parts[2]=TOTAL, parts[3]=ACTIVE, parts[4]=SIZE, parts[5]=RECLAIMABLE
+                    size_str = parts[4]  # SIZE column (was incorrectly using parts[2])
+                    reclaimable_str = parts[5] if len(parts) > 5 else parts[4]  # RECLAIMABLE or fallback to SIZE
+                    
                     size_bytes = self._parse_docker_size(size_str)
+                    reclaimable_bytes = self._parse_docker_size(reclaimable_str)
                     
                     summary["build_cache"] = {
                         "size": size_str,
-                        "size_bytes": size_bytes
+                        "size_bytes": size_bytes,
+                        "reclaimable": reclaimable_str,
+                        "reclaimable_bytes": reclaimable_bytes
                     }
         
         # Calculate totals
@@ -407,7 +414,7 @@ class CleanupService:
             summary["images"]["reclaimable_bytes"] +
             summary["containers"]["reclaimable_bytes"] +
             summary["volumes"]["reclaimable_bytes"] +
-            summary["build_cache"]["size_bytes"]  # Build cache is fully reclaimable
+            summary["build_cache"].get("reclaimable_bytes", summary["build_cache"]["size_bytes"])  # Use reclaimable if available
         )
         
         reclaimable_percentage = (
@@ -592,12 +599,15 @@ class CleanupService:
             return f"{size:.1f}{units[unit_index]}"
 
     def _parse_docker_size(self, size_str: str) -> int:
-        """Convert Docker size string (e.g., '1.2GB') to bytes."""
+        """Convert Docker size string (e.g., '1.2GB', '980.2MB (2%)') to bytes."""
         if not size_str or size_str == "0B":
             return 0
         
-        # Handle Docker's size format: "1.2GB", "345MB", "2.1kB"
+        # Handle Docker's size format: "1.2GB", "345MB", "2.1kB", "980.2MB (2%)"
         size_str = size_str.strip().upper()
+        
+        # Strip percentage information if present (e.g., "980.2MB (2%)" -> "980.2MB")
+        size_str = re.sub(r'\s*\([^)]*\)\s*$', '', size_str)
         
         # Extract number and unit
         match = re.match(r'^(\d+(?:\.\d+)?)\s*([A-Z]*B?)$', size_str)
@@ -759,6 +769,7 @@ class CleanupService:
             },
             "build_cache": {
                 "size": summary.get("build_cache", {}).get("size", "0B"),
+                "reclaimable_space": summary.get("build_cache", {}).get("reclaimable", "0B"),
                 "fully_reclaimable": True
             },
             "volumes": {
