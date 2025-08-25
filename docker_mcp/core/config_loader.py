@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 import yaml  # type: ignore[import-untyped]
@@ -30,6 +30,18 @@ class DockerHost(BaseModel):
     enabled: bool = True
 
 
+class CleanupSchedule(BaseModel):
+    """Cleanup schedule configuration."""
+    
+    host_id: str
+    cleanup_type: Literal["safe", "moderate"]  # Only safe and moderate for scheduling
+    frequency: str  # daily, weekly, monthly, custom
+    time: str  # HH:MM format
+    enabled: bool = True
+    log_path: str | None = None
+    created_at: str
+
+
 class ServerConfig(BaseModel):
     """Server configuration."""
 
@@ -43,6 +55,7 @@ class DockerMCPConfig(BaseSettings):
     """Main configuration for Docker MCP server."""
 
     hosts: dict[str, DockerHost] = Field(default_factory=dict)
+    cleanup_schedules: dict[str, CleanupSchedule] = Field(default_factory=dict)
     server: ServerConfig = Field(default_factory=ServerConfig)
     config_file: str = Field(default="config/hosts.yml", alias="DOCKER_HOSTS_CONFIG")
 

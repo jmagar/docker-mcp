@@ -29,6 +29,8 @@ try:
     )
     from .models.params import DockerHostsParams, DockerContainerParams, DockerComposeParams
     from .services import ConfigService, ContainerService, HostService, StackService
+    from .services.cleanup import CleanupService
+    from .services.schedule import ScheduleService
     from .tools.logs import LogTools
 except ImportError:
     from docker_mcp.core.config_loader import DockerMCPConfig, load_config
@@ -43,6 +45,8 @@ except ImportError:
     )
     from docker_mcp.models.params import DockerHostsParams, DockerContainerParams, DockerComposeParams
     from docker_mcp.services import ConfigService, ContainerService, HostService, StackService
+    from docker_mcp.services.cleanup import CleanupService
+    from docker_mcp.services.schedule import ScheduleService
     from docker_mcp.tools.logs import LogTools
 
 
@@ -101,6 +105,8 @@ class DockerMCPServer:
         self.container_service = ContainerService(config, self.context_manager)
         self.stack_service = StackService(config, self.context_manager)
         self.config_service = ConfigService(config, self.context_manager)
+        self.cleanup_service = CleanupService(config)
+        self.schedule_service = ScheduleService(config)
 
         # Initialize remaining tools (logs not yet moved to services)
         self.log_tools = LogTools(config, self.context_manager)
@@ -170,7 +176,7 @@ class DockerMCPServer:
     
     async def docker_hosts(
         self,
-        action: Annotated[str, Field(description="Action to perform (list, add, ports, compose_path, import_ssh)")],
+        action: Annotated[str, Field(description="Action to perform (list, add, ports, compose_path, import_ssh, cleanup, disk_usage, schedule)")],
         host_id: Annotated[str, Field(default="", description="Host identifier **(used by: add, ports, compose_path)**")] = "",
         ssh_host: Annotated[str, Field(default="", description="SSH hostname or IP address **(used by: add)**")] = "",
         ssh_user: Annotated[str, Field(default="", description="SSH username **(used by: add)**")] = "",
@@ -185,7 +191,12 @@ class DockerMCPServer:
         ssh_config_path: Annotated[Optional[str], Field(default=None, description="Path to SSH config file **(used by: import_ssh)**")] = None,
         selected_hosts: Annotated[Optional[str], Field(default=None, description="Comma-separated list of hosts to select **(used by: import_ssh)**")] = None,
         compose_path_overrides: Annotated[Dict[str, str], Field(default_factory=dict, description="Per-host compose path overrides **(used by: import_ssh)**")] = None,
-        auto_confirm: Annotated[bool, Field(default=False, description="Auto-confirm operations without prompting **(used by: add, import_ssh)**")] = False
+        auto_confirm: Annotated[bool, Field(default=False, description="Auto-confirm operations without prompting **(used by: add, import_ssh)**")] = False,
+        cleanup_type: Annotated[Optional[str], Field(default=None, description="Type of cleanup to perform (check, safe, moderate, aggressive) **(used by: cleanup)**")] = None,
+        schedule_action: Annotated[Optional[str], Field(default=None, description="Schedule action to perform (add, remove, list, enable, disable) **(used by: schedule)**")] = None,
+        schedule_frequency: Annotated[Optional[str], Field(default=None, description="Cleanup frequency (daily, weekly, monthly, custom) **(used by: schedule add)**")] = None,
+        schedule_time: Annotated[Optional[str], Field(default=None, description="Time to run cleanup (e.g., '02:00') **(used by: schedule add)**")] = None,
+        schedule_id: Annotated[Optional[str], Field(default=None, description="Schedule identifier for management **(used by: schedule remove/enable/disable)**")] = None,
     ) -> dict[str, Any]:
         """Consolidated Docker hosts management tool.
         
@@ -203,7 +214,7 @@ class DockerMCPServer:
             compose_path_overrides = {}
             
         # Validate action parameter
-        valid_actions = ["list", "add", "ports", "compose_path", "import_ssh"]
+        valid_actions = ["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule"]
         if action not in valid_actions:
             return {
                 "success": False,
@@ -264,6 +275,36 @@ class DockerMCPServer:
                 if hasattr(result, 'content') and hasattr(result, 'structured_content'):
                     return result.structured_content or {"success": True, "data": str(result.content)}
                 return result
+                
+            elif action == "cleanup":
+                # Validate required parameters for cleanup action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for cleanup action"}
+                if not cleanup_type:
+                    return {"success": False, "error": "cleanup_type is required for cleanup action"}
+                if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
+                    return {"success": False, "error": f"cleanup_type must be one of: check, safe, moderate, aggressive"}
+                
+                return await self.cleanup_service.docker_cleanup(host_id, cleanup_type)
+                
+            elif action == "disk_usage":
+                # Validate required parameters for disk_usage action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for disk_usage action"}
+                
+                return await self.cleanup_service.docker_disk_usage(host_id)
+                
+            elif action == "schedule":
+                # Validate required parameters for schedule action
+                if not schedule_action:
+                    return {"success": False, "error": "schedule_action is required for schedule action"}
+                if schedule_action not in ["add", "remove", "list", "enable", "disable"]:
+                    return {"success": False, "error": f"schedule_action must be one of: add, remove, list, enable, disable"}
+                
+                return await self.schedule_service.handle_schedule_action(
+                    schedule_action, host_id, cleanup_type, 
+                    schedule_frequency, schedule_time, schedule_id
+                )
                 
         except Exception as e:
             self.logger.error("docker_hosts tool error", action=action, error=str(e))
@@ -718,6 +759,7 @@ class DockerMCPServer:
             ssh_config_path, selected_hosts, compose_path_overrides, auto_confirm, self._config_path
         )
 
+
     def update_configuration(self, new_config: DockerMCPConfig) -> None:
         """Update server configuration and reinitialize components."""
         self.config = new_config
@@ -730,6 +772,8 @@ class DockerMCPServer:
         self.container_service.config = new_config
         self.stack_service.config = new_config
         self.config_service.config = new_config
+        self.cleanup_service.config = new_config
+        self.schedule_service.config = new_config
 
         # Update remaining tools with new config
         self.log_tools.config = new_config

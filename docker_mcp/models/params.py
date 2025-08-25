@@ -10,7 +10,7 @@ class DockerHostsParams(BaseModel):
     
     action: str = Field(
         ..., 
-        description="Action to perform (list, add, ports, compose_path, import_ssh)"
+        description="Action to perform (list, add, ports, compose_path, import_ssh, cleanup, disk_usage, schedule)"
     )
     host_id: str = Field(
         default="", 
@@ -73,6 +73,26 @@ class DockerHostsParams(BaseModel):
     auto_confirm: bool = Field(
         default=False, 
         description="Auto-confirm operations without prompting"
+    )
+    cleanup_type: Optional[str] = Field(
+        default=None,
+        description="Type of cleanup to perform (check, safe, moderate, aggressive) **(used by: cleanup)**"
+    )
+    schedule_action: Optional[str] = Field(
+        default=None,
+        description="Schedule action to perform (add, remove, list, enable, disable) **(used by: schedule)**"
+    )
+    schedule_frequency: Optional[str] = Field(
+        default=None,
+        description="Cleanup frequency (daily, weekly, monthly, custom) **(used by: schedule add)**"
+    )
+    schedule_time: Optional[str] = Field(
+        default=None,
+        description="Time to run cleanup (e.g., '02:00') **(used by: schedule add)**"
+    )
+    schedule_id: Optional[str] = Field(
+        default=None,
+        description="Schedule identifier for management **(used by: schedule remove/enable/disable)**"
     )
 
 
