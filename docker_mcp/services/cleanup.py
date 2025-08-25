@@ -513,20 +513,42 @@ class CleanupService:
                         })
                         
                 elif current_section == "containers":
-                    # Format: CONTAINER_ID IMAGE COMMAND CREATED STATUS SIZE NAMES
-                    if len(parts) >= 6:
-                        status = parts[4].lower()
-                        size_str = parts[5]
+                    # Format: CONTAINER_ID IMAGE COMMAND LOCAL_VOLUMES SIZE CREATED STATUS NAMES
+                    # Note: CREATED and STATUS can be multiple words, so we need to identify STATUS by keywords
+                    if len(parts) >= 7:
+                        container_id = parts[0]
+                        size_str = parts[4]  # Fixed: SIZE is at index 4
                         size_bytes = self._parse_docker_size(size_str)
+                        container_name = parts[-1]  # NAMES is always the last column
                         
-                        if "up" in status:
+                        # Find STATUS by looking for keywords like "Up", "Exited", "Restarting", etc.
+                        # STATUS typically starts after the SIZE and CREATED columns
+                        status_found = False
+                        status_text = ""
+                        
+                        # Look for status keywords starting from index 5 onward (after SIZE)
+                        for i in range(5, len(parts) - 1):  # -1 to exclude NAMES column
+                            word = parts[i].lower()
+                            if word in ["up", "exited", "restarting", "paused", "dead", "created"]:
+                                # Found status start, collect status text
+                                status_parts = parts[i:-1]  # From status start to before NAMES
+                                status_text = " ".join(status_parts).lower()
+                                status_found = True
+                                break
+                        
+                        if not status_found:
+                            # Fallback: assume everything after CREATED is STATUS
+                            # This is less reliable but better than wrong parsing
+                            status_text = " ".join(parts[8:-1]).lower() if len(parts) > 9 else ""
+                        
+                        if "up" in status_text:
                             result["container_stats"]["running"] += 1
                         else:
                             result["container_stats"]["stopped"] += 1
                             # Stopped containers are cleanup candidates
                             result["cleanup_candidates"].append({
                                 "type": "container",
-                                "name": parts[0][:12],  # Short container ID
+                                "name": container_name,
                                 "size": size_str
                             })
                         
