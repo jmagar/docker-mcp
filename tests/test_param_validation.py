@@ -144,7 +144,11 @@ class TestDockerComposeParams:
         assert params.lines == 100
         
     def test_valid_params_full(self):
-        """Test with all parameters provided."""
+        """
+        Verify DockerComposeParams accepts a complete set of parameters and preserves their values.
+        
+        Creates a DockerComposeParams instance with all optional and required fields provided (including compose_content, environment, pull/recreate/follow flags, lines, dry_run, options, and host IDs) and asserts key fields are stored unchanged.
+        """
         compose_content = '''
 version: '3.8'
 services:

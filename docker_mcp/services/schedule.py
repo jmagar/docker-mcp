@@ -18,6 +18,11 @@ class ScheduleService:
     """Service for managing Docker cleanup schedules."""
 
     def __init__(self, config: DockerMCPConfig):
+        """
+        Initialize the ScheduleService.
+        
+        Stores the provided DockerMCPConfig on the instance and initializes a structured logger for service operations.
+        """
         self.config = config
         self.logger = structlog.get_logger()
 
@@ -36,18 +41,26 @@ class ScheduleService:
         schedule_time: str | None = None,
         schedule_id: str | None = None,
     ) -> dict[str, Any]:
-        """Handle schedule-related actions.
+        """
+        Dispatch schedule management requests to the appropriate internal handler.
         
-        Args:
-            schedule_action: Action to perform (add, remove, list, enable, disable)
-            host_id: Target Docker host identifier
-            cleanup_type: Type of cleanup (safe, moderate only)
-            schedule_frequency: Cleanup frequency (daily, weekly, monthly, custom)
-            schedule_time: Time to run cleanup (e.g., '02:00')
-            schedule_id: Schedule identifier for management
-            
+        Supported actions:
+        - "list": return all schedules.
+        - "add": create a new schedule (requires host_id, cleanup_type, schedule_frequency, schedule_time).
+        - "remove": remove an existing schedule (requires schedule_id).
+        - "enable" / "disable": toggle an existing schedule (requires schedule_id).
+        
+        Parameters:
+            schedule_action: One of "list", "add", "remove", "enable", "disable".
+            host_id: Target Docker host identifier (required for "add").
+            cleanup_type: Cleanup type, e.g., "safe" or "moderate" (required for "add").
+            schedule_frequency: One of "daily", "weekly", "monthly", "custom" (required for "add").
+            schedule_time: Time in "HH:MM" format (required for "add").
+            schedule_id: Identifier of the schedule to manage (required for "remove", "enable", "disable").
+        
         Returns:
-            Action result
+            A dict containing the operation result. On success the dict includes success=True and action-specific data;
+            on failure it includes success=False and an "error" message. Exceptions are caught and returned in the error field.
         """
         try:
             if schedule_action == "list":
@@ -83,7 +96,36 @@ class ScheduleService:
         schedule_frequency: str | None,
         schedule_time: str | None,
     ) -> dict[str, Any]:
-        """Add a new cleanup schedule."""
+        """
+        Create a new scheduled cleanup entry for a host.
+        
+        Validates inputs (host existence, allowed cleanup types, frequency values, and HH:MM time format),
+        generates a schedule identifier of the form `cleanup-{host_id}-{schedule_frequency}`, builds a schedule
+        configuration dict, and returns the computed cron expression and schedule data. This function performs
+        validation only and does not persist the schedule to configuration or install a cron job.
+        
+        Parameters:
+            host_id (str | None): Target host identifier (required).
+            cleanup_type (str | None): Cleanup intensity; allowed values are `"safe"` and `"moderate"` (required).
+            schedule_frequency (str | None): Recurrence specifier; one of `"daily"`, `"weekly"`, `"monthly"`, or `"custom"` (required).
+            schedule_time (str | None): Execution time in `HH:MM` 24-hour format (required).
+        
+        Returns:
+            dict: A result dictionary. On success:
+                {
+                    "success": True,
+                    "schedule_id": str,           # generated schedule identifier
+                    "schedule": dict,             # schedule configuration (host_id, cleanup_type, frequency, time, enabled, log_path, created_at)
+                    "cron_expression": str,       # cron expression derived from frequency and time
+                    "message": str,
+                    "note": str                   # indicates persistence/cron installation is not implemented
+                }
+                On failure:
+                {
+                    "success": False,
+                    "error": str                  # explanation of validation or existence failure
+                }
+        """
         # Validate required parameters
         if not host_id:
             return {"success": False, "error": "host_id is required for schedule add"}
@@ -166,7 +208,22 @@ class ScheduleService:
         }
 
     async def _remove_schedule(self, schedule_id: str | None) -> dict[str, Any]:
-        """Remove a cleanup schedule."""
+        """
+        Remove a scheduled cleanup entry.
+        
+        Validates that a schedule_id is provided, logs the removal request, and returns a structured result.
+        This function does not currently persist changes or modify the system crontab (those steps are TODO).
+        
+        Parameters:
+            schedule_id (str | None): Identifier of the schedule to remove; required.
+        
+        Returns:
+            dict[str, Any]: Result object with keys including:
+                - success (bool): True when the request is accepted.
+                - schedule_id (str): The provided schedule identifier.
+                - message (str): Human-readable outcome message.
+                - note (str): Indicates that actual cron removal is not yet implemented.
+        """
         if not schedule_id:
             return {"success": False, "error": "schedule_id is required for schedule remove"}
 
@@ -181,7 +238,26 @@ class ScheduleService:
         }
 
     async def _toggle_schedule(self, schedule_id: str | None, enabled: bool) -> dict[str, Any]:
-        """Enable or disable a cleanup schedule."""
+        """
+        Enable or disable an existing cleanup schedule.
+        
+        Validates that a schedule identifier is provided, logs the toggle action, and returns a structured result describing the requested change. This function does not modify persistent configuration or the system crontab (those actions are TODO).
+        
+        Parameters:
+            schedule_id (str | None): Identifier of the schedule to toggle; required.
+            enabled (bool): True to enable the schedule, False to disable it.
+        
+        Returns:
+            dict[str, Any]: A result dictionary. On success contains at least:
+                - "success" (bool): True.
+                - "schedule_id" (str): The provided schedule identifier.
+                - "enabled" (bool): The resulting enabled state.
+                - "message" (str): Human-readable outcome.
+                - "note" (str): Indicates that actual cron toggling is not implemented.
+              If schedule_id is missing, returns:
+                - "success": False
+                - "error": str explaining the missing identifier.
+        """
         if not schedule_id:
             return {
                 "success": False,
@@ -206,7 +282,19 @@ class ScheduleService:
         }
 
     async def _list_schedules(self) -> dict[str, Any]:
-        """List all cleanup schedules."""
+        """
+        Return a list of configured cleanup schedules.
+        
+        Currently this is a placeholder: it always returns an empty schedule list and a note indicating that reading schedules from the configuration is not yet implemented.
+        
+        Returns:
+            dict[str, Any]: Structured response with keys:
+                - success (bool): True when the operation completed.
+                - schedules (list): List of schedule objects (empty in the current implementation).
+                - count (int): Number of schedules returned.
+                - message (str): Human-readable status message.
+                - note (str): Implementation note (explains that reading from config is TODO).
+        """
         self.logger.info("Listing cleanup schedules")
 
         # TODO: Read from actual config
@@ -222,7 +310,11 @@ class ScheduleService:
         }
 
     def _validate_time_format(self, time_str: str) -> bool:
-        """Validate time format (HH:MM)."""
+        """
+        Return True if `time_str` is a valid 24-hour time in "HH:MM" format.
+        
+        Accepts two numeric components separated by a colon where hour is 0–23 and minute is 0–59. Non-numeric values, missing/extra components, or out-of-range values produce False.
+        """
         try:
             parts = time_str.split(':')
             if len(parts) != 2:
@@ -236,14 +328,14 @@ class ScheduleService:
             return False
 
     def _generate_cron_expression(self, frequency: str, time: str) -> str:
-        """Generate cron expression from frequency and time.
+        """
+        Generate a cron schedule expression from a human-friendly frequency and an HH:MM time.
         
-        Args:
-            frequency: daily, weekly, monthly, or custom
-            time: Time in HH:MM format
-            
+        frequency: one of "daily", "weekly", "monthly", or "custom". "weekly" produces a cron entry for Sunday (day-of-week 0); "monthly" targets the 1st day of the month. "custom" currently falls back to the same schedule as "daily".
+        time: local time in 24-hour "HH:MM" format (hour and minute are placed into the cron expression as "minute hour ...").
+        
         Returns:
-            Cron expression string
+            A cron expression string in standard 5-field format (minute hour day month weekday).
         """
         hour, minute = time.split(':')
         
@@ -261,12 +353,21 @@ class ScheduleService:
             return f"{minute} {hour} * * *"
 
     async def _update_crontab(self, schedule_id: str, action: str, cron_entry: str = ""):
-        """Update system crontab with schedule.
+        """
+        Request an update to the system crontab for a schedule.
         
-        Args:
-            schedule_id: Unique schedule identifier
-            action: 'add' or 'remove'
-            cron_entry: Full cron entry for addition
+        This is a non-blocking stub that records an intent to add or remove a cron entry for the given schedule_id.
+        It currently logs the request and does not modify the system crontab. When implemented, callers can expect
+        the method to read the current crontab, add or remove lines annotated with the schedule_id, and write the
+        updated crontab back to the system.
+        
+        Parameters:
+            schedule_id (str): Unique identifier for the schedule; used to tag cron lines for later removal.
+            action (str): Either 'add' to insert a cron entry or 'remove' to delete entries associated with schedule_id.
+            cron_entry (str): Full cron line to be added when action is 'add' (ignored for 'remove').
+        
+        Returns:
+            None
         """
         # TODO: Implement actual crontab management
         # This would involve:
@@ -282,13 +383,19 @@ class ScheduleService:
         )
 
     def _generate_cleanup_command(self, schedule_config: dict) -> str:
-        """Generate the command that will be executed by cron.
+        """
+        Return the shell command string cron should execute to run a scheduled cleanup.
         
-        Args:
-            schedule_config: Schedule configuration dictionary
-            
+        The function builds a CLI invocation for the `docker-mcp cleanup` command based on
+        the provided schedule configuration. Expected keys in `schedule_config`:
+        - `host_id` (str): target host identifier (required).
+        - `cleanup_type` (str): cleanup mode (required, e.g., "safe" or "moderate").
+        - `log_path` (str, optional): path to append command output; defaults to
+          `/var/log/docker-cleanup/{host_id}.log`.
+        
         Returns:
-            Command string for cron execution
+            A single-line shell command that runs the cleanup for the specified host/type
+            and redirects both stdout and stderr to the configured log file.
         """
         host_id = schedule_config["host_id"]
         cleanup_type = schedule_config["cleanup_type"]
@@ -302,13 +409,22 @@ class ScheduleService:
         )
 
     def _format_schedule_display(self, schedule_config: dict) -> dict[str, Any]:
-        """Format schedule configuration for display.
+        """
+        Format a raw schedule configuration into a display-friendly dictionary.
         
-        Args:
-            schedule_config: Raw schedule configuration
-            
+        Only surface-facing fields are returned; values are taken from schedule_config with sensible defaults:
+        - host_id: schedule host identifier (required).
+        - cleanup_type: cleanup strategy (e.g., "safe", "moderate").
+        - frequency: schedule frequency (e.g., "daily", "weekly").
+        - time: scheduled time in "HH:MM" format.
+        - enabled: boolean (defaults to True if missing).
+        - next_run: human-friendly next run time (currently a placeholder "TBD").
+        - created_at: creation timestamp if present.
+        - log_path: path to the schedule's log file if present.
+        
+        schedule_config: Raw schedule configuration dictionary (expected to contain at least host_id, cleanup_type, frequency, and time).
         Returns:
-            Formatted schedule information
+            A dict containing the formatted schedule fields described above.
         """
         return {
             "host_id": schedule_config["host_id"],

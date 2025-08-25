@@ -24,6 +24,16 @@ class MigrationManager:
     """Orchestrates Docker stack migrations between hosts using modular components."""
     
     def __init__(self):
+        """
+        Initialize a MigrationManager instance and create its component objects.
+        
+        Creates a component-scoped logger bound to "migration_manager" and instantiates the helper components used by the manager:
+        - VolumeParser: parses compose volumes and paths.
+        - MigrationVerifier: performs pre- and post-migration verification.
+        - ArchiveUtils: creates, extracts, and cleans up archives used for rsync transfers.
+        - RsyncTransfer: handles rsync-based transfers.
+        - ZFSTransfer: handles ZFS send/receive transfers.
+        """
         self.logger = logger.bind(component="migration_manager")
         
         # Initialize focused components
@@ -40,14 +50,15 @@ class MigrationManager:
         source_host: DockerHost,
         target_host: DockerHost
     ) -> tuple[str, Any]:
-        """Choose the optimal transfer method based on host capabilities.
+        """
+        Select the best transfer mechanism between the source and target hosts.
         
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            
+        If both hosts declare ZFS capability and dataset names, this method asynchronously validates ZFS requirements on each host and returns the ZFS transfer instance when validation succeeds. Otherwise it falls back to the rsync transfer.
+        
         Returns:
-            Tuple of (transfer_type: str, transfer_instance)
+            tuple[str, Any]: (transfer_type, transfer_instance) where `transfer_type` is
+            either `"zfs"` (when ZFS is usable on both ends) or `"rsync"` (fallback), and
+            `transfer_instance` is the corresponding transfer handler.
         """
         # Check if both hosts have ZFS capability configured
         if (source_host.zfs_capable and target_host.zfs_capable and 
@@ -71,15 +82,23 @@ class MigrationManager:
         stack_name: str,
         force_stop: bool = False,
     ) -> tuple[bool, list[str]]:
-        """Verify all containers in a stack are stopped.
+        """
+        Check whether all containers belonging to a Compose stack on a remote host are stopped; optionally force-kill running containers.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            stack_name: Stack name to check
-            force_stop: Force stop running containers
-            
+        Parameters:
+            ssh_cmd (list[str]): SSH command parts to execute remote commands (e.g. ['ssh', 'user@host', ...]).
+            stack_name (str): Compose project/stack name used to filter containers.
+            force_stop (bool): If True, issue `docker kill` for any running containers, wait 10 seconds, and recheck.
+        
         Returns:
-            Tuple of (all_stopped, list_of_running_containers)
+            tuple[bool, list[str]]: (all_stopped, running_containers)
+                - all_stopped: True if no containers are running for the stack; False otherwise or if the remote check failed.
+                - running_containers: list of container names currently running (empty on success or on remote-check failure).
+        
+        Notes:
+            - The function performs remote commands via subprocess.run executed in a thread pool executor.
+            - If the initial remote check returns a non-zero exit code, the function logs a warning and returns (False, []).
+            - When force_stop is True, containers are killed on the remote host and the function waits 10 seconds before re-checking.
         """
         # Check for running containers
         check_cmd = ssh_cmd + [
@@ -139,15 +158,20 @@ class MigrationManager:
         appdata_path: str,
         stack_name: str,
     ) -> str:
-        """Prepare target directories for migration.
+        """
+        Ensure the target host contains a stack-specific appdata directory and return its path.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            appdata_path: Base appdata path on target host
-            stack_name: Stack name for directory organization
-            
+        This runs `mkdir -p {appdata_path}/{stack_name}` on the remote host using the provided SSH command. If the remote command fails, a MigrationError is raised and includes the remote stderr.
+        
+        Parameters:
+            appdata_path (str): Base application data directory on the target host.
+            stack_name (str): Stack name used to create the subdirectory.
+        
         Returns:
-            Path to stack-specific appdata directory
+            str: Full path to the created stack-specific appdata directory.
+        
+        Raises:
+            MigrationError: If the remote directory creation command returns a non-zero exit code.
         """
         # Create stack-specific directory
         stack_dir = f"{appdata_path}/{stack_name}"
@@ -180,18 +204,25 @@ class MigrationManager:
         stack_name: str,
         dry_run: bool = False
     ) -> dict[str, Any]:
-        """Transfer data between hosts using the optimal method.
+        """
+        Transfer application data from a source host to a target host using the best available method (ZFS send/receive when both hosts support it and validate, otherwise rsync with an on-disk archive).
         
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            source_paths: List of paths to transfer from source
-            target_path: Target path on destination
-            stack_name: Stack name for organization
-            dry_run: Whether this is a dry run
-            
+        When ZFS is chosen this calls the ZFS transfer implementation with the hosts' appdata paths and datasets. When rsync is chosen this will:
+        - create a compressed archive of the provided source_paths on the source host,
+        - transfer that archive to the target,
+        - extract the archive into target_path on the target,
+        - remove temporary archives on both source and target.
+        
+        Parameters that require extra context:
+        - source_paths: list of filesystem paths on the source to include in the migration; if empty no transfer is performed.
+        - dry_run: when True and rsync would be chosen, the function returns a successful dry-run result without creating archives or transferring.
+        
         Returns:
-            Transfer result dictionary
+        A dictionary describing the transfer outcome. Common keys:
+        - "success" (bool): whether the operation succeeded.
+        - "message" (str): human-readable status or error message.
+        - "transfer_type" (str): one of "zfs", "rsync" or "none".
+        Additional keys may be present as provided by the chosen transfer implementation.
         """
         if not source_paths:
             return {"success": True, "message": "No data to transfer", "transfer_type": "none"}
@@ -250,7 +281,11 @@ class MigrationManager:
             return transfer_result
     
     def _build_ssh_cmd(self, host: DockerHost) -> list[str]:
-        """Build SSH command for a host."""
+        """
+        Builds an SSH command argument list for connecting to the given host.
+        
+        Includes `-o StrictHostKeyChecking=no`, adds `-i <identity_file>` if the host provides an identity file, and adds `-p <port>` when the port is not the default 22. Returns a list of command arguments suitable for passing to subprocess calls.
+        """
         ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
         if host.identity_file:
             ssh_cmd.extend(["-i", host.identity_file])
@@ -261,11 +296,34 @@ class MigrationManager:
     
     # Delegate methods to focused components
     async def parse_compose_volumes(self, compose_content: str, source_appdata_path: str = None) -> dict[str, Any]:
-        """Delegate to VolumeParser."""
+        """
+        Parse Docker Compose content to extract volume definitions for migration.
+        
+        Delegates to VolumeParser.parse_compose_volumes to produce a mapping of named volumes and bind mounts found in the provided compose YAML.
+        
+        Parameters:
+            compose_content (str): Raw Docker Compose YAML content.
+            source_appdata_path (str, optional): Base application data path on the source host used to resolve relative or templated volume paths.
+        
+        Returns:
+            dict[str, Any]: Parsed volume information suitable for migration (volume names to location/metadata).
+        """
         return await self.volume_parser.parse_compose_volumes(compose_content, source_appdata_path)
     
     async def get_volume_locations(self, ssh_cmd: list[str], named_volumes: list[str]) -> dict[str, str]:
-        """Delegate to VolumeParser."""
+        """
+        Return a mapping of named Docker volumes to their host paths on the remote host.
+        
+        Given an SSH command (as a list of ssh subprocess arguments) and a list of compose volume names,
+        query the remote host for each volume's filesystem location and return a dict mapping
+        volume name -> absolute host path.
+        Parameters:
+            ssh_cmd (list[str]): SSH command token list to execute remote checks (e.g. ['ssh', 'user@host', ...]).
+            named_volumes (list[str]): List of volume names to resolve on the remote host.
+        
+        Returns:
+            dict[str, str]: Mapping from each volume name in `named_volumes` to its resolved host path.
+        """
         return await self.volume_parser.get_volume_locations(ssh_cmd, named_volumes)
     
     def update_compose_for_migration(
@@ -275,13 +333,38 @@ class MigrationManager:
         new_base_path: str, 
         target_appdata_path: str = None
     ) -> str:
-        """Delegate to VolumeParser."""
+        """
+        Update Docker Compose content so volume paths point to a new base application-data directory for migration.
+        
+        Rewrites host volume paths in the provided `compose_content` by replacing occurrences from `old_paths` (mapping of original volume names to their host paths) with equivalents under `new_base_path`. If `target_appdata_path` is provided, it is used as the explicit target base for reconstructed paths instead of `new_base_path`.
+        
+        Parameters:
+            compose_content (str): Raw Docker Compose YAML/text to modify.
+            old_paths (dict[str, str]): Mapping of volume identifiers to their current host paths to be rewritten.
+            new_base_path (str): Base path on the target host where volumes should be relocated.
+            target_appdata_path (str, optional): Explicit appdata base path for the target; when set, this overrides `new_base_path` for constructing new volume paths.
+        
+        Returns:
+            str: The updated Compose content with volume paths adjusted for the target host.
+        """
         return self.volume_parser.update_compose_for_migration(
             compose_content, old_paths, new_base_path, target_appdata_path
         )
     
     async def create_source_inventory(self, ssh_cmd: list[str], volume_paths: list[str]) -> dict[str, Any]:
-        """Delegate to MigrationVerifier."""
+        """
+        Create an inventory of the given source volume paths by delegating to MigrationVerifier.
+        
+        Collects metadata about each path on the source host (as produced by
+        MigrationVerifier.create_source_inventory) to be used during migration.
+        
+        Parameters:
+            ssh_cmd (list[str]): SSH command list to run remote inspection commands (e.g., ['ssh', 'user@host', ...]).
+            volume_paths (list[str]): Absolute paths of volumes on the source host to inventory.
+        
+        Returns:
+            dict[str, Any]: Mapping of each inspected path to its collected metadata as returned by the verifier.
+        """
         return await self.verifier.create_source_inventory(ssh_cmd, volume_paths)
     
     async def verify_migration_completeness(
@@ -290,7 +373,19 @@ class MigrationManager:
         source_inventory: dict[str, Any], 
         target_path: str
     ) -> dict[str, Any]:
-        """Delegate to MigrationVerifier."""
+        """
+        Verify that the migration completed successfully by comparing the source inventory with the data present on the target.
+        
+        This delegates to MigrationVerifier.verify_migration_completeness to perform the actual checks over SSH. It compares the files/volumes described in `source_inventory` against the contents found under `target_path` on the remote host addressed by `ssh_cmd` and returns whatever structured verification report the verifier produces.
+        
+        Parameters:
+            ssh_cmd (list[str]): SSH command (e.g., ['ssh', 'user@host', ...]) used to run remote checks.
+            source_inventory (dict[str, Any]): Inventory produced for the source describing expected files/volumes and metadata.
+            target_path (str): Path on the target host where the migrated data should reside.
+        
+        Returns:
+            dict[str, Any]: Verification report (typically includes keys such as 'success' (bool) and 'details' or similar diagnostic information).
+        """
         return await self.verifier.verify_migration_completeness(
             ssh_cmd, source_inventory, target_path
         )
@@ -302,7 +397,18 @@ class MigrationManager:
         expected_appdata_path: str, 
         expected_volumes: list[str]
     ) -> dict[str, Any]:
-        """Delegate to MigrationVerifier."""
+        """
+        Verify that containers in the migrated stack are integrated with the expected application-data path and volumes on the target host.
+        
+        Parameters:
+            ssh_cmd (list[str]): SSH command to execute remote inspection commands (e.g., as returned by _build_ssh_cmd).
+            stack_name (str): Compose project/stack name to inspect on the target.
+            expected_appdata_path (str): Expected base path for application data on the target host.
+            expected_volumes (list[str]): List of volume paths expected to be mounted into containers.
+        
+        Returns:
+            dict[str, Any]: Verification result from MigrationVerifier.verify_container_integration containing status and diagnostic details.
+        """
         return await self.verifier.verify_container_integration(
             ssh_cmd, stack_name, expected_appdata_path, expected_volumes
         )

@@ -50,17 +50,33 @@ class MigrationSafety:
     ]
     
     def __init__(self):
+        """
+        Initialize MigrationSafety.
+        
+        Binds a component-scoped logger for migration safety operations and creates an empty
+        deletion_manifest used to record attempted deletions and their validation metadata.
+        """
         self.logger = logger.bind(component="migration_safety")
         self.deletion_manifest: list[dict[str, Any]] = []
     
     def validate_deletion_path(self, file_path: str) -> tuple[bool, str]:
-        """Validate that a path is safe to delete.
+        """
+        Validate whether a filesystem path is safe to delete.
         
-        Args:
-            file_path: Path to validate for deletion
-            
+        Performs several safety checks and returns (is_safe, reason):
+        - Resolves the path (follows symlinks and expands relative segments) before checks.
+        - Rejects any path that equals or is nested under entries in self.FORBIDDEN_PATHS.
+        - Rejects paths containing parent-directory traversal ("..").
+        - Considers a path safe if it resides under one of self.SAFE_DELETE_PATHS.
+        - For paths outside safe areas, allows only certain archive/temp file extensions ('.tar.gz', '.tar', '.zip', '.tmp', '.temp', '.migration') or filenames 'docker-compose.yml' / 'docker-compose.yaml'.
+        - On success returns (True, explanatory message); on failure returns (False, explanatory reason).
+        - Catches and reports unexpected errors as a failed validation.
+        
+        Parameters:
+            file_path (str): The filesystem path to validate.
+        
         Returns:
-            Tuple of (is_safe: bool, reason: str)
+            tuple[bool, str]: (is_safe, reason) where `is_safe` indicates whether deletion is allowed and `reason` explains the decision.
         """
         try:
             # Resolve path to handle symlinks and relative paths
@@ -101,12 +117,18 @@ class MigrationSafety:
             return False, f"Path validation error: {str(e)}"
     
     def add_to_deletion_manifest(self, file_path: str, operation: str, reason: str) -> None:
-        """Add a deletion operation to the manifest for audit trail.
+        """
+        Record a planned deletion in the migration deletion manifest and validate its path.
         
-        Args:
-            file_path: Path to be deleted
-            operation: Type of operation (rm, rm -f, rm -rf, etc.)
-            reason: Reason for deletion
+        Adds an entry to the instance's deletion_manifest for auditing, including the provided
+        path, operation, reason, an event-loop timestamp, and the result of validate_deletion_path.
+        The manifest entry will contain these keys: "path", "operation", "reason", "timestamp",
+        "validated" (bool) and "validation_reason" (str).
+        
+        Parameters:
+            file_path (str): Filesystem path targeted for deletion; will be validated before recording.
+            operation (str): Deletion command/operation label (e.g., "rm -f", "rm -rf").
+            reason (str): Human-readable rationale for the deletion.
         """
         manifest_entry = {
             "path": file_path,
@@ -140,15 +162,20 @@ class MigrationSafety:
         self.deletion_manifest.clear()
     
     async def safe_delete_file(self, ssh_cmd: list[str], file_path: str, reason: str = "Migration cleanup") -> tuple[bool, str]:
-        """Safely delete a file with validation and audit trail.
+        """
+        Delete a remote file after validating its path and recording the attempt in the deletion manifest.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            file_path: Path to file to delete
-            reason: Reason for deletion
-            
+        This asynchronous method adds a manifest entry for the requested deletion, validates the target path with MigrationSafety.validate_deletion_path, and — if validated — executes the deletion by appending an `rm -f <file_path>` command to the provided SSH command and running it in an executor. If the validation fails, a SafetyError is raised and the deletion is blocked. Returns a (success, message) tuple describing the outcome.
+        
+        Parameters:
+            file_path (str): Filesystem path to delete on the remote host.
+            reason (str, optional): Human-readable reason stored in the manifest and used in logs. Defaults to "Migration cleanup".
+        
         Returns:
-            Tuple of (success: bool, message: str)
+            tuple[bool, str]: (True, success_message) if deletion succeeded; (False, error_message) on failure.
+        
+        Raises:
+            SafetyError: If validate_deletion_path determines the path is unsafe and blocks deletion.
         """
         # Add to manifest
         self.add_to_deletion_manifest(file_path, "rm -f", reason)
@@ -185,13 +212,14 @@ class MigrationSafety:
             return False, error_msg
     
     def validate_zfs_snapshot_deletion(self, snapshot_name: str) -> tuple[bool, str]:
-        """Validate ZFS snapshot deletion to prevent accidental deletion of production snapshots.
+        """
+        Return whether a ZFS snapshot name is safe to delete and a reason.
         
-        Args:
-            snapshot_name: Full ZFS snapshot name (dataset@snapshot)
-            
-        Returns:
-            Tuple of (is_safe: bool, reason: str)
+        Validates that `snapshot_name` is in the `dataset@snapshot` form, that the snapshot portion
+        appears migration-related (must start with one of: "migrate_", "migration_", "backup_", "temp_")
+        and that the snapshot name is sufficiently long (minimum 10 characters) to imply a timestamped
+        migration snapshot. Returns (True, success_message) when deletion is allowed, otherwise
+        (False, explanatory_reason).
         """
         if "@" not in snapshot_name:
             return False, "Invalid snapshot format - must contain '@'"
@@ -210,15 +238,17 @@ class MigrationSafety:
         return True, f"ZFS snapshot deletion validated: {snapshot_name}"
     
     async def safe_cleanup_archive(self, ssh_cmd: list[str], archive_path: str, reason: str = "Migration cleanup") -> tuple[bool, str]:
-        """Safely cleanup archive files with validation.
+        """
+        Safely remove an archive file after validating its extension and delegating to safe_delete_file.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            archive_path: Path to archive file
-            reason: Reason for cleanup
-            
+        Validates that archive_path ends with one of the allowed archive extensions ('.tar.gz', '.tar', '.zip'); if validation fails, returns (False, error_message). Otherwise delegates deletion to self.safe_delete_file.
+        
+        Parameters:
+            archive_path (str): Remote path to the archive file to remove; must end with a supported archive extension.
+            reason (str): Human-readable reason for the cleanup (used in the deletion manifest and logs).
+        
         Returns:
-            Tuple of (success: bool, message: str)
+            tuple[bool, str]: (success, message) where success is True when the archive was deleted, False otherwise.
         """
         # Validate archive path
         if not archive_path.endswith(('.tar.gz', '.tar', '.zip')):
@@ -228,7 +258,24 @@ class MigrationSafety:
         return await self.safe_delete_file(ssh_cmd, archive_path, reason)
     
     def create_safety_report(self) -> dict[str, Any]:
-        """Create a safety report of all deletion operations."""
+        """
+        Return an aggregate safety report summarizing deletion attempts tracked in the manifest.
+        
+        The report includes counts of total, validated, and blocked deletion attempts, a safety rate
+        (as a percentage of validated over total attempts; 100 when no attempts), the full manifest,
+        and the configured safe and forbidden base paths.
+        
+        Returns:
+            dict[str, Any]: {
+                "total_deletion_attempts": int,
+                "validated_deletions": int,
+                "blocked_deletions": int,
+                "safety_rate": float,         # percentage (0-100)
+                "manifest": list[dict],       # the deletion_manifest as stored
+                "safe_paths": list[str],      # SAFE_DELETE_PATHS
+                "forbidden_paths": list[str]  # FORBIDDEN_PATHS
+            }
+        """
         total_deletions = len(self.deletion_manifest)
         validated_deletions = len([m for m in self.deletion_manifest if m["validated"]])
         blocked_deletions = total_deletions - validated_deletions

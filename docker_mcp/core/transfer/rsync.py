@@ -69,20 +69,24 @@ class RsyncTransfer(BaseTransfer):
         dry_run: bool = False,
         **kwargs
     ) -> dict[str, Any]:
-        """Transfer files between hosts using rsync.
+        """
+        Run rsync on the source host (over SSH) to transfer files to the target host and return parsed transfer statistics.
         
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            source_path: Path on source host
-            target_path: Path on target host
-            compress: Use compression during transfer
-            delete: Delete files on target not in source
-            dry_run: Perform dry run only
-            **kwargs: Additional rsync options (ignored)
-            
-        Returns:
-            Transfer result with statistics
+        This connects to source_host via SSH and executes an rsync command on that host which pushes source_path to target_host. Options:
+        - compress, delete, and dry_run control rsync flags (-z, --delete, --dry-run).
+        - If target_host.identity_file is set, rsync is invoked with a nested SSH command using that identity for the connection from source to target.
+        
+        Returns a dict with:
+        - "success" (bool)
+        - "transfer_type" ("rsync")
+        - "source" (str): "<source_host.hostname>:<source_path>"
+        - "target" (str): "<target_user>@<target_host.hostname>:<target_path>"
+        - "stats" (dict): parsed rsync statistics (files_transferred, total_size, transfer_rate, speedup)
+        - "dry_run" (bool)
+        - "output" (str): full rsync stdout
+        
+        Raises:
+        - RsyncError if the rsync subprocess exits with a non-zero status; the exception message includes stderr or a snippet of stdout.
         """
         # Build SSH command to connect to source host
         ssh_cmd = self.build_ssh_cmd(source_host)
@@ -144,13 +148,17 @@ class RsyncTransfer(BaseTransfer):
         }
     
     def _parse_stats(self, output: str) -> dict[str, Any]:
-        """Parse rsync output for transfer statistics.
+        """
+        Extract transfer statistics from rsync stdout (the summary produced when rsync is run with --stats).
         
-        Args:
-            output: Rsync command output
-            
-        Returns:
-            Dictionary with transfer statistics
+        Parses common rsync summary lines and returns a dictionary with:
+        - files_transferred (int): number of files copied (from "Number of files transferred:" or "Number of regular files transferred:").
+        - total_size (int): total transferred file size in bytes (from "Total transferred file size:"; commas are accepted).
+        - transfer_rate (str): human-readable transfer rate as reported in the "sent/received" summary (e.g. "12.3 KB/sec"); empty string if not present.
+        - speedup (float): reported speedup value from the "speedup is" line; defaults to 1.0.
+        
+        Parameters:
+            output (str): Full stdout/stderr text from an rsync run (expected to include the --stats summary).
         """
         stats = {
             "files_transferred": 0,

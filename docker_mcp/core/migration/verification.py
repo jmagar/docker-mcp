@@ -23,6 +23,11 @@ class MigrationVerifier:
     """Handles verification of Docker stack migrations."""
     
     def __init__(self):
+        """
+        Initialize the MigrationVerifier instance.
+        
+        Creates and stores a component-scoped logger bound to "migration_verifier" on self.logger.
+        """
         self.logger = logger.bind(component="migration_verifier")
     
     async def create_source_inventory(
@@ -30,14 +35,22 @@ class MigrationVerifier:
         ssh_cmd: list[str],
         volume_paths: list[str],
     ) -> dict[str, Any]:
-        """Create detailed inventory of source data before migration.
+        """
+        Build a detailed inventory of files, directories, sizes, and critical-file checksums for each source volume path.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            volume_paths: List of source volume paths to inventory
-            
+        This asynchronous method runs remote shell commands (via the provided SSH command parts) to collect, per path:
+        - file_count: number of regular files
+        - dir_count: number of directories
+        - total_size: total size in bytes (du -sb)
+        - file_list: newline-sorted list of file paths relative to the provided path
+        - critical_files: mapping of relative file path -> md5 checksum for files matching common database/config patterns
+        
+        Parameters:
+            ssh_cmd (list[str]): Base SSH command parts to execute on the remote host (e.g., ["ssh", "host"]). The method appends shell commands to this list.
+            volume_paths (list[str]): List of absolute source paths to inventory.
+        
         Returns:
-            Dictionary containing complete source inventory
+            dict[str, Any]: Inventory dictionary containing per-path entries under "paths", aggregated totals ("total_files", "total_dirs", "total_size"), a combined "critical_files" map, and a "timestamp".
         """
         inventory = {
             "total_files": 0,
@@ -129,15 +142,43 @@ class MigrationVerifier:
         source_inventory: dict[str, Any],
         target_path: str,
     ) -> dict[str, Any]:
-        """Verify all data was transferred correctly by comparing source inventory to target.
+        """
+        Verify that data at a target path matches a previously created source inventory.
         
-        Args:
-            ssh_cmd: SSH command parts for target host execution
-            source_inventory: Complete inventory created before migration
-            target_path: Full target path where data was extracted
-            
+        Performs remote checks on the target host (using the provided SSH command parts) to:
+        - count files and directories and measure total size under target_path,
+        - collect a relative file listing to determine missing files,
+        - compute checksums for critical files (preferring sha256sum, falling back to md5sum) and compare them to source checksums,
+        - compute file- and size-match percentages and assemble a list of issues.
+        
+        Parameters:
+            ssh_cmd (list[str]): Base SSH command parts to run a shell command on the target host (e.g., ["ssh", "user@host"]). Individual shell commands are appended to this list internally.
+            source_inventory (dict): Inventory produced by create_source_inventory. Expected keys used:
+                - "total_files" (int), "total_dirs" (int), "total_size" (int)
+                - "paths" (mapping) where each path entry may contain "file_list" (iterable of relative file paths)
+                - "critical_files" (mapping of relative path -> checksum) for files that must be checksum-verified.
+            target_path (str): Absolute path on the target host where the migrated data were extracted.
+        
         Returns:
-            Dictionary containing verification results
+            dict: A verification report with the top-level keys:
+                - "data_transfer": {
+                    "success": bool,
+                    "files_expected": int,
+                    "files_found": int,
+                    "dirs_expected": int,
+                    "dirs_found": int,
+                    "size_expected": int,
+                    "size_found": int,
+                    "missing_files": list[str],
+                    "critical_files_verified": dict[str, dict],  # per-file verification details
+                    "file_match_percentage": float,
+                    "size_match_percentage": float
+                  }
+                - "issues": list[str]  # human-readable issue descriptions; empty when success is True
+        
+        Notes:
+            - The function tolerates absence of checksum utilities on the target by attempting sha256sum then md5sum.
+            - Size comparison allows for typical filesystem overhead; the function flags size mismatches when variance exceeds 1%.
         """
         verification = {
             "data_transfer": {
@@ -286,7 +327,11 @@ class MigrationVerifier:
         return verification
     
     async def _inspect_container(self, ssh_cmd: list[str], stack_name: str) -> dict[str, Any] | None:
-        """Run docker inspect and return parsed container info."""
+        """
+        Run `docker inspect` on the remote host and return the parsed container information.
+        
+        This executes the provided SSH command parts with `docker inspect <stack_name>` on the remote side and attempts to parse the first JSON object from the command output. Returns the parsed inspect dict on success. Returns None if the container/stack is not found, the command indicates absence, or the output cannot be parsed as the expected JSON structure.
+        """
         inspect_cmd = ssh_cmd + [f"docker inspect {shlex.quote(stack_name)} 2>/dev/null || echo 'NOT_FOUND'"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -302,7 +347,14 @@ class MigrationVerifier:
             return None
     
     def _collect_mounts(self, container_info: dict[str, Any]) -> list[str]:
-        """Extract actual mount strings from container inspect output."""
+        """
+        Return a list of bind mount mappings from Docker inspect output as "source:destination" strings.
+        
+        Only mounts with Type == "bind" and both Source and Destination present are included.
+        
+        Returns:
+            list[str]: Bind mount mappings formatted as "source:destination".
+        """
         actual_mounts = []
         mounts = container_info.get("Mounts", [])
         for mount in mounts:
@@ -314,7 +366,18 @@ class MigrationVerifier:
         return actual_mounts
     
     async def _check_in_container_access(self, ssh_cmd: list[str], stack_name: str) -> bool:
-        """Check if data is accessible inside the container."""
+        """
+        Check whether the container identified by `stack_name` can list expected data paths via SSH.
+        
+        Attempts to run `ls /data` inside the named container and falls back to `ls /` if `/data` is absent; the commands are executed through the provided `ssh_cmd` command parts. Returns True when the remote `docker exec` command succeeds (exit code 0), otherwise False.
+        
+        Parameters:
+            ssh_cmd (list[str]): SSH command parts to invoke on the remote host (e.g., ['ssh', 'host']).
+            stack_name (str): Container or stack name passed to `docker exec`.
+        
+        Returns:
+            bool: True if the container responded successfully to the list command, False otherwise.
+        """
         test_cmd = ssh_cmd + [f"docker exec {shlex.quote(stack_name)} ls /data 2>/dev/null || docker exec {shlex.quote(stack_name)} ls / 2>/dev/null"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -323,7 +386,20 @@ class MigrationVerifier:
         return result.returncode == 0
     
     async def _collect_startup_errors(self, ssh_cmd: list[str], stack_name: str) -> list[str]:
-        """Collect startup errors from container logs."""
+        """
+        Return up to five startup-related error lines extracted from the container's recent logs.
+        
+        This runs `docker logs <stack_name> --tail 50` on the remote host (using the provided SSH command prefix),
+        filters lines that contain "error" (case-insensitive), and returns at most the first five non-empty matching lines.
+        If no matching lines are found the function returns an empty list.
+        
+        Parameters:
+            ssh_cmd (list[str]): SSH command prefix (as list of argv parts) used to run the remote docker logs command.
+            stack_name (str): Container or stack name passed to `docker logs`.
+        
+        Returns:
+            list[str]: Up to five log lines containing the string "error" (case-insensitive); empty if none found.
+        """
         logs_cmd = ssh_cmd + [f"docker logs {shlex.quote(stack_name)} --tail 50 2>&1 | grep -i error || true"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,

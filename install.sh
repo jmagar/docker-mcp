@@ -393,6 +393,9 @@ find_available_port() {
     return 1
 }
 
+# download_compose_file downloads the Docker Compose YAML to the installation directory, rewrites local file paths, selects an available HTTP port, writes FASTMCP_PORT to the install .env, and exports FASTMCP_PORT.
+# 
+# The downloaded file is written to "${DOCKER_MCP_DIR}/docker-compose.yaml" and "~/.ssh", "./config", and "./data" references are rewritten to the installer SSH, config, and data paths. The function checks whether port 8000 is free and, if occupied, attempts to find an available port in the 8000–8100 range using find_available_port; the chosen port is saved to "${DOCKER_MCP_DIR}/.env" as FASTMCP_PORT and exported for downstream use. If the remote download fails the function exits with status 1.
 download_compose_file() {
     echo -e "${BLUE}Downloading docker-compose.yaml...${NC}"
     echo
@@ -471,6 +474,7 @@ start_services() {
     echo
 }
 
+# print_completion prints the installation completion banner and a concise summary of installed paths, the service URL (uses FASTMCP_PORT or defaults to 8000), and common Docker Compose commands for managing the service.
 print_completion() {
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}Installation Complete!${NC}"
@@ -504,6 +508,7 @@ print_completion() {
     echo
 }
 
+# setup_ssh_with_standalone_script sets up SSH keys and host configuration by first attempting to run a standalone scripts/setup-ssh-keys.sh (invoked with --batch); if the script is missing or fails, it falls back to the embedded generate_ssh_keys, copy_ssh_keys, and generate_hosts_config routines and prints informational status messages.
 setup_ssh_with_standalone_script() {
     echo -e "${BLUE}Setting up SSH keys...${NC}"
     echo
@@ -537,6 +542,7 @@ setup_ssh_with_standalone_script() {
     echo
 }
 
+# main orchestrates the installer flow: it prints the header, verifies prerequisites, creates required directories, sets up SSH keys and hosts (using a standalone script if available or embedded routines), downloads and configures the Docker Compose file, starts the services, and prints the completion summary.
 main() {
     print_header
     check_prerequisites

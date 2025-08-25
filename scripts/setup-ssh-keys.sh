@@ -35,7 +35,7 @@ CUSTOM_KEY=""
 HOST_FILTER=""
 VERBOSE=false
 
-# Functions (matching install.sh style)
+# print_header prints a colored banner header for the script (title and separators) to stdout.
 print_header() {
     echo -e "${BLUE}========================================${NC}"
     echo -e "${BLUE}Docker MCP SSH Key Distribution${NC}"
@@ -43,28 +43,34 @@ print_header() {
     echo
 }
 
+# print_success prints a green checkmark and the given message to stdout.
 print_success() {
     echo -e "${GREEN}✓${NC} $1"
 }
 
+# print_error prints an error message prefixed with a red "✗" and resets terminal color.
 print_error() {
     echo -e "${RED}✗${NC} $1"
 }
 
+# print_warning prints a warning message prefixed with a yellow warning icon and resets terminal color.
 print_warning() {
     echo -e "${YELLOW}⚠${NC} $1"
 }
 
+# print_info prints an informational message prefixed with a blue "ℹ" symbol and resets color; accepts a single string argument to display.
 print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
 }
 
+# print_verbose prints MESSAGE to stdout prefixed with a `[DEBUG]` tag when VERBOSE is true; no output is produced otherwise.
 print_verbose() {
     if [ "$VERBOSE" = true ]; then
         echo -e "${BLUE}[DEBUG]${NC} $1"
     fi
 }
 
+# show_usage displays usage information, supported command-line options, and example invocations for setup-ssh-keys.sh.
 show_usage() {
     cat << 'EOF'
 Usage: setup-ssh-keys.sh [OPTIONS]
@@ -100,6 +106,10 @@ EXAMPLES:
 EOF
 }
 
+# parse_arguments parses command-line options and updates global flags and variables used by the script.
+# Supports: -h|--help, -c|--config <file>, -k|--key <path>, -b|--batch, -d|--dry-run, -v|--verify,
+# -f|--filter <pattern>, -j|--jobs <n>, and --verbose. On `--help` it prints usage and exits; on unknown
+# options it prints an error, shows usage, and exits with non-zero status.
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -148,6 +158,10 @@ parse_arguments() {
     done
 }
 
+# check_prerequisites verifies required CLI tools and environment before proceeding.
+# It ensures `ssh`, `ssh-keygen`, and `ssh-keyscan` are installed (exits with non‑zero status if any are missing),
+# warns if optional utilities (`ssh-copy-id`, `timeout`) are absent, detects GNU `parallel` and sets HAS_PARALLEL=true/false,
+# and prints human-friendly status messages.
 check_prerequisites() {
     echo -e "${BLUE}Checking prerequisites...${NC}"
     echo
@@ -205,6 +219,8 @@ check_prerequisites() {
     echo
 }
 
+# create_directories creates the Docker MCP directory layout (base dir, ssh, config, and data/logs) and reports actions.
+# If the user's ~/.ssh/config exists, it symlinks it into the MCP ssh directory for host resolution. Respects DRY_RUN by only printing intended actions when set.
 create_directories() {
     echo -e "${BLUE}Creating directory structure...${NC}"
     echo
@@ -229,6 +245,7 @@ create_directories() {
     echo
 }
 
+# parse_ssh_config parses the SSH config file, extracts Host blocks (HostName, User, Port), filters out invalid or incomplete entries, applies an optional HOST_FILTER, and populates the DISCOVERED_HOSTS array with entries formatted as `host|effective_hostname|user|port`; returns non-zero if the config file is missing or no valid hosts are found.
 parse_ssh_config() {
     echo -e "${BLUE}Parsing SSH configuration...${NC}"
     echo
@@ -328,6 +345,7 @@ parse_ssh_config() {
     DISCOVERED_HOSTS=("${hosts[@]}")
 }
 
+# is_valid_host returns success (0) if the given host should be considered for SSH key distribution; it filters out wildcard host patterns, localhost variants (localhost, 127.0.0.1, ::1), and common VCS hosts (github.com, gitlab.com, bitbucket.org).
 is_valid_host() {
     local host_name="$1"
     local hostname="$2"
@@ -353,6 +371,7 @@ is_valid_host() {
     return 0
 }
 
+# generate_or_find_key selects or creates the SSH key to use: it prefers a provided CUSTOM_KEY, falls back to an existing Docker MCP key, or (unless in DRY_RUN) generates a new ed25519 key, verifies the public key exists, exports the chosen path as ACTIVE_SSH_KEY, and returns non-zero on failure.
 generate_or_find_key() {
     echo -e "${BLUE}Managing SSH key...${NC}"
     echo
@@ -396,6 +415,7 @@ generate_or_find_key() {
     echo
 }
 
+# scan_host_keys scans SSH host keys for every entry in DISCOVERED_HOSTS and appends them to the user's ~/.ssh/known_hosts to pre-populate host keys (skips actual scanning when DRY_RUN=true). It uses a 10-second timeout per host, respects per-host ports, reports per-host success/failure, and leaves failed hosts to be confirmed interactively during key distribution.
 scan_host_keys() {
     echo -e "${BLUE}Scanning SSH host keys...${NC}"
     echo
@@ -443,6 +463,7 @@ scan_host_keys() {
     echo
 }
 
+# show_distribution_plan displays the SSH key to be distributed, the list of target hosts (formatted as `user@hostname:port`), and the computed number of parallel jobs.
 show_distribution_plan() {
     echo -e "${BLUE}Distribution Plan${NC}"
     echo "=================="
@@ -460,6 +481,7 @@ show_distribution_plan() {
     echo
 }
 
+# confirm_distribution prompts the user to confirm proceeding with SSH key distribution unless BATCH_MODE is true; returns 0 when confirmed or in batch mode, 1 when cancelled.
 confirm_distribution() {
     if [ "$BATCH_MODE" = true ]; then
         print_info "Batch mode enabled - proceeding with key distribution"
@@ -477,6 +499,19 @@ confirm_distribution() {
     return 0
 }
 
+# distribute_keys_parallel distributes the active SSH public key to all discovered hosts, in parallel (GNU parallel if available, otherwise background jobs).
+# 
+# Performs a dry-run when DRY_RUN=true (prints planned actions and exits). For each host it first attempts `ssh-copy-id` and, if unavailable or failing, falls back to appending the public key to the remote `~/.ssh/authorized_keys`. On success each host is recorded for later config generation (SUCCESSFUL_HOSTS). Prints per-host results and a final summary of successes and failures and suggests a manual `ssh-copy-id` command for failures.
+# 
+# Side effects:
+# - Uses ACTIVE_SSH_KEY and its public key (`${ACTIVE_SSH_KEY}.pub`) to install keys on remote hosts.
+# - May create and remove a temporary directory for tracking results.
+# - Exports SUCCESSFUL_HOSTS list of hosts that succeeded.
+# - Emits colored status output to stdout/stderr.
+# 
+# Notes:
+# - Respects PARALLEL_JOBS for concurrency.
+# - Requires network access and valid SSH credentials to perform installations.
 distribute_keys_parallel() {
     echo -e "${BLUE}Distributing SSH keys...${NC}"
     echo

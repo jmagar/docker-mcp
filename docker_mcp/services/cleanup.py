@@ -18,11 +18,23 @@ class CleanupService:
     """Service for Docker cleanup and disk usage operations."""
 
     def __init__(self, config: DockerMCPConfig):
+        """
+        Initialize the CleanupService.
+        
+        Stores the provided DockerMCPConfig and creates a structlog logger used for structured, structured logging within the service.
+        """
         self.config = config
         self.logger = structlog.get_logger()
 
     def _build_ssh_cmd(self, host: DockerHost) -> list[str]:
-        """Build SSH command for a host."""
+        """
+        Build the base SSH command used to run remote Docker commands on a host.
+        
+        Returns a list of command arguments for subprocess/async execution. The command
+        always disables strict host key checking; if the host provides an identity file
+        it is added with -i, and a nondefault port is added with -p. The final element
+        is the target user@hostname.
+        """
         ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
         if host.identity_file:
             ssh_cmd.extend(["-i", host.identity_file])
@@ -32,20 +44,39 @@ class CleanupService:
         return ssh_cmd
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
-        """Validate that a host exists in configuration."""
+        """
+        Check whether a host identifier exists in the configured hosts.
+        
+        Returns a tuple (is_valid, error_message). is_valid is True when the host_id is present in self.config.hosts; error_message is an empty string on success or a short description when not found.
+        """
         if host_id not in self.config.hosts:
             return False, f"Host '{host_id}' not found"
         return True, ""
 
     async def docker_cleanup(self, host_id: str, cleanup_type: str) -> dict[str, Any]:
-        """Perform Docker cleanup operations on a host.
+        """
+        Perform Docker cleanup operations on a configured remote host over SSH.
         
-        Args:
-            host_id: Target Docker host identifier
-            cleanup_type: Type of cleanup (check, safe, moderate, aggressive)
-            
+        This dispatching entry point validates the requested host and runs one of four
+        cleanup strategies determined by `cleanup_type`:
+        
+        - "check": non-destructive analysis that reports potential reclaimable space
+          and recommendations.
+        - "safe": prunes stopped containers, unused networks, and the build cache.
+        - "moderate": performs "safe" actions then prunes unused images.
+        - "aggressive": performs "moderate" actions then prunes unused volumes
+          (may remove persistent data).
+        
+        Parameters:
+            host_id (str): Identifier of the target host as defined in the service config.
+            cleanup_type (str): One of "check", "safe", "moderate", or "aggressive".
+        
         Returns:
-            Cleanup results and statistics
+            dict[str, Any]: A result object containing at minimum a boolean `success`
+            key. On success the payload includes cleanup-specific information (summaries,
+            per-resource results, reclaimed space estimates, and recommendations).
+            On failure (invalid host, invalid cleanup_type, or runtime error) returns
+            {"success": False, "error": "<message>"}.
         """
         try:
             # Validate host
@@ -86,14 +117,28 @@ class CleanupService:
             return {"success": False, "error": str(e)}
 
     async def docker_disk_usage(self, host_id: str, include_details: bool = False) -> dict[str, Any]:
-        """Check Docker disk usage on a host.
+        """
+        Check Docker disk usage on a remote host over SSH and return a structured report.
         
-        Args:
-            host_id: Target Docker host identifier
-            include_details: Include detailed top consumers (default: False for smaller response)
-            
+        Performs `docker system df` on the target host and, if available, `docker system df -v` to collect a summary and optional detailed top-consumer information. The function validates the host id, runs the remote commands via SSH, parses their outputs, analyzes potential reclaimable space, and returns recommendations.
+        
+        Parameters:
+            host_id (str): Identifier of the configured Docker host to query.
+            include_details (bool): If True, include detailed top-consumer data from `docker system df -v` in the response (default False).
+        
         Returns:
-            Disk usage information and statistics
+            dict: A result object with at least the following keys:
+              - success (bool): True on success, False on error.
+              - host_id (str): Echoes the requested host_id on success.
+              - summary (dict): Parsed summary of disk usage (images, containers, volumes, build cache and totals).
+              - cleanup_potential (dict): High-level indicators of available cleanup opportunities.
+              - recommendations (list[str]): Actionable cleanup recommendations.
+              - top_consumers (dict, optional): Detailed top-consumer data when include_details=True.
+              - error (str, optional): Present when success is False and contains an error message.
+        
+        Notes:
+            - Executes remote commands over SSH; failures of the summary command return a structured error.
+            - Exceptions are caught and returned as {"success": False, "error": ...}.
         """
         try:
             # Validate host
@@ -165,7 +210,30 @@ class CleanupService:
             return {"success": False, "error": str(e)}
 
     async def _check_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
-        """Show detailed summary of what would be cleaned without actually cleaning."""
+        """
+        Run a non-destructive analysis that reports what would be cleaned on the target host without performing any cleanup.
+        
+        This coroutine collects comprehensive disk-usage data (including detailed top-consumer information), gathers additional housekeeping details (stopped containers, dangling images, unused networks), and computes estimated space recoverable for three cleanup levels (safe, moderate, aggressive). It returns a structured result summarizing findings, recommended actions, and estimated reclaimable space.
+        
+        Parameters:
+            host: DockerHost
+                Target host object (used to run auxiliary inspection commands).
+            host_id: str
+                Identifier of the host in the service configuration.
+        
+        Returns:
+            dict[str, Any]: A result dictionary with at least the following keys:
+                - success (bool): True on successful analysis.
+                - host_id (str): Echoed host identifier.
+                - cleanup_type (str): Always "check".
+                - summary (dict): Formatted cleanup summary (containers, images, volumes, build cache, networks).
+                - cleanup_levels (dict): Estimated bytes/percentages for safe/moderate/aggressive levels.
+                - total_reclaimable (str): Human-readable total reclaimable space (e.g., "1.2GB").
+                - reclaimable_percentage (float|int): Percentage of total usage that is reclaimable.
+                - recommendations (list[str]): Cleanup recommendations derived from disk usage.
+                - message (str): Human-readable status message.
+                - On failure, returns {"success": False, "error": "<message>"}.
+        """
         
         # Get comprehensive disk usage data
         disk_usage_data = await self.docker_disk_usage(host_id, include_details=True)
@@ -200,7 +268,24 @@ class CleanupService:
         }
 
     async def _safe_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
-        """Perform safe cleanup: containers, networks, build cache."""
+        """
+        Perform a non-destructive "safe" cleanup on the target host.
+        
+        This runs remote Docker prune commands for:
+        - stopped containers (docker container prune -f)
+        - unused networks (docker network prune -f)
+        - builder cache (docker builder prune -f)
+        
+        The function executes each command over SSH, collects each command's result (as returned by _run_cleanup_command), and returns a summary object.
+        
+        Returns:
+            dict: Summary with keys:
+                - success (bool): True when the function completed and results were gathered.
+                - host_id (str): The id of the host the cleanup was run against.
+                - cleanup_type (str): Always "safe".
+                - results (list[dict]): Per-resource results returned from _run_cleanup_command (contains resource_type, success, space_reclaimed, output, etc.).
+                - message (str): Human-readable result message.
+        """
         results = []
         
         # Clean stopped containers
@@ -233,7 +318,16 @@ class CleanupService:
         }
 
     async def _moderate_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
-        """Perform moderate cleanup: safe cleanup + unused images."""
+        """
+        Perform a moderate cleanup on the target host.
+        
+        This runs a safe cleanup sequence (stopped containers, unused networks, build cache) and then prunes unused Docker images
+        (`docker image prune -a -f`) over SSH. The returned dictionary is the safe-cleanup result extended with the images prune
+        result appended to `results`; `cleanup_type` is set to `"moderate"` and `message` updated to describe the completed actions.
+        
+        Returns:
+            dict[str, Any]: Aggregated cleanup result including per-resource results, `cleanup_type`, and a human-readable `message`.
+        """
         # First do safe cleanup
         safe_result = await self._safe_cleanup(host, host_id)
         
@@ -250,7 +344,14 @@ class CleanupService:
         return safe_result
 
     async def _aggressive_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
-        """Perform aggressive cleanup: moderate cleanup + volumes."""
+        """
+        Perform an aggressive cleanup on the target host.
+        
+        This runs the full `moderate` cleanup (stopped containers, unused networks, build cache, and unused images) and then prunes unused Docker volumes on the remote host. The operation is destructive for volume data and may permanently remove data stored in volumes.
+        
+        Returns:
+            A dictionary containing the aggregated cleanup results from the moderate run plus the volumes prune result. The returned structure includes keys such as "host_id", "cleanup_type" (set to "aggressive"), "results" (list of per-resource result objects), and "message".
+        """
         # First do moderate cleanup
         moderate_result = await self._moderate_cleanup(host, host_id)
         
@@ -267,7 +368,23 @@ class CleanupService:
         return moderate_result
 
     async def _run_cleanup_command(self, cmd: list[str], resource_type: str) -> dict[str, Any]:
-        """Run a cleanup command and parse results."""
+        """
+        Execute a cleanup command asynchronously and extract reclaimed disk space.
+        
+        Runs the provided command in a threadpool executor (non-blocking) and parses the subprocess output to determine how much space was reclaimed.
+        
+        Parameters:
+            cmd (list[str]): The command and arguments to execute (e.g., SSH + remote docker prune invocation).
+            resource_type (str): Logical name of the resource being cleaned (e.g., "containers", "images", "volumes").
+        
+        Returns:
+            dict[str, Any]: Result object with keys:
+                - resource_type (str): Echoes the provided resource_type.
+                - success (bool): True if the command exited with code 0, False otherwise.
+                - space_reclaimed (str): Human-readable reclaimed size parsed from output, or "0B" on failure.
+                - output (str): Stripped stdout when successful.
+                - error (str): stderr when the command failed (present only when success is False).
+        """
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: subprocess.run(  # nosec B603
@@ -294,7 +411,30 @@ class CleanupService:
         }
 
     def _parse_disk_usage_summary(self, output: str) -> dict[str, Any]:
-        """Parse docker system df output for summary with calculations."""
+        """
+        Parse the output of `docker system df` and return a structured summary with sizes converted to bytes and aggregated totals.
+        
+        Parses the summary lines for Images, Containers, Local Volumes and Build Cache, extracting counts, reported sizes and reclaimable sizes, converts size strings to byte counts, and computes aggregated totals and a reclaimable-percentage.
+        
+        Parameters:
+            output (str): Raw stdout from `docker system df`.
+        
+        Returns:
+            dict[str, Any]: A dictionary with the following top-level keys:
+                - images: {count, active, size, size_bytes, reclaimable, reclaimable_bytes}
+                - containers: {count, active, size, size_bytes, reclaimable, reclaimable_bytes}
+                - volumes: {count, active, size, size_bytes, reclaimable, reclaimable_bytes}
+                - build_cache: {size, size_bytes, reclaimable, reclaimable_bytes}
+                - totals: {
+                    total_size (str),
+                    total_size_bytes (int),
+                    total_reclaimable (str),
+                    total_reclaimable_bytes (int),
+                    reclaimable_percentage (int)  # percent of total size that is reclaimable
+                }
+        
+        The function returns zeroed/empty structures when the input is empty or unparseable.
+        """
         lines = output.strip().split('\n')
         if len(lines) < 2:
             return {
@@ -437,7 +577,24 @@ class CleanupService:
         return summary
 
     def _parse_disk_usage_detailed(self, output: str) -> dict[str, Any]:
-        """Parse docker system df -v output for TOP space consumers only."""
+        """
+        Parse the output of `docker system df -v` and extract top space consumers and basic container stats.
+        
+        Accepts the raw multiline output from `docker system df -v` and returns a structured summary focused on the largest images and volumes, container counts/sizes, and simple cleanup candidates. The parser tolerates missing or malformed lines and returns zeroed defaults when input is empty or unparsable.
+        
+        Returns:
+            dict: {
+                "top_images": list[{"name": str, "size": str, "size_bytes": int}],   # up to 5 largest images
+                "top_volumes": list[{"name": str, "size": str, "size_bytes": int}],  # up to 5 largest volumes
+                "container_stats": {
+                    "running": int,            # number of containers with status indicating running
+                    "stopped": int,            # number of non-running containers
+                    "total_size": str,         # human-readable total size of listed containers
+                    "total_size_bytes": int    # total size in bytes
+                },
+                "cleanup_candidates": list[{"type": "container", "name": str, "size": str}]  # stopped containers considered for cleanup
+            }
+        """
         result = {
             "top_images": [],
             "top_volumes": [],
@@ -573,7 +730,21 @@ class CleanupService:
         return result
 
     def _analyze_cleanup_potential(self, df_output: str) -> dict[str, str]:
-        """Analyze potential cleanup from docker system df output."""
+        """
+        Estimate which Docker cleanup categories are likely available based on the text output of `docker system df`.
+        
+        This performs a lightweight text scan (not a full parse) of the `docker system df` output to flag categories that appear to contain reclaimable resources.
+        
+        Parameters:
+            df_output (str): Raw stdout from `docker system df` (or similar) to inspect.
+        
+        Returns:
+            dict[str, str]: A mapping of cleanup categories to status strings. Keys:
+                - "stopped_containers": "Available" if container section is present, otherwise "Unknown".
+                - "unused_networks": currently always "Unknown" (placeholder for future detection).
+                - "build_cache": "Available" if a Build Cache section is present and the output does not contain "0B".
+                - "unused_images": currently always "Unknown" (placeholder for future detection).
+        """
         # Parse the output to estimate what could be cleaned
         potential = {
             "stopped_containers": "Unknown",
@@ -591,7 +762,17 @@ class CleanupService:
         return potential
 
     def _parse_cleanup_output(self, output: str) -> str:
-        """Parse cleanup command output to extract space reclaimed."""
+        """
+        Extract the amount of space reclaimed from a Docker cleanup command's output.
+        
+        Checks common textual patterns (case-insensitive) such as
+        "Total reclaimed space: <value>", "freed <value>", and "reclaimed: <value>"
+        and returns the first matched size token (e.g., "1.2GB", "45MB").
+        If no known pattern is found, returns "Unknown".
+        
+        Returns:
+            str: The reclaimed space value parsed from output or "Unknown" if not found.
+        """
         # Look for patterns like "Total reclaimed space: 1.2GB"
         patterns = [
             r"Total reclaimed space:\s+(\S+)",
@@ -607,7 +788,17 @@ class CleanupService:
         return "Unknown"
 
     def _format_size(self, size_bytes: int) -> str:
-        """Convert bytes to human-readable size format."""
+        """
+        Return a human-readable representation of a byte count.
+        
+        Converts `size_bytes` into units B, KB, MB, GB, or TB. Returns "0B" for 0. For values less than 1 KB the result is an integer number of bytes (e.g., "512B"); for KB and larger the value is formatted with one decimal place (e.g., "1.2MB").
+        
+        Parameters:
+            size_bytes (int): Number of bytes (expected non-negative).
+        
+        Returns:
+            str: Human-readable size string with unit suffix.
+        """
         if size_bytes == 0:
             return "0B"
         
@@ -625,7 +816,19 @@ class CleanupService:
             return f"{size:.1f}{units[unit_index]}"
 
     def _parse_docker_size(self, size_str: str) -> int:
-        """Convert Docker size string (e.g., '1.2GB', '980.2MB (2%)') to bytes."""
+        """
+        Parse a Docker-formatted size string and return its value in bytes.
+        
+        Accepts values like "1.2GB", "345MB", "2.1kB", or "980.2MB (2%)". The function is case-insensitive,
+        automatically strips trailing parenthetical percentages, and supports units B, KB, MB, GB, and TB.
+        Empty strings or "0B" yield 0. If the input cannot be parsed, the function returns 0.
+        
+        Parameters:
+            size_str (str): Docker size string to parse.
+        
+        Returns:
+            int: Size in bytes (rounded down to the nearest whole byte) or 0 for unparseable/empty values.
+        """
         if not size_str or size_str == "0B":
             return 0
         
@@ -655,7 +858,23 @@ class CleanupService:
         return int(value * multipliers.get(unit, 1))
 
     def _generate_cleanup_recommendations(self, summary: dict, detailed: dict) -> list[str]:
-        """Generate actionable cleanup recommendations based on disk usage."""
+        """
+        Build a prioritized list of human-readable cleanup recommendations based on parsed Docker disk-usage data.
+        
+        Given a disk-usage summary and optional detailed breakdown, returns actionable suggestions (including CLI commands and warnings) when reclaimable space or cleanup candidates exceed internal thresholds. Recommendations may include safe, moderate, and — when volumes are present — aggressive actions; volume-related recommendations include a caution about possible data loss.
+        
+        Parameters:
+            summary (dict): Structured summary from _parse_disk_usage_summary containing keys like
+                "containers", "images", "volumes", "build_cache", and "totals". Numeric byte fields
+                (e.g., "reclaimable_bytes", "size_bytes") and human-readable size strings (e.g., "reclaimable", "size")
+                are used to determine thresholds.
+            detailed (dict): Optional detailed output (from _parse_disk_usage_detailed) containing lists such as
+                "cleanup_candidates" and top consumers to influence recommendations.
+        
+        Returns:
+            list[str]: Ordered list of recommendation lines. If no actionable opportunities are found, returns
+            a single message indicating the system is relatively clean with the total Docker usage.
+        """
         recommendations = []
         
         # Check for reclaimable space in each category
@@ -714,7 +933,39 @@ class CleanupService:
         return recommendations
 
     def _calculate_cleanup_levels(self, summary: dict) -> dict[str, Any]:
-        """Calculate cumulative space that each cleanup level would free up."""
+        """
+        Compute estimated space reclaimed at safe, moderate, and aggressive cleanup levels.
+        
+        Detailed behavior:
+        - Reads reclaimable byte counts from the provided `summary` for containers, build cache,
+          images, and volumes and computes cumulative totals for three cleanup tiers:
+          - safe: stopped containers + build cache (networks are count-based and not sized)
+          - moderate: safe + unused images
+          - aggressive: moderate + unused volumes
+        - Also computes each tier's percentage of the reported total disk usage and formats
+          human-readable size strings via self._format_size.
+        
+        Parameters:
+            summary (dict): Docker disk-usage summary produced by _parse_disk_usage_summary.
+                Expected keys used:
+                - "containers": {"reclaimable_bytes": int}
+                - "build_cache": {"reclaimable_bytes": int}
+                - "images": {"reclaimable_bytes": int}
+                - "volumes": {"reclaimable_bytes": int}
+                - "totals": {"total_size_bytes": int}
+        
+        Returns:
+            dict[str, Any]: A mapping with keys "safe", "moderate", and "aggressive". Each entry
+            contains:
+              - size (str): human-readable total reclaimable size for the tier
+              - size_bytes (int): total reclaimable bytes for the tier
+              - percentage (int): integer percent of the reported total size
+              - description (str): short description of what the tier includes
+            Additional keys:
+              - components (for "safe"): per-component formatted sizes and a note for networks
+              - additional_space (for "moderate" and "aggressive"): formatted size contributed by images/volumes
+              - warning (for "aggressive"): explicit data-loss warning for volume removal
+        """
         # Extract byte values from summary
         containers_bytes = summary.get("containers", {}).get("reclaimable_bytes", 0)
         build_cache_bytes = summary.get("build_cache", {}).get("reclaimable_bytes", 0)
@@ -764,7 +1015,24 @@ class CleanupService:
         }
 
     async def _get_cleanup_details(self, host: DockerHost, host_id: str) -> dict[str, Any]:
-        """Get specific cleanup details beyond disk usage."""
+        """
+        Retrieve additional, non-destructive cleanup details from the target host.
+        
+        Performs remote Docker queries over SSH to collect:
+        - stopped containers (names and count; names truncated to first 5),
+        - unused networks (names and count; names truncated to first 5),
+        - dangling images (count).
+        
+        Parameters:
+            host_id (str): Identifier of the host in the service configuration — used for logging/context.
+        
+        Returns:
+            dict[str, Any]: A details dictionary with keys:
+                - "stopped_containers": {"count": int, "names": list[str]}
+                - "unused_networks": {"count": int, "names": list[str]}
+                - "dangling_images": {"count": int, "size": str}
+            Fields default to zero/empty values when queries fail or return nothing. Exceptions are caught and logged; the function returns whatever partial data was collected.
+        """
         details = {
             "stopped_containers": {"count": 0, "names": []},
             "unused_networks": {"count": 0, "names": []},
@@ -827,7 +1095,35 @@ class CleanupService:
         return details
 
     def _format_cleanup_summary(self, summary: dict, cleanup_details: dict) -> dict[str, Any]:
-        """Format a concise cleanup summary."""
+        """
+        Builds a concise, human-friendly cleanup summary from parsed disk-usage and collected cleanup details.
+        
+        Parameters:
+            summary (dict): Parsed output from _parse_disk_usage_summary containing sections for images, containers, volumes, and build_cache (counts, sizes, reclaimable values).
+            cleanup_details (dict): Additional details gathered from the host (e.g., stopped_containers{name list/count}, unused_networks{name list/count}, dangling_images{count}).
+        
+        Returns:
+            dict: A summary dictionary with the following structure:
+                - containers:
+                    - stopped (int): count of stopped containers
+                    - reclaimable_space (str): human-readable reclaimable size for containers
+                    - example_names (list[str]): example stopped container names
+                - images:
+                    - unused (int): estimated count of unused images (count - active)
+                    - dangling (int): count of dangling images
+                    - reclaimable_space (str): human-readable reclaimable size for images
+                - networks:
+                    - unused (int): count of unused networks
+                    - example_names (list[str]): example unused network names
+                - build_cache:
+                    - size (str): total build cache size
+                    - reclaimable_space (str): reclaimable portion of build cache
+                    - fully_reclaimable (bool): whether build cache is considered fully reclaimable (always true here)
+                - volumes:
+                    - unused (int): estimated count of unused volumes (count - active)
+                    - reclaimable_space (str): human-readable reclaimable size for volumes
+                    - warning (str): user-facing warning about volume data loss risk
+        """
         formatted = {
             "containers": {
                 "stopped": cleanup_details["stopped_containers"]["count"],

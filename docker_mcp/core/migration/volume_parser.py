@@ -22,20 +22,27 @@ class VolumeParser:
     """Parser for Docker Compose volume configurations."""
     
     def __init__(self):
+        """
+        Initialize a VolumeParser instance and bind a logger scoped to the "volume_parser" component.
+        
+        Sets self.logger to a context-bound logger instance used for component-specific logging within the class.
+        """
         self.logger = logger.bind(component="volume_parser")
     
     async def parse_compose_volumes(self, compose_content: str, source_appdata_path: str = None) -> dict[str, Any]:
-        """Parse Docker Compose file to extract volume information.
+        """
+        Parse a Docker Compose YAML string and extract named volumes, bind mounts, and top-level volume definitions.
         
-        Args:
-            compose_content: Docker Compose YAML content
-            source_appdata_path: Source host's appdata path from hosts.yml for expanding ${APPDATA_PATH}
-            
+        If `source_appdata_path` is provided, occurrences of `${APPDATA_PATH}` in volume strings are expanded before parsing.
+        
         Returns:
-            Dictionary with volume information:
-            - named_volumes: List of named volume names
-            - bind_mounts: List of bind mount paths
-            - volume_definitions: Volume configuration from compose
+            A dict with keys:
+              - "named_volumes" (list[str]): unique named volume names referenced by services.
+              - "bind_mounts" (list[str]): unique host paths used as bind mounts.
+              - "volume_definitions" (dict): the top-level `volumes:` mapping from the compose content.
+        
+        Raises:
+            VolumeParsingError: If the YAML cannot be parsed or volume extraction fails.
         """
         try:
             compose_data = yaml.safe_load(compose_content)
@@ -89,14 +96,19 @@ class VolumeParser:
             raise VolumeParsingError(f"Error extracting volumes: {e}")
     
     def _parse_volume_string(self, volume_str: str, source_appdata_path: str = None) -> dict[str, str]:
-        """Parse Docker volume string format with environment variable expansion.
+        """
+        Parse a Docker Compose volume string and classify it as a named volume or a bind mount.
         
-        Args:
-            volume_str: Volume string like "data:/app/data" or "/host/path:/container/path" or "${APPDATA_PATH}/service:/data"
-            source_appdata_path: Source host's appdata path from hosts.yml for expanding ${APPDATA_PATH}
-            
-        Returns:
-            Dictionary with volume type and details
+        If `source_appdata_path` is provided, `${APPDATA_PATH}` occurrences in the input are expanded first.
+        The volume string is split into up to three parts (source/name, destination, mode). Behavior:
+        - If the string has no ":" it is treated as a named volume with an empty destination.
+        - If the first part looks like a host path (starts with "/", "./", or "~") it is treated as a bind mount.
+        - Otherwise it is treated as a named volume.
+        
+        Returns a dict describing the volume. Keys:
+        - type: "named" or "bind"
+        - For named volumes: name, destination (may be ""), mode (defaults to "rw"), original (original input string)
+        - For bind mounts: source, destination (may be ""), mode (defaults to "rw"), original (original input string)
         """
         # Expand environment variables using host configuration
         expanded_volume_str = volume_str
@@ -181,16 +193,25 @@ class VolumeParser:
         new_base_path: str,
         target_appdata_path: str = None,
     ) -> str:
-        """Update compose file paths for target host.
+        """
+        Update Docker Compose content to point volume paths at a new host/base location.
         
-        Args:
-            compose_content: Original compose file content
-            old_paths: Mapping of old volume paths
-            new_base_path: New base path for volumes on target
-            target_appdata_path: Target host's appdata path for environment variable replacement
-            
+        Performs two text-based transformations:
+        1. If target_appdata_path is provided, replaces all occurrences of "${APPDATA_PATH}" with that path.
+        2. For each value in old_paths, replaces literal occurrences of that old path with a new path built by joining new_base_path and the old path's last path component (the segment after the final '/'). If the old path has no segments, "data" is used as the relative name.
+        
+        Parameters:
+            compose_content (str): Original Compose YAML/text content.
+            old_paths (dict[str, str]): Mapping of identifiers to old absolute bind paths to be replaced (only the values are used).
+            new_base_path (str): Base directory on the target host to which volume data should be migrated.
+            target_appdata_path (str, optional): If provided, replaces `${APPDATA_PATH}` occurrences with this value.
+        
         Returns:
-            Updated compose file content
+            str: The updated compose content with replacements applied.
+        
+        Notes:
+            - Replacements are plain string substitutions; this function does not parse or validate YAML structure.
+            - The function uses the last path component of each old path to construct the new path (e.g., "/var/lib/foo" -> "{new_base_path}/foo").
         """
         updated_content = compose_content
         
@@ -226,16 +247,25 @@ class VolumeParser:
         new_base_path: str,
         target_appdata_path: str = None,
     ) -> str:
-        """Update compose file paths for target host.
+        """
+        Update Docker Compose content to point volume paths at a new host/base location.
         
-        Args:
-            compose_content: Original compose file content
-            old_paths: Mapping of old volume paths
-            new_base_path: New base path for volumes on target
-            target_appdata_path: Target host's appdata path for environment variable replacement
-            
+        Performs two text-based transformations:
+        1. If target_appdata_path is provided, replaces all occurrences of "${APPDATA_PATH}" with that path.
+        2. For each value in old_paths, replaces literal occurrences of that old path with a new path built by joining new_base_path and the old path's last path component (the segment after the final '/'). If the old path has no segments, "data" is used as the relative name.
+        
+        Parameters:
+            compose_content (str): Original Compose YAML/text content.
+            old_paths (dict[str, str]): Mapping of identifiers to old absolute bind paths to be replaced (only the values are used).
+            new_base_path (str): Base directory on the target host to which volume data should be migrated.
+            target_appdata_path (str, optional): If provided, replaces `${APPDATA_PATH}` occurrences with this value.
+        
         Returns:
-            Updated compose file content
+            str: The updated compose content with replacements applied.
+        
+        Notes:
+            - Replacements are plain string substitutions; this function does not parse or validate YAML structure.
+            - The function uses the last path component of each old path to construct the new path (e.g., "/var/lib/foo" -> "{new_base_path}/foo").
         """
         updated_content = compose_content
         

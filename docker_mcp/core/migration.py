@@ -24,6 +24,11 @@ class MigrationManager:
     """Orchestrates Docker stack migrations between hosts."""
     
     def __init__(self):
+        """
+        Initialize the MigrationManager.
+        
+        Binds a component-scoped logger ("migration_manager") and constructs the transfer helpers used by migration workflows: ArchiveUtils, RsyncTransfer, and ZFSTransfer.
+        """
         self.logger = logger.bind(component="migration_manager")
         
         # Initialize transfer methods
@@ -32,17 +37,24 @@ class MigrationManager:
         self.zfs_transfer = ZFSTransfer()
     
     async def parse_compose_volumes(self, compose_content: str, source_appdata_path: str = None) -> dict[str, Any]:
-        """Parse Docker Compose file to extract volume information.
+        """
+        Parse a Docker Compose YAML string and extract volume information.
         
-        Args:
-            compose_content: Docker Compose YAML content
-            source_appdata_path: Source host's appdata path from hosts.yml for expanding ${APPDATA_PATH}
-            
+        If present, top-level `volumes` definitions are captured and service-level volumes are analyzed. Service volumes may be specified as strings (e.g. "host_path:container_path:mode") or dictionary objects; string-style bind mounts will have `${APPDATA_PATH}` expanded using `source_appdata_path` before classification.
+        
+        Parameters:
+            compose_content (str): Docker Compose YAML content.
+            source_appdata_path (str | None): Optional path to expand `${APPDATA_PATH}` in volume strings.
+        
         Returns:
-            Dictionary with volume information:
-            - named_volumes: List of named volume names
-            - bind_mounts: List of bind mount paths
-            - volume_definitions: Volume configuration from compose
+            dict[str, Any]: {
+                "named_volumes": list[str],        # unique named volume names referenced by services
+                "bind_mounts": list[str],          # unique host paths used as bind mounts
+                "volume_definitions": dict         # top-level `volumes` section from the compose file (may be empty)
+            }
+        
+        Raises:
+            MigrationError: If the YAML cannot be parsed or another extraction error occurs.
         """
         try:
             compose_data = yaml.safe_load(compose_content)
@@ -96,14 +108,35 @@ class MigrationManager:
             raise MigrationError(f"Error extracting volumes: {e}")
     
     def _parse_volume_string(self, volume_str: str, source_appdata_path: str = None) -> dict[str, str]:
-        """Parse Docker volume string format with environment variable expansion.
+        """
+        Parse a single Docker volume specification string and return a normalized descriptor.
         
-        Args:
-            volume_str: Volume string like "data:/app/data" or "/host/path:/container/path" or "${APPDATA_PATH}/service:/data"
-            source_appdata_path: Source host's appdata path from hosts.yml for expanding ${APPDATA_PATH}
-            
+        Expands the `${APPDATA_PATH}` token using source_appdata_path if provided, then splits
+        the volume string on ":" to classify it as a bind mount (host path) or a named Docker volume.
+        
+        Parameters:
+            volume_str (str): Volume specification (e.g. "data:/app/data", "/host/path:/container/path",
+                or "${APPDATA_PATH}/service:/data").
+            source_appdata_path (str, optional): If provided, used to replace `${APPDATA_PATH}` before parsing.
+        
         Returns:
-            Dictionary with volume type and details
+            dict: Descriptor with keys depending on volume type:
+                - For bind mounts:
+                    {
+                        "type": "bind",
+                        "source": "<host_path>",
+                        "destination": "<container_path>",
+                        "mode": "<mode>" (defaults to "rw"),
+                        "original": "<original_volume_str>"
+                    }
+                - For named volumes:
+                    {
+                        "type": "named",
+                        "name": "<volume_name>",
+                        "destination": "<container_path>",
+                        "mode": "<mode>" (defaults to "rw")
+                    }
+                - If only a single token is provided, returns a named-volume descriptor with an empty destination.
         """
         # Expand environment variables using host configuration
         expanded_volume_str = volume_str
@@ -292,16 +325,22 @@ class MigrationManager:
         new_base_path: str,
         target_appdata_path: str = None,
     ) -> str:
-        """Update compose file paths for target host.
+        """
+        Update a Docker Compose file's volume paths for the target host.
         
-        Args:
-            compose_content: Original compose file content
-            old_paths: Mapping of old volume paths
-            new_base_path: New base path for volumes on target
-            target_appdata_path: Target host's appdata path for environment variable replacement
-            
+        Replaces occurrences of the `${APPDATA_PATH}` variable with the provided
+        target_appdata_path (if given), then updates any literal paths found in
+        old_paths to point under new_base_path by taking the last path component
+        of each old path (e.g., `/opt/app/data` -> `{new_base_path}/data`).
+        
+        Parameters:
+            compose_content (str): Original compose YAML content.
+            old_paths (dict[str, str]): Mapping of identifiers to old absolute paths to be replaced.
+            new_base_path (str): Base directory on the target host where volumes should be placed.
+            target_appdata_path (str, optional): If provided, replaces `${APPDATA_PATH}` occurrences.
+        
         Returns:
-            Updated compose file content
+            str: The updated compose content with substituted paths.
         """
         updated_content = compose_content
         
@@ -335,14 +374,17 @@ class MigrationManager:
         source_host: DockerHost,
         target_host: DockerHost
     ) -> tuple[str, Any]:
-        """Choose the optimal transfer method based on host capabilities.
+        """
+        Selects the most suitable data transfer method between two hosts.
         
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            
+        If both hosts advertise ZFS capability and have a non-empty `zfs_dataset`, this method validates ZFS requirements on each host; if both validations succeed it returns the ZFS transfer implementation. Otherwise it falls back to the rsync transfer implementation.
+        
+        Parameters:
+            source_host: Source host descriptor; ZFS is preferred when `zfs_capable` is true and `zfs_dataset` is set.
+            target_host: Target host descriptor; ZFS is preferred when `zfs_capable` is true and `zfs_dataset` is set.
+        
         Returns:
-            Tuple of (transfer_type: str, transfer_instance)
+            A tuple (transfer_type, transfer_instance) where `transfer_type` is either `"zfs"` or `"rsync"` and `transfer_instance` is the corresponding transfer helper object.
         """
         # Check if both hosts have ZFS capability configured
         if (source_host.zfs_capable and target_host.zfs_capable and 
@@ -365,14 +407,28 @@ class MigrationManager:
         ssh_cmd: list[str],
         volume_paths: list[str],
     ) -> dict[str, Any]:
-        """Create detailed inventory of source data before migration.
+        """
+        Create a detailed inventory of files, directories, size, and checksums for each source volume path by running remote shell commands over the provided SSH command.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            volume_paths: List of source volume paths to inventory
-            
+        For each path in volume_paths this coroutine collects:
+        - file_count: number of regular files
+        - dir_count: number of directories
+        - total_size: size in bytes (du -sb)
+        - file_list: newline-sorted list of files with paths relative to the volume path
+        - critical_files: mapping of relative file path -> md5 checksum for files matching patterns (*.db, *.sqlite*, config.*, *.conf)
+        
+        The returned inventory also contains aggregated totals (total_files, total_dirs, total_size), a merged critical_files map, per-path details under "paths", and a "timestamp" (epoch seconds) when the inventory was created.
+        
+        Parameters:
+            ssh_cmd (list[str]): Base SSH command (split into argv parts) used to execute remote shell commands; the function appends remote commands to this list.
+            volume_paths (list[str]): List of absolute source filesystem paths on the remote host to include in the inventory.
+        
         Returns:
-            Dictionary containing complete source inventory
+            dict[str, Any]: Inventory dictionary with keys "total_files", "total_dirs", "total_size", "paths", "critical_files", and "timestamp".
+        
+        Notes:
+        - If a remote command fails for a path, counts for that path default to zero or empty lists as appropriate; the function does not raise on remote command non-zero exit codes.
+        - Critical file checksums are computed with md5sum and stored with paths relative to the scanned volume path.
         """
         inventory = {
             "total_files": 0,
@@ -465,16 +521,33 @@ class MigrationManager:
         target_appdata: str,
         stack_name: str,
     ) -> dict[str, Any]:
-        """Verify all data was transferred correctly by comparing source inventory to target.
+        """
+        Compare a pre-migration source inventory with the target host data to verify transfer completeness.
         
-        Args:
-            ssh_cmd: SSH command parts for target host execution
-            source_inventory: Complete inventory created before migration
-            target_appdata: Target appdata path
-            stack_name: Stack name for path calculation
-            
+        Performs file count, directory count, total size, and file-list comparisons for the migrated stack path (computed as f"{target_appdata}/{stack_name}"), and verifies checksums for critical files recorded in the source inventory. Allows ~1% size variance for filesystem overhead. Populates a verification dictionary with match percentages, missing files, per-critical-file verification results, and a list of human-readable issues.
+        
+        Parameters:
+            ssh_cmd (list[str]): Base SSH command parts to execute remote commands on the target host.
+            source_inventory (dict): Inventory produced by create_source_inventory; must include totals, per-path file lists, and `critical_files` mapping of relative path -> md5 checksum.
+            target_appdata (str): Base appdata path on the target host.
+            stack_name (str): Stack name used to derive the target path under target_appdata.
+        
         Returns:
-            Dictionary containing verification results
+            dict: Verification report with at least the keys:
+              - data_transfer: {
+                  success (bool),
+                  files_expected (int),
+                  files_found (int),
+                  dirs_expected (int),
+                  dirs_found (int),
+                  size_expected (int),
+                  size_found (int),
+                  missing_files (list[str]),
+                  critical_files_verified (dict[str, dict]),
+                  file_match_percentage (float),
+                  size_match_percentage (float),
+                }
+              - issues (list[str]): List of detected problems (file/size mismatches, missing files, failed critical verifications).
         """
         verification = {
             "data_transfer": {
@@ -623,16 +696,28 @@ class MigrationManager:
         expected_appdata_path: str,
         expected_volumes: list[str],
     ) -> dict[str, Any]:
-        """Verify container is properly integrated with migrated data.
+        """
+        Verify that a deployed container from the given stack is correctly integrated with migrated application data on the target host.
         
-        Args:
-            ssh_cmd: SSH command parts for target host execution  
-            stack_name: Stack/container name to check
-            expected_appdata_path: Expected appdata path on target
-            expected_volumes: List of expected volume mount strings
-            
+        Performs a remote inspection and a series of checks to determine:
+        - whether the container exists, is running, and is healthy;
+        - whether bind mounts match the expected volume mappings (allowing matches where the destination is equal and the source contains the expected appdata path);
+        - whether data inside the container is accessible (by attempting a simple directory listing);
+        - whether recent startup logs contain error lines.
+        
+        Parameters:
+            stack_name (str): Docker container name (typically the Compose service name or stack container identifier) to inspect.
+            expected_appdata_path (str): Expected base appdata path on the target host used to validate mount source locations.
+            expected_volumes (list[str]): Expected bind mount specifications in the form "source:destination" to verify presence.
+        
+        Note: The function executes Docker commands on the target host via the provided SSH command (ssh_cmd) and returns a structured verification report rather than raising on verification failures.
+        
         Returns:
-            Dictionary containing container integration verification results
+            dict[str, Any]: Verification report with keys:
+              - "container_integration": dict with flags and details (success, container_exists, container_running,
+                container_healthy, mount_paths_correct, data_accessible, expected_mounts, actual_mounts,
+                health_status, startup_errors).
+              - "issues": list of human-readable issue strings found during verification.
         """
         verification = {
             "container_integration": {
@@ -778,18 +863,19 @@ class MigrationManager:
         stack_name: str,
         dry_run: bool = False
     ) -> dict[str, Any]:
-        """Transfer data between hosts using the optimal method.
+        """
+        Transfer application data from a source host to a target host using the best available method (ZFS send/receive or rsync/archive).
         
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            source_paths: List of paths to transfer from source
-            target_path: Target path on destination
-            stack_name: Stack name for organization
-            dry_run: Whether this is a dry run
-            
+        If both hosts support ZFS dataset transfers this will perform a ZFS dataset transfer; otherwise it creates an archive on the source, transfers it to the target and extracts it. Archives created on the source and temporary archives on the target are removed after transfer (success or failure). If no source_paths are provided the function returns immediately with success.
+        
+        Parameters:
+            source_paths (list[str]): Filesystem paths on the source to include in the transfer.
+            target_path (str): Destination directory on the target where data will be extracted (used by rsync/archive path).
+            stack_name (str): Logical name used to build temporary archive filenames on both hosts.
+            dry_run (bool): If True and rsync is selected, do not perform transfer; returns a successful dry-run result.
+        
         Returns:
-            Transfer result dictionary
+            dict: Result object with at minimum a "success" boolean and optional keys such as "message" and "transfer_type".
         """
         if not source_paths:
             return {"success": True, "message": "No data to transfer", "transfer_type": "none"}

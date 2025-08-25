@@ -51,7 +51,17 @@ except ImportError:
 
 
 def get_data_dir() -> Path:
-    """Get data directory based on environment."""
+    """
+    Return the filesystem path used for storing runtime data.
+    
+    Priority:
+    - If the FASTMCP_DATA_DIR environment variable is set, its value is returned.
+    - Else if DOCKER_CONTAINER is truthy ("1","true","yes","on"), returns Path('/app/data').
+    - Otherwise returns the local development path Path.home() / '.docker-mcp' / 'data'.
+    
+    Returns:
+        Path: The resolved data directory path.
+    """
     # Check for explicit data directory override first
     if fastmcp_data_dir := os.getenv("FASTMCP_DATA_DIR"):
         return Path(fastmcp_data_dir)
@@ -66,7 +76,17 @@ def get_data_dir() -> Path:
 
 
 def get_config_dir() -> Path:
-    """Get config directory based on environment."""
+    """
+    Return the configuration directory Path for the running environment.
+    
+    Checks for the following, in order:
+    - If the `FASTMCP_CONFIG_DIR` environment variable is set, its value is returned as a Path.
+    - If `DOCKER_CONTAINER` is set to a truthy value ("1", "true", "yes", "on"), returns Path("/app/config").
+    - Otherwise returns the local project config directory Path("config").
+    
+    Returns:
+        Path: Resolved configuration directory to use.
+    """
     # Check for explicit config directory override first
     if fastmcp_config_dir := os.getenv("FASTMCP_CONFIG_DIR"):
         return Path(fastmcp_config_dir)
@@ -84,6 +104,15 @@ class DockerMCPServer:
     """FastMCP server for Docker management via Docker contexts."""
 
     def __init__(self, config: DockerMCPConfig, config_path: str | None = None):
+        """
+        Initialize the DockerMCPServer and its core runtime components.
+        
+        Creates and stores the provided server configuration and resolves the hosts configuration path (uses the explicit `config_path` argument, otherwise the `DOCKER_HOSTS_CONFIG` environment variable, falling back to "config/hosts.yml"). Sets up the server logger, context manager, service layer (host, container, stack, config, cleanup, schedule), and log utilities. Initializes and configures the HotReloadManager to watch the resolved hosts config path. The FastMCP application instance is not created or started here (self.app remains None).
+        
+        Parameters:
+            config (DockerMCPConfig): Server configuration object.
+            config_path (str | None): Optional explicit path to the hosts configuration file; if omitted, the environment variable `DOCKER_HOSTS_CONFIG` or the default `"config/hosts.yml"` is used.
+        """
         self.config = config
         self._config_path: str = config_path or os.getenv("DOCKER_HOSTS_CONFIG") or "config/hosts.yml"
         
@@ -192,14 +221,27 @@ class DockerMCPServer:
         schedule_time: Annotated[Optional[str], Field(default=None, description="Time to run cleanup (e.g., '02:00') **(used by: schedule add)**")] = None,
         schedule_id: Annotated[Optional[str], Field(default=None, description="Schedule identifier for management **(used by: schedule remove/enable/disable)**")] = None,
     ) -> dict[str, Any]:
-        """Consolidated Docker hosts management tool.
+        """
+        Consolidated management tool for Docker hosts — perform listing, adding, port queries, compose path updates, SSH import, cleanup, disk usage, and schedule operations.
         
-        Actions:
-        - list: List all configured Docker hosts  
-        - add: Add a new Docker host (requires: host_id, ssh_host, ssh_user; optional: ssh_port, ssh_key_path, description, tags, compose_path, enabled)
-        - ports: List port mappings for a host (requires: host_id)
-        - compose_path: Update host compose path (requires: host_id, compose_path)
-        - import_ssh: Import hosts from SSH config
+        This async tool routes the requested `action` to the appropriate host-related handler and performs per-action validation. Supported actions and required fields:
+        - list: Return all configured hosts.
+        - add: Add a host. Requires `host_id`, `ssh_host`, `ssh_user`. Optional: `ssh_port`, `ssh_key_path`, `description`, `tags`, `compose_path`, `enabled`, `test_connection`, `auto_confirm`.
+        - ports: List port mappings for a host. Requires `host_id`. Optional: `include_stopped`.
+        - compose_path: Update a host's compose path. Requires `host_id`, `compose_path`.
+        - import_ssh: Import hosts from an SSH config file. Optional: `ssh_config_path`, `selected_hosts` (comma-separated), `compose_path_overrides`, `auto_confirm`.
+        - cleanup: Run cleanup on a host. Requires `host_id`, `cleanup_type` (one of `check`, `safe`, `moderate`, `aggressive`).
+        - disk_usage: Get disk usage info. Requires `host_id`.
+        - schedule: Manage scheduled cleanup jobs. Requires `schedule_action` (one of `add`, `remove`, `list`, `enable`, `disable`). For `add`, `schedule_frequency` and `schedule_time` are relevant; `schedule_id` is used for remove/enable/disable.
+        
+        Notes:
+        - `tags` and `compose_path_overrides` default to empty list/dict when omitted.
+        - Action validation is performed; invalid actions return an error dict.
+        - When underlying service calls return ToolResult-like objects with `structured_content`, that structured content is returned for consistency; otherwise a standard dict with `success`/`error` (and other data) is returned.
+        - Exceptions raised during execution are caught and returned as a standardized error dictionary containing `success: False`, an `error` message, and the originating `action`.
+        
+        Returns:
+            dict[str, Any]: Result object indicating success or failure and containing action-specific data or an error message.
         """
         # Handle default values for list parameters
         if tags is None:
@@ -321,13 +363,21 @@ class DockerMCPServer:
         force: Annotated[bool, Field(default=False, description="Force the operation **(used by: stop)**")] = False,
         timeout: Annotated[int, Field(default=10, ge=1, le=300, description="Operation timeout in seconds **(used by: start, stop, restart)**")] = 10
     ) -> dict[str, Any]:
-        """Consolidated Docker container management tool.
+        """
+        Manage Docker containers and container-related operations (list, info, lifecycle, logs, pull).
         
-        Actions:
-        - list: List containers on a host (requires: host_id)
-        - info: Get container information (requires: host_id, container_id)
-        - start/stop/restart/build: Manage container (requires: host_id, container_id)
-        - logs: Get container logs (requires: host_id, container_id)
+        This consolidated tool routes container actions to the appropriate service methods and returns a dict-friendly result
+        (or the ToolResult.structured_content when available). Supported actions and required fields:
+        - list: List containers on a host. Requires host_id. Supports pagination via limit and offset and an all_containers flag.
+        - info: Return container details. Requires host_id and container_id.
+        - start / stop / restart / build: Manage container lifecycle. Require host_id and container_id; timeout (1–300s) applies.
+        - logs: Retrieve container logs. Requires host_id and container_id; supports lines (1–1000) and follow.
+        - pull: Pull an image on a host. Requires host_id and container_id (interpreted as image name).
+        
+        Validation notes:
+        - action must be one of: list, info, start, stop, restart, build, logs, pull.
+        - Pagination and numeric bounds are enforced (limit, offset, timeout, lines).
+        - Returns a standardized error dict on validation failure or internal exceptions; successful results may be raw dicts or ToolResult.structured_content when available.
         """
         # Validate action parameter
         valid_actions = ["list", "info", "start", "stop", "restart", "build", "logs", "pull"]
@@ -441,15 +491,26 @@ class DockerMCPServer:
         skip_stop_source: Annotated[bool, Field(default=False, description="Skip stopping source stack before migration **(used by: migrate)**")] = False,
         start_target: Annotated[bool, Field(default=True, description="Start target stack after migration **(used by: migrate)**")] = True
     ) -> dict[str, Any]:
-        """Consolidated Docker Compose stack management tool.
+        """
+        Consolidated Docker Compose stack management tool.
         
-        Actions:
-        - list: List stacks on a host (requires: host_id)
-        - deploy: Deploy a stack (requires: host_id, stack_name, compose_content)
-        - up/down/restart/build: Manage stack lifecycle (requires: host_id, stack_name)
-        - discover: Discover compose paths on a host (requires: host_id)
-        - logs: Get stack logs (requires: host_id, stack_name)
-        - migrate: Migrate stack between hosts (requires: host_id, target_host_id, stack_name)
+        Performs compose-related actions across hosts: list, deploy, up, down, restart, build, pull, discover, logs, and migrate.
+        
+        Detailed behavior:
+        - list: returns stacks for host_id (requires host_id).
+        - deploy: deploys a stack from compose_content (requires host_id, stack_name, compose_content). Validates basic stack_name format.
+        - up/down/restart/build/pull: manages lifecycle for a named stack (requires host_id, stack_name). `options` may supply operation-specific flags.
+        - discover: discovers compose paths on a host (requires host_id).
+        - logs: returns recent stack logs (requires host_id, stack_name). Respects `lines` and `follow`; returns a dict containing host_id, stack_name, logs (list of lines), lines_requested, lines_returned, and follow when successful.
+        - migrate: migrates a stack from host_id (source) to target_host_id (requires host_id, target_host_id, stack_name). Supports dry-run and flags to skip/stop/remove/start behavior.
+        
+        Parameters with non-obvious meaning are described via Annotated Field metadata in the function signature; defaults for dict-like parameters are normalized (empty dict when omitted).
+        
+        Returns:
+        A dict indicating success and operation-specific data. Typical shape:
+        - On success: {"success": True, ...} (may include structured tool content).
+        - On failure: {"success": False, "error": "<message>"}.
+        Exceptions are caught and returned as failure dicts; internal ToolResult-like objects are converted to their structured_content when available.
         """
         # Handle default values for dict parameters
         if environment is None:
@@ -748,14 +809,36 @@ class DockerMCPServer:
         compose_path_overrides: dict[str, str] | None = None,
         auto_confirm: bool = False,
     ) -> ToolResult:
-        """Import hosts from SSH config with interactive selection and compose path discovery."""
+        """
+        Import hosts from an SSH config file into the server configuration.
+        
+        Delegates to ConfigService.import_ssh_config, passing the server's configured hosts file path for context.
+        
+        Parameters:
+            ssh_config_path (str | None): Path to an SSH config file. If None, the service will use its default lookup.
+            selected_hosts (str | None): Comma-separated host patterns to import; if None, selection is determined interactively or by the service.
+            compose_path_overrides (dict[str, str] | None): Per-host compose path overrides to apply during import.
+            auto_confirm (bool): If True, proceed without prompting for confirmation.
+        
+        Returns:
+            ToolResult: Result object produced by ConfigService.import_ssh_config containing success/failure status and any structured content.
+        """
         return await self.config_service.import_ssh_config(
             ssh_config_path, selected_hosts, compose_path_overrides, auto_confirm, self._config_path
         )
 
 
     def update_configuration(self, new_config: DockerMCPConfig) -> None:
-        """Update server configuration and reinitialize components."""
+        """
+        Replace the server's in-memory configuration and propagate it to all managed components.
+        
+        Replaces the server's active DockerMCPConfig with `new_config` and updates the context manager,
+        all service instances (host, container, stack, config, cleanup, schedule) and log tools to
+        use the new configuration. Logs the updated host keys.
+        
+        Parameters:
+            new_config (DockerMCPConfig): New configuration to apply to the server and its components.
+        """
         self.config = new_config
 
         # Update managers with new config
@@ -835,7 +918,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Main entry point."""
+    """
+    Application entry point.
+    
+    Initializes logging, loads and applies CLI configuration overrides, and either validates the configuration
+    (if --validate-config is set) or starts the DockerMCPServer instance. Hot-reload for the hosts config is
+    started in a background daemon thread (an asyncio event loop is created for the watcher) and the server
+    is then run in the foreground. Handles KeyboardInterrupt (graceful shutdown) and exits with status 1 on
+    unexpected errors.
+    """
     args = parse_args()
 
     # Setup unified logging (console + files)

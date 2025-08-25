@@ -24,6 +24,19 @@ class StackService:
     """Service for Docker Compose stack management operations."""
 
     def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+        """
+        Initialize the StackService.
+        
+        Sets up configuration and context, and constructs helper components used for stack operations:
+        - StackTools for composition and runtime commands
+        - MigrationManager for migrating stacks
+        - BackupManager for target backups
+        Also initializes a structured logger.
+        
+        Parameters:
+            config: Service configuration object containing hosts, paths, and runtime settings.
+            context_manager: Manager providing execution context and SSH utilities for remote hosts.
+        """
         self.config = config
         self.context_manager = context_manager
         self.stack_tools = StackTools(config, context_manager)
@@ -32,7 +45,11 @@ class StackService:
         self.logger = structlog.get_logger()
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
-        """Validate host exists in configuration."""
+        """
+        Check whether a host identifier exists in the service configuration.
+        
+        Returns a tuple (is_valid, error_message). is_valid is True when the host_id is present; otherwise False and error_message contains a brief explanation suitable for user-facing messages (e.g., "Host 'x' not found").
+        """
         if host_id not in self.config.hosts:
             return False, f"Host '{host_id}' not found"
         return True, ""
@@ -233,33 +250,22 @@ class StackService:
         remove_source: bool = False,
         dry_run: bool = False,
     ) -> ToolResult:
-        """Migrate a Docker Compose stack between hosts with data integrity protection.
+        """
+        Migrate a Docker Compose stack from one host to another with multi-phase data integrity safeguards.
         
-        This method ensures safe migration by:
-        1. ALWAYS stopping containers unless explicitly skipped (prevents corruption)
-        2. Verifying all containers are stopped before archiving
-        3. Waiting for filesystem sync after stopping containers
-        4. Verifying archive integrity before transfer
-        5. Using atomic operations where possible
-        6. Providing dry-run mode for testing
+        Performs a safe, atomic migration workflow: retrieves the stack compose, inventories volumes, (optionally) stops the source stack, creates an archive of volume and bind-mount data, transfers and extracts the archive on the target using a three-phase (staging → verify → atomic move) process, creates a pre-migration backup on the target, verifies extracted data before deployment, optionally deploys the stack on the target and verifies container integration, and optionally removes the source compose file after a successful migration. Designed to avoid data corruption by verifying containers are stopped and using explicit verification gates; supports a dry-run mode.
         
-        Args:
-            source_host_id: Source host ID
-            target_host_id: Target host ID
-            stack_name: Name of the stack to migrate
-            skip_stop_source: Skip stopping the stack (DANGEROUS - only if already stopped)
-            start_target: Start the stack on target after migration
-            remove_source: Remove stack from source after successful migration
-            dry_run: Perform dry run without actual changes
-            
+        Parameters:
+            source_host_id: Source host identifier from configuration.
+            target_host_id: Target host identifier from configuration.
+            stack_name: Name of the Docker Compose stack to migrate.
+            skip_stop_source: If True, do not stop the source stack (dangerous — migration requires containers to be stopped; this flag must be explicitly set and the function will still abort if containers are running).
+            start_target: If True, deploy and start the stack on the target after successful data verification.
+            remove_source: If True, remove the source compose file after a successful migration and verification (only the compose file is removed; directory removal is not performed).
+            dry_run: If True, perform all analysis steps without making destructive changes (no stopping, archiving, transferring, or backups).
+        
         Returns:
-            ToolResult with migration status
-            
-        Raises:
-            Will return error ToolResult if:
-            - Containers are still running and skip_stop_source=True
-            - Archive creation or verification fails
-            - Transfer fails
+            ToolResult containing a human-readable migration summary in `content` and a detailed `structured_content` dictionary with keys such as `success`, host and stack identifiers, `compose_file`, `volume_paths`, `transfer_stats`, `source_summary`, `verification_summary`, `backup_summary`, `dry_run`, and `steps`. The function reports failures via a ToolResult with `success: False` rather than raising exceptions.
         """
         # Initialize variables that will be used throughout the function
         data_verification = {
@@ -967,7 +973,21 @@ class StackService:
             )
     
     def _build_ssh_cmd(self, host) -> list[str]:
-        """Build SSH command for a host."""
+        """
+        Build a base SSH command (as a list of argv fragments) for connecting to the specified host.
+        
+        This returns a list suitable for subprocess execution, e.g. ["ssh", "-o", "StrictHostKeyChecking=no", "-i", "/path/id_rsa", "-p", "2222", "user@host"].
+        
+        Parameters:
+            host: An object representing the host. It must provide the attributes:
+                - identity_file (str | None): path to an SSH identity file; included as `-i` when present.
+                - port (int): TCP port to connect to; added as `-p <port>` when not 22.
+                - user (str): username for the remote connection.
+                - hostname (str): remote host address.
+        
+        Returns:
+            list[str]: The SSH command split into arguments.
+        """
         ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
         if host.identity_file:
             ssh_cmd.extend(["-i", host.identity_file])
@@ -977,7 +997,21 @@ class StackService:
         return ssh_cmd
     
     def _format_size(self, size_bytes: int) -> str:
-        """Format bytes into human-readable string."""
+        """
+        Convert a byte count into a human-readable string using binary (1024) units.
+        
+        Detailed behavior:
+        - Accepts an integer number of bytes and returns a string with an appropriate unit
+          among B, KB, MB, GB, TB, or PB.
+        - Uses 1024 as the unit base. Values below 1024 are shown in the smallest unit
+          that keeps the numeric part < 1024.
+        - For bytes (B) the value is shown as an integer (e.g., "512 B"); for larger
+          units it is formatted with one decimal place (e.g., "1.5 KB").
+        - A value of 0 returns "0 B".
+        
+        Returns:
+            A formatted string representing the input size with unit, e.g. "1.2 MB".
+        """
         if size_bytes == 0:
             return "0 B"
         
@@ -991,15 +1025,10 @@ class StackService:
         return f"{size_bytes:.1f} PB"
     
     def _extract_expected_mounts(self, compose_content: str, target_appdata: str, stack_name: str) -> list[str]:
-        """Extract expected volume mounts from compose file content.
+        """
+        Extract expected host-to-container volume mounts from Docker Compose YAML.
         
-        Args:
-            compose_content: Docker Compose YAML content
-            target_appdata: Target appdata path
-            stack_name: Stack name
-            
-        Returns:
-            List of expected mount strings in format "source:destination"
+        Parses the provided compose content and returns a deduplicated list of mount strings in the form "source:destination". Relative or named volume sources are resolved into paths under the given target_appdata for the specified stack (e.g., relative "./data" -> "{target_appdata}/{stack_name}/data", named volumes -> "{target_appdata}/{stack_name}"). Both string-style ("host:container[:mode]") and dictionary-style bind mounts are supported. If no mounts are found or the compose cannot be parsed, a single default mount of "{target_appdata}/{stack_name}:/data" is returned.
         """
         try:
             import yaml

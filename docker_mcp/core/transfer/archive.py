@@ -57,17 +57,29 @@ class ArchiveUtils:
     ]
     
     def __init__(self):
+        """
+        Initialize ArchiveUtils.
+        
+        Creates a component-scoped logger (component="archive_utils") and instantiates
+        a MigrationSafety object used for performing safety checks during archive cleanup.
+        """
         self.logger = logger.bind(component="archive_utils")
         self.safety = MigrationSafety()
     
     def _find_common_parent(self, paths: list[str]) -> tuple[str, list[str]]:
-        """Find common parent directory and relative paths for archiving contents.
+        """
+        Return a common parent directory and a list of paths relative to that parent suitable for tar'ing.
         
-        Args:
-            paths: List of absolute paths
-            
+        Given a list of absolute filesystem paths, compute a parent directory that is the longest common path prefix and produce relative paths of each input with respect to that parent. This is intended to be used with tar's -C <parent> <relative_paths> invocation.
+        
+        Behavior:
+        - If `paths` is empty, returns ("/", []).
+        - If `paths` contains a single path, the parent is that path and the returned relative path is ["."], which archives the contents of that directory.
+        - If multiple paths are provided, the parent is the longest common path prefix ("/" when there is no common directory). Relative paths are computed with respect to the parent; when the parent is root, returned relative paths have any leading "/" removed so they are suitable for tar.
+        - On unexpected errors while computing the common parent, falls back to parent "/" and returns paths stripped of a leading "/" if present.
+        
         Returns:
-            Tuple of (common_parent, relative_paths_for_contents)
+            tuple[str, list[str]]: (parent_directory, relative_paths_for_contents)
         """
         if not paths:
             return "/", []
@@ -135,17 +147,22 @@ class ArchiveUtils:
         temp_dir: str = "/tmp",
         exclusions: list[str] | None = None,
     ) -> str:
-        """Create tar.gz archive of volume data on remote host.
+        """
+        Create a gzip-compressed tar archive of the given volume paths on a remote host via SSH and return its remote path.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            volume_paths: List of paths to archive
-            archive_name: Name for the archive file
-            temp_dir: Temporary directory for archive creation
-            exclusions: Additional exclusion patterns
-            
+        The function determines a common parent directory for the provided volume paths and archives the relative paths (using tar's -C) while applying default and optional exclusion patterns. The archive is created in temp_dir with archive_name suffixed by a timestamp.
+        
+        Parameters:
+            volume_paths (list[str]): Absolute paths to include in the archive.
+            archive_name (str): Base name for the archive file (timestamp and .tar.gz are appended).
+            temp_dir (str, optional): Directory on the remote host where the archive will be created. Defaults to "/tmp".
+            exclusions (list[str] | None, optional): Additional tar exclude patterns to append to the module's default exclusions.
+        
         Returns:
-            Path to created archive on remote host
+            str: Full path to the created archive on the remote host.
+        
+        Raises:
+            ArchiveError: If volume_paths is empty or if the remote tar command fails.
         """
         if not volume_paths:
             raise ArchiveError("No volumes to archive")
@@ -196,14 +213,17 @@ class ArchiveUtils:
         return archive_file
     
     async def verify_archive(self, ssh_cmd: list[str], archive_path: str) -> bool:
-        """Verify archive integrity.
+        """
+        Verify the integrity of a tar.gz archive on the remote host.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            archive_path: Path to archive file
-            
+        Runs a remote `tar tzf` (list) against the specified archive via the provided SSH command and returns True if the archive can be read successfully.
+        
+        Parameters:
+            ssh_cmd (list[str]): SSH command and arguments to run the remote check (e.g., ["ssh", "user@host"]).
+            archive_path (str): Remote path to the tar.gz archive to verify.
+        
         Returns:
-            True if archive is valid, False otherwise
+            bool: True if the archive is valid and readable on the remote host, False otherwise.
         """
         import shlex
         verify_cmd = ssh_cmd + [f"tar tzf {shlex.quote(archive_path)} > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
@@ -223,15 +243,17 @@ class ArchiveUtils:
         archive_path: str,
         extract_dir: str,
     ) -> bool:
-        """Extract archive to specified directory.
+        """
+        Extract a tar.gz archive on the remote host into the specified directory.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            archive_path: Path to archive file
-            extract_dir: Directory to extract to
-            
+        Runs `tar xzf <archive_path> -C <extract_dir>` over the provided SSH command and returns True if the remote tar command succeeds (exit code 0), otherwise False.
+        
+        Parameters:
+            archive_path (str): Path to the archive file on the remote host.
+            extract_dir (str): Target directory on the remote host where the archive will be extracted.
+        
         Returns:
-            True if extraction successful, False otherwise
+            bool: True if extraction succeeded, False if it failed.
         """
         import shlex
         extract_cmd = ssh_cmd + [f"tar xzf {shlex.quote(archive_path)} -C {shlex.quote(extract_dir)}"]
@@ -251,11 +273,10 @@ class ArchiveUtils:
             return False
     
     async def cleanup_archive(self, ssh_cmd: list[str], archive_path: str) -> None:
-        """Remove archive file with safety validation.
+        """
+        Safely remove a remote archive file using the configured MigrationSafety and log the outcome.
         
-        Args:
-            ssh_cmd: SSH command parts for remote execution
-            archive_path: Path to archive file to remove
+        Attempts to remove the archive at the given path by delegating to MigrationSafety.safe_cleanup_archive; logs whether cleanup succeeded, failed, or encountered an error. Exceptions raised during the safety check are caught and logged; the method does not raise.
         """
         try:
             success, message = await self.safety.safe_cleanup_archive(

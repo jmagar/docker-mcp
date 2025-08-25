@@ -25,6 +25,11 @@ class ZFSTransfer(BaseTransfer):
     """Transfer data between ZFS hosts using ZFS send/receive."""
     
     def __init__(self):
+        """
+        Initialize ZFSTransfer.
+        
+        Sets up the base transfer, binds a component-specific logger ("zfs_transfer"), and creates a MigrationSafety instance used for safety checks (e.g., snapshot deletion validation).
+        """
         super().__init__()
         self.logger = logger.bind(component="zfs_transfer")
         self.safety = MigrationSafety()
@@ -102,14 +107,14 @@ class ZFSTransfer(BaseTransfer):
         return dataset is not None, dataset
     
     async def get_dataset_for_path(self, host: DockerHost, path: str) -> str | None:
-        """Get ZFS dataset name for a given path.
+        """
+        Return the ZFS dataset name that contains the given filesystem path, or None if the path is not on ZFS or the dataset cannot be determined.
         
-        Args:
-            host: Host configuration
-            path: Filesystem path
-            
-        Returns:
-            ZFS dataset name or None if not on ZFS
+        This routine:
+        - Verifies the path's filesystem type using `df -T` and returns None if it is not ZFS.
+        - Attempts to resolve the dataset with `zfs list -H -o name {path}`.
+        - If that fails, falls back to `zfs list -H -o name,mountpoint` and matches the mountpoint to the path.
+        - Returns the dataset name string on success, or None if the dataset cannot be found or an error occurs (errors are logged and swallowed).
         """
         ssh_cmd = self.build_ssh_cmd(host)
         
@@ -163,16 +168,17 @@ class ZFSTransfer(BaseTransfer):
             return None
     
     async def create_snapshot(self, host: DockerHost, dataset: str, snapshot_name: str, recursive: bool = False) -> str:
-        """Create a ZFS snapshot with optional recursion.
+        """
+        Create a ZFS snapshot for the specified dataset and return its full name.
         
-        Args:
-            host: Host configuration
-            dataset: ZFS dataset name
-            snapshot_name: Snapshot name
-            recursive: Whether to recursively snapshot child datasets (DANGEROUS!)
-            
-        Returns:
-            Full snapshot name (dataset@snapshot)
+        If `recursive` is True, the snapshot will include all child datasets (use with caution).
+        Returns the full snapshot identifier in the form `dataset@snapshot_name`.
+        
+        Parameters:
+            recursive (bool): If True, include child datasets in the snapshot.
+        
+        Raises:
+            ZFSError: If the remote zfs snapshot command fails.
         """
         ssh_cmd = self.build_ssh_cmd(host)
         full_snapshot = f"{dataset}@{snapshot_name}"
@@ -207,12 +213,22 @@ class ZFSTransfer(BaseTransfer):
         return full_snapshot
     
     async def cleanup_snapshot(self, host: DockerHost, full_snapshot: str, recursive: bool = False) -> None:
-        """Remove a ZFS snapshot with safety validation.
+        """
+        Remove a ZFS snapshot on the remote host after performing safety validation.
         
-        Args:
-            host: Host configuration
-            full_snapshot: Full snapshot name (dataset@snapshot)
-            recursive: Whether to recursively destroy child snapshots (DANGEROUS!)
+        Validates the provided snapshot name with the migration safety checker and, if allowed,
+        executes a remote `zfs destroy` for the given snapshot. When `recursive` is True the
+        destroy will include child snapshots (use with caution). The method will raise ZFSError
+        if the safety check blocks deletion; failures of the remote destroy command do not
+        raise but are logged.
+        
+        Parameters:
+            full_snapshot (str): Full snapshot identifier in the form `dataset@snapshot`.
+            recursive (bool): If True, run `zfs destroy -r` to remove child snapshots as well
+                (dangerous).
+            
+        Raises:
+            ZFSError: If the safety validation prevents deletion.
         """
         # SAFETY: Validate snapshot name before deletion
         is_safe, validation_reason = self.safety.validate_zfs_snapshot_deletion(full_snapshot)
@@ -266,19 +282,30 @@ class ZFSTransfer(BaseTransfer):
         target_dataset: str | None = None,
         **kwargs
     ) -> dict[str, Any]:
-        """Transfer data using ZFS send/receive.
+        """
+        Perform a ZFS send/receive transfer from source to target.
         
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            source_path: Path on source host (used to detect dataset)
-            target_path: Path on target host (used to detect dataset)
-            source_dataset: Source ZFS dataset (auto-detected if not provided)
-            target_dataset: Target ZFS dataset (auto-detected if not provided)
-            **kwargs: Additional options (ignored)
-            
+        This method:
+        - Auto-detects ZFS datasets for source_path and target_path when source_dataset/target_dataset are not provided.
+        - Creates a timestamped snapshot named `migrate_<YYYYMMDD_HHMMSS>` on the source dataset.
+        - Streams the snapshot from source to target using ZFS send|recv and verifies the transfer.
+        - Cleans up the source snapshot after a successful transfer (and attempts cleanup on error).
+        
+        Parameters that require clarification:
+        - source_path / target_path: Used only to auto-detect the corresponding ZFS dataset when an explicit dataset is not supplied.
+        - source_dataset / target_dataset: If omitted, the implementation will attempt to detect the dataset from the given path. If the target dataset cannot be detected, the method will raise an error and will not attempt to infer pool names.
+        
         Returns:
-            Transfer result with statistics
+            dict: A result object containing:
+                - success (bool): True on success.
+                - transfer_type (str): Always "zfs".
+                - source_dataset (str): Resolved source dataset name.
+                - target_dataset (str): Resolved target dataset name.
+                - snapshot (str): Full snapshot name used for the transfer (dataset@snapshot).
+                - timestamp (str): The timestamp used in the snapshot name (format YYYYMMDD_HHMMSS).
+        
+        Raises:
+            ZFSError: If dataset detection fails or the send/receive process (including post-transfer verification) fails. The method attempts to remove the created source snapshot on error but will raise ZFSError if the transfer cannot be completed.
         """
         # Auto-detect datasets if not provided
         if not source_dataset:
@@ -335,13 +362,21 @@ class ZFSTransfer(BaseTransfer):
         full_snapshot: str,
         target_dataset: str
     ) -> None:
-        """Perform ZFS send/receive operation.
+        """
+        Perform a ZFS send on the source host and receive on the target host, then verify the transfer.
         
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            full_snapshot: Full snapshot name (dataset@snapshot)
-            target_dataset: Target dataset name
+        Builds and executes a piped command (`ssh source 'zfs send ...' | ssh target 'zfs recv ...'`) using optional flags controlled by instance attributes:
+        - _use_recursive_send: when True includes `-R` on zfs send.
+        - _force_receive: when True includes `-F` on zfs recv (logs a warning because `-F` can destroy target data).
+        
+        Parameters:
+            source_host: Source DockerHost instance (used to build the SSH command).
+            target_host: Target DockerHost instance (used to build the SSH command).
+            full_snapshot: Snapshot identifier in the form `dataset@snapshot`.
+            target_dataset: Target ZFS dataset name to receive into.
+        
+        Raises:
+            ZFSError: If the send/receive subprocess returns a non-zero exit code or verification fails.
         """
         source_ssh_cmd = self.build_ssh_cmd(source_host)
         target_ssh_cmd = self.build_ssh_cmd(target_host)
@@ -395,16 +430,20 @@ class ZFSTransfer(BaseTransfer):
         source_snapshot: str,
         target_dataset: str
     ) -> None:
-        """Verify ZFS transfer completed successfully by comparing dataset properties.
+        """
+        Verify a completed ZFS send/receive by checking target existence, comparing key properties, and performing a basic access test.
         
-        Args:
-            source_host: Source host configuration
-            target_host: Target host configuration
-            source_snapshot: Source snapshot name (dataset@snapshot)
-            target_dataset: Target dataset name
-            
+        Performs these checks:
+        - Confirms the target dataset exists; raises ZFSError if missing.
+        - Attempts to read `used`, `referenced`, and `compressratio` from the source snapshot and target dataset and compares `referenced` (logical data size). Logs a warning if the referenced size differs by more than 5% (does not fail the transfer).
+        - Runs a simple accessibility test on the target dataset and logs a warning if it fails.
+        
+        Parameters:
+            source_snapshot (str): Source snapshot identifier in the form `dataset@snapshot`.
+            target_dataset (str): Target dataset name to verify.
+        
         Raises:
-            ZFSError: If verification fails
+            ZFSError: If the target dataset is not found after transfer.
         """
         source_ssh_cmd = self.build_ssh_cmd(source_host)
         target_ssh_cmd = self.build_ssh_cmd(target_host)
@@ -486,13 +525,19 @@ class ZFSTransfer(BaseTransfer):
         self.logger.info("ZFS transfer verification completed successfully")
     
     def _parse_zfs_properties(self, zfs_output: str) -> dict[str, int]:
-        """Parse ZFS properties output into a dictionary.
+        """
+        Parse the raw output of `zfs get` into a mapping of property names to values.
         
-        Args:
-            zfs_output: Output from zfs get command
-            
+        The input is expected to be tab-separated lines produced by `zfs get` (for example:
+        `dataset<TAB>property<TAB>value...`). For each line this returns an entry keyed by the
+        property name. If the property's value is a pure integer string it is converted to an
+        int; otherwise the original string is preserved (e.g. `"1.00x"` for `compressratio`).
+        
+        Parameters:
+            zfs_output (str): Raw stdout from a `zfs get` command.
+        
         Returns:
-            Dictionary of property names to values (in bytes)
+            dict[str, int | str]: Mapping of property name -> value (int when numeric, else str).
         """
         properties = {}
         
