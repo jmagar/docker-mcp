@@ -85,11 +85,12 @@ class CleanupService:
             )
             return {"success": False, "error": str(e)}
 
-    async def docker_disk_usage(self, host_id: str) -> dict[str, Any]:
+    async def docker_disk_usage(self, host_id: str, include_details: bool = False) -> dict[str, Any]:
         """Check Docker disk usage on a host.
         
         Args:
             host_id: Target Docker host identifier
+            include_details: Include detailed top consumers (default: False for smaller response)
             
         Returns:
             Disk usage information and statistics
@@ -136,16 +137,24 @@ class CleanupService:
             summary = self._parse_disk_usage_summary(summary_result.stdout)
             detailed = self._parse_disk_usage_detailed(detailed_result.stdout) if detailed_result.returncode == 0 else {}
             
-            return {
+            # Generate cleanup recommendations
+            cleanup_potential = self._analyze_cleanup_potential(summary_result.stdout)
+            recommendations = self._generate_cleanup_recommendations(summary, detailed)
+            
+            # Base response with essential information
+            response = {
                 "success": True,
                 "host_id": host_id,
                 "summary": summary,
-                "detailed": detailed,
-                "raw_output": {
-                    "summary": summary_result.stdout,
-                    "detailed": detailed_result.stdout if detailed_result.returncode == 0 else None
-                }
+                "cleanup_potential": cleanup_potential,
+                "recommendations": recommendations
             }
+            
+            # Only include detailed information if requested (reduces token count)
+            if include_details:
+                response["top_consumers"] = detailed
+            
+            return response
             
         except Exception as e:
             self.logger.error(
@@ -278,43 +287,254 @@ class CleanupService:
         }
 
     def _parse_disk_usage_summary(self, output: str) -> dict[str, Any]:
-        """Parse docker system df output for summary."""
+        """Parse docker system df output for summary with calculations."""
         lines = output.strip().split('\n')
         if len(lines) < 2:
-            return {}
+            return {
+                "images": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
+                "containers": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
+                "volumes": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
+                "build_cache": {"size": "0B", "size_bytes": 0},
+                "totals": {
+                    "total_size": "0B",
+                    "total_size_bytes": 0,
+                    "total_reclaimable": "0B", 
+                    "total_reclaimable_bytes": 0,
+                    "reclaimable_percentage": 0
+                }
+            }
             
-        # Skip header line, parse data lines
+        # Initialize summary with enhanced structure
         summary = {
-            "images": {"active": 0, "size": "0B"},
-            "containers": {"active": 0, "size": "0B"},
-            "volumes": {"active": 0, "size": "0B"},
-            "build_cache": {"size": "0B"}
+            "images": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
+            "containers": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
+            "volumes": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
+            "build_cache": {"size": "0B", "size_bytes": 0},
+            "totals": {
+                "total_size": "0B",
+                "total_size_bytes": 0,
+                "total_reclaimable": "0B",
+                "total_reclaimable_bytes": 0,
+                "reclaimable_percentage": 0
+            }
         }
         
         for line in lines[1:]:
             if "Images" in line:
                 parts = line.split()
-                if len(parts) >= 7:
-                    summary["images"] = {"active": parts[2], "size": parts[6]}
+                # Format: TYPE TOTAL ACTIVE SIZE RECLAIMABLE
+                if len(parts) >= 5:
+                    total_count = int(parts[1]) if parts[1].isdigit() else 0
+                    active_count = int(parts[2]) if parts[2].isdigit() else 0
+                    size_str = parts[3]
+                    reclaimable_str = parts[4] if len(parts) > 4 else "0B"
+                    
+                    size_bytes = self._parse_docker_size(size_str)
+                    reclaimable_bytes = self._parse_docker_size(reclaimable_str)
+                    
+                    summary["images"] = {
+                        "count": total_count,
+                        "active": active_count,
+                        "size": size_str,
+                        "size_bytes": size_bytes,
+                        "reclaimable": reclaimable_str,
+                        "reclaimable_bytes": reclaimable_bytes
+                    }
+                    
             elif "Containers" in line:
                 parts = line.split()
-                if len(parts) >= 7:
-                    summary["containers"] = {"active": parts[2], "size": parts[6]}
+                if len(parts) >= 5:
+                    total_count = int(parts[1]) if parts[1].isdigit() else 0
+                    active_count = int(parts[2]) if parts[2].isdigit() else 0
+                    size_str = parts[3]
+                    reclaimable_str = parts[4] if len(parts) > 4 else "0B"
+                    
+                    size_bytes = self._parse_docker_size(size_str)
+                    reclaimable_bytes = self._parse_docker_size(reclaimable_str)
+                    
+                    summary["containers"] = {
+                        "count": total_count,
+                        "active": active_count,
+                        "size": size_str,
+                        "size_bytes": size_bytes,
+                        "reclaimable": reclaimable_str,
+                        "reclaimable_bytes": reclaimable_bytes
+                    }
+                    
             elif "Local Volumes" in line:
                 parts = line.split()
-                if len(parts) >= 7:
-                    summary["volumes"] = {"active": parts[2], "size": parts[6]}
+                if len(parts) >= 5:
+                    total_count = int(parts[2]) if parts[2].isdigit() else 0  # "Local" "Volumes" COUNT
+                    active_count = int(parts[3]) if parts[3].isdigit() else 0
+                    size_str = parts[4]
+                    reclaimable_str = parts[5] if len(parts) > 5 else "0B"
+                    
+                    size_bytes = self._parse_docker_size(size_str)
+                    reclaimable_bytes = self._parse_docker_size(reclaimable_str)
+                    
+                    summary["volumes"] = {
+                        "count": total_count,
+                        "active": active_count,
+                        "size": size_str,
+                        "size_bytes": size_bytes,
+                        "reclaimable": reclaimable_str,
+                        "reclaimable_bytes": reclaimable_bytes
+                    }
+                    
             elif "Build Cache" in line:
                 parts = line.split()
                 if len(parts) >= 3:
-                    summary["build_cache"] = {"size": parts[2]}
+                    size_str = parts[2]
+                    size_bytes = self._parse_docker_size(size_str)
+                    
+                    summary["build_cache"] = {
+                        "size": size_str,
+                        "size_bytes": size_bytes
+                    }
+        
+        # Calculate totals
+        total_size_bytes = (
+            summary["images"]["size_bytes"] +
+            summary["containers"]["size_bytes"] +
+            summary["volumes"]["size_bytes"] +
+            summary["build_cache"]["size_bytes"]
+        )
+        
+        total_reclaimable_bytes = (
+            summary["images"]["reclaimable_bytes"] +
+            summary["containers"]["reclaimable_bytes"] +
+            summary["volumes"]["reclaimable_bytes"] +
+            summary["build_cache"]["size_bytes"]  # Build cache is fully reclaimable
+        )
+        
+        reclaimable_percentage = (
+            int((total_reclaimable_bytes / total_size_bytes) * 100)
+            if total_size_bytes > 0 else 0
+        )
+        
+        summary["totals"] = {
+            "total_size": self._format_size(total_size_bytes),
+            "total_size_bytes": total_size_bytes,
+            "total_reclaimable": self._format_size(total_reclaimable_bytes),
+            "total_reclaimable_bytes": total_reclaimable_bytes,
+            "reclaimable_percentage": reclaimable_percentage
+        }
         
         return summary
 
     def _parse_disk_usage_detailed(self, output: str) -> dict[str, Any]:
-        """Parse docker system df -v output for detailed information."""
-        # This would parse detailed output - implementation would depend on specific needs
-        return {"note": "Detailed parsing not yet implemented"}
+        """Parse docker system df -v output for TOP space consumers only."""
+        result = {
+            "top_images": [],
+            "top_volumes": [],
+            "container_stats": {
+                "running": 0,
+                "stopped": 0,
+                "total_size": "0B",
+                "total_size_bytes": 0
+            },
+            "cleanup_candidates": []
+        }
+        
+        if not output:
+            return result
+        
+        lines = output.split('\n')
+        current_section = None
+        
+        images = []
+        volumes = []
+        containers = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Detect sections
+            if line.startswith("REPOSITORY"):
+                current_section = "images"
+                continue
+            elif line.startswith("CONTAINER ID"):
+                current_section = "containers"  
+                continue
+            elif line.startswith("VOLUME NAME"):
+                current_section = "volumes"
+                continue
+            elif line.startswith("CACHE ID"):
+                current_section = "cache"
+                continue
+                
+            # Skip header lines
+            if current_section is None or line.startswith(("REPOSITORY", "CONTAINER", "VOLUME", "CACHE")):
+                continue
+                
+            # Parse data lines
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+                
+            try:
+                if current_section == "images":
+                    # Format: REPOSITORY TAG IMAGE_ID CREATED SIZE SHARED_SIZE UNIQUE_SIZE CONTAINERS
+                    if len(parts) >= 5:
+                        repo = parts[0]
+                        tag = parts[1] 
+                        size_str = parts[4]
+                        size_bytes = self._parse_docker_size(size_str)
+                        
+                        images.append({
+                            "name": f"{repo}:{tag}" if tag != "<none>" else repo,
+                            "size": size_str,
+                            "size_bytes": size_bytes
+                        })
+                        
+                elif current_section == "volumes":
+                    # Format: VOLUME_NAME LINKS SIZE  
+                    if len(parts) >= 3:
+                        name = parts[0]
+                        size_str = parts[2]
+                        size_bytes = self._parse_docker_size(size_str)
+                        
+                        volumes.append({
+                            "name": name,
+                            "size": size_str,
+                            "size_bytes": size_bytes
+                        })
+                        
+                elif current_section == "containers":
+                    # Format: CONTAINER_ID IMAGE COMMAND CREATED STATUS SIZE NAMES
+                    if len(parts) >= 6:
+                        status = parts[4].lower()
+                        size_str = parts[5]
+                        size_bytes = self._parse_docker_size(size_str)
+                        
+                        if "up" in status:
+                            result["container_stats"]["running"] += 1
+                        else:
+                            result["container_stats"]["stopped"] += 1
+                            # Stopped containers are cleanup candidates
+                            result["cleanup_candidates"].append({
+                                "type": "container",
+                                "name": parts[0][:12],  # Short container ID
+                                "size": size_str
+                            })
+                        
+                        result["container_stats"]["total_size_bytes"] += size_bytes
+                        
+            except (ValueError, IndexError):
+                # Skip malformed lines
+                continue
+        
+        # Sort and get top consumers
+        images.sort(key=lambda x: x["size_bytes"], reverse=True)
+        volumes.sort(key=lambda x: x["size_bytes"], reverse=True)
+        
+        result["top_images"] = images[:5]  # Top 5 largest images
+        result["top_volumes"] = volumes[:5]  # Top 5 largest volumes
+        result["container_stats"]["total_size"] = self._format_size(result["container_stats"]["total_size_bytes"])
+        
+        return result
 
     def _analyze_cleanup_potential(self, df_output: str) -> dict[str, str]:
         """Analyze potential cleanup from docker system df output."""
@@ -349,3 +569,107 @@ class CleanupService:
                 return match.group(1)
         
         return "Unknown"
+
+    def _format_size(self, size_bytes: int) -> str:
+        """Convert bytes to human-readable size format."""
+        if size_bytes == 0:
+            return "0B"
+        
+        units = ["B", "KB", "MB", "GB", "TB"]
+        unit_index = 0
+        size = float(size_bytes)
+        
+        while size >= 1024 and unit_index < len(units) - 1:
+            size /= 1024
+            unit_index += 1
+        
+        if unit_index == 0:
+            return f"{int(size)}B"
+        else:
+            return f"{size:.1f}{units[unit_index]}"
+
+    def _parse_docker_size(self, size_str: str) -> int:
+        """Convert Docker size string (e.g., '1.2GB') to bytes."""
+        if not size_str or size_str == "0B":
+            return 0
+        
+        # Handle Docker's size format: "1.2GB", "345MB", "2.1kB"
+        size_str = size_str.strip().upper()
+        
+        # Extract number and unit
+        match = re.match(r'^(\d+(?:\.\d+)?)\s*([A-Z]*B?)$', size_str)
+        if not match:
+            return 0
+        
+        value = float(match.group(1))
+        unit = match.group(2) or "B"
+        
+        # Convert to bytes
+        multipliers = {
+            "B": 1,
+            "KB": 1024,
+            "MB": 1024 ** 2,
+            "GB": 1024 ** 3,
+            "TB": 1024 ** 4
+        }
+        
+        return int(value * multipliers.get(unit, 1))
+
+    def _generate_cleanup_recommendations(self, summary: dict, detailed: dict) -> list[str]:
+        """Generate actionable cleanup recommendations based on disk usage."""
+        recommendations = []
+        
+        # Check for reclaimable space in each category
+        if summary.get("containers", {}).get("reclaimable_bytes", 0) > 100 * 1024 * 1024:  # >100MB
+            reclaimable = summary["containers"]["reclaimable"]
+            recommendations.append(
+                f"Remove stopped containers to reclaim {reclaimable}"
+            )
+        
+        if summary.get("images", {}).get("reclaimable_bytes", 0) > 500 * 1024 * 1024:  # >500MB
+            reclaimable = summary["images"]["reclaimable"]
+            recommendations.append(
+                f"Remove unused images to reclaim {reclaimable}"
+            )
+        
+        if summary.get("build_cache", {}).get("size_bytes", 0) > 1024 * 1024 * 1024:  # >1GB
+            size = summary["build_cache"]["size"]
+            recommendations.append(
+                f"Clear build cache to reclaim {size}"
+            )
+        
+        if summary.get("volumes", {}).get("reclaimable_bytes", 0) > 1024 * 1024 * 1024:  # >1GB
+            reclaimable = summary["volumes"]["reclaimable"]
+            recommendations.append(
+                f"⚠️  Remove unused volumes to reclaim {reclaimable} (CAUTION: May delete data!)"
+            )
+        
+        # Check for excessive cleanup candidates
+        cleanup_candidates = detailed.get("cleanup_candidates", [])
+        if len(cleanup_candidates) > 5:
+            recommendations.append(
+                f"Found {len(cleanup_candidates)} stopped containers that can be removed"
+            )
+        
+        # Add specific cleanup commands if there are recommendations
+        if recommendations:
+            recommendations.extend([
+                "",  # Separator line
+                "🔧 Recommended Actions:",
+                "• Run 'docker_hosts cleanup safe' to clean containers, networks, and build cache",
+                "• Run 'docker_hosts cleanup moderate' to also remove unused images"
+            ])
+            
+            # Only suggest aggressive cleanup if there are volumes to clean
+            if summary.get("volumes", {}).get("reclaimable_bytes", 0) > 0:
+                recommendations.append(
+                    "• Run 'docker_hosts cleanup aggressive' to also remove unused volumes (DANGEROUS!)"
+                )
+        else:
+            # If no significant cleanup opportunities
+            total_size = summary.get("totals", {}).get("total_size", "0B")
+            recommendations.append(
+                f"✅ System is relatively clean. Total Docker usage: {total_size}"
+            )
+        
+        return recommendations
