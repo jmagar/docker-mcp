@@ -17,6 +17,7 @@ dependencies = [
     "asyncio-mqtt>=0.16.2",
     "python-dotenv>=1.1.1",
     "watchfiles>=0.24.0",
+    "mcp[cli]>=1.13.0",
 ]
 readme = "README.md"
 license = {text = "MIT"}
