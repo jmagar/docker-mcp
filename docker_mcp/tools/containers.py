@@ -6,6 +6,7 @@ from typing import Any
 
 import structlog
 
+from ..core.cache import PortCache
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
@@ -21,9 +22,17 @@ logger = structlog.get_logger()
 class ContainerTools:
     """Container management tools for MCP."""
 
-    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager, cache: PortCache | None = None):
         self.config = config
         self.context_manager = context_manager
+        self.cache = cache
+        self._cache_initialized = False
+
+    async def _ensure_cache_initialized(self) -> None:
+        """Ensure cache is initialized if available."""
+        if self.cache and not self._cache_initialized:
+            await self.cache.initialize()
+            self._cache_initialized = True
 
     async def list_containers(
         self, host_id: str, all_containers: bool = False, limit: int = 20, offset: int = 0
@@ -663,23 +672,48 @@ class ContainerTools:
         else:
             raise ValueError(f"Unknown action: {action}")
 
-    async def list_host_ports(self, host_id: str, include_stopped: bool = False) -> dict[str, Any]:
+    async def list_host_ports(self, host_id: str, include_stopped: bool = False, use_cache: bool = True) -> dict[str, Any]:
         """List all ports currently in use by containers on a Docker host.
 
         Args:
             host_id: ID of the Docker host
             include_stopped: Include ports from stopped containers (default: False)
+            use_cache: Whether to use cached data (default: True)
 
         Returns:
             Comprehensive port usage information with conflict detection
         """
         try:
-            # Get container data
-            containers = await self._get_containers_for_port_analysis(host_id, include_stopped)
-            total_containers = len(containers)
+            # Initialize cache if available
+            await self._ensure_cache_initialized()
 
-            # Collect all port mappings from containers
-            port_mappings = await self._collect_port_mappings(host_id, containers)
+            port_mappings = None
+            cache_hit = False
+
+            # Try to get from cache first if caching is enabled
+            if use_cache and self.cache:
+                cached_mappings = await self.cache.get_port_mappings(host_id, include_stopped)
+                if cached_mappings:
+                    port_mappings = cached_mappings
+                    cache_hit = True
+                    logger.debug("Using cached port mappings", host_id=host_id, count=len(port_mappings))
+
+            # If no cache hit, fetch fresh data
+            if not cache_hit:
+                # Get container data
+                containers = await self._get_containers_for_port_analysis(host_id, include_stopped)
+
+                # Collect all port mappings from containers
+                port_mappings = await self._collect_port_mappings(host_id, containers)
+
+                # Cache the results if cache is available
+                if self.cache:
+                    await self.cache.set_port_mappings(host_id, port_mappings, include_stopped, ttl_minutes=5)
+
+                    # Record usage in historical table for analytics
+                    await self.cache.record_port_usage(port_mappings)
+
+                logger.debug("Fetched fresh port mappings", host_id=host_id, count=len(port_mappings))
 
             # Detect and mark port conflicts
             conflicts = self._detect_port_conflicts(port_mappings)
@@ -687,12 +721,17 @@ class ContainerTools:
             # Generate summary statistics
             summary = self._generate_port_summary(port_mappings, conflicts)
 
+            # Get total containers count (this is fast, so we don't cache it)
+            containers = await self._get_containers_for_port_analysis(host_id, include_stopped)
+            total_containers = len(containers)
+
             logger.info(
                 "Listed host ports",
                 host_id=host_id,
                 total_ports=len(port_mappings),
                 total_containers=total_containers,
                 conflicts=len(conflicts),
+                cached=cache_hit,
             )
 
             return {
@@ -704,6 +743,7 @@ class ContainerTools:
                 "conflicts": [conflict.model_dump() for conflict in conflicts],
                 "summary": summary,
                 "timestamp": datetime.now().isoformat(),
+                "cached": cache_hit,
             }
 
         except (DockerCommandError, DockerContextError) as e:

@@ -16,6 +16,7 @@ from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
 try:
+    from .core.cache import PortCache
     from .core.config_loader import DockerMCPConfig, load_config
     from .core.docker_context import DockerContextManager
     from .core.file_watcher import HotReloadManager
@@ -27,11 +28,29 @@ try:
         TimingMiddleware,
     )
     from .models.params import DockerComposeParams, DockerContainerParams, DockerHostsParams
+    from .models.tool_params import (
+        CleanupParams,
+        ContainerActionParams,
+        HostIdentifier,
+        PaginationParams,
+        PortFilterParams,
+        PortParams,
+        StackActionParams,
+        TimeoutParams,
+        LogParams,
+    )
+    from .resources import (
+        DockerComposeResource,
+        DockerContainersResource,
+        DockerInfoResource,
+        PortMappingResource,
+    )
     from .services import ConfigService, ContainerService, HostService, StackService
     from .services.cleanup import CleanupService
     from .services.schedule import ScheduleService
     from .tools.logs import LogTools
 except ImportError:
+    from docker_mcp.core.cache import PortCache
     from docker_mcp.core.config_loader import DockerMCPConfig, load_config
     from docker_mcp.core.docker_context import DockerContextManager
     from docker_mcp.core.file_watcher import HotReloadManager
@@ -42,10 +61,27 @@ except ImportError:
         RateLimitingMiddleware,
         TimingMiddleware,
     )
+    from docker_mcp.resources import (
+        DockerComposeResource,
+        DockerContainersResource,
+        DockerInfoResource,
+        PortMappingResource,
+    )
     from docker_mcp.services import ConfigService, ContainerService, HostService, StackService
     from docker_mcp.services.cleanup import CleanupService
     from docker_mcp.services.schedule import ScheduleService
     from docker_mcp.tools.logs import LogTools
+    from docker_mcp.models.tool_params import (
+        CleanupParams,
+        ContainerActionParams,
+        HostIdentifier,
+        PaginationParams,
+        PortFilterParams,
+        PortParams,
+        StackActionParams,
+        TimeoutParams,
+        LogParams,
+    )
 
 
 def get_data_dir() -> Path:
@@ -221,9 +257,13 @@ class DockerMCPServer:
         # Initialize core managers
         self.context_manager = DockerContextManager(config)
 
+        # Initialize port cache
+        data_dir = get_data_dir()
+        self.port_cache = PortCache(data_dir)
+
         # Initialize service layer
         self.host_service = HostService(config)
-        self.container_service = ContainerService(config, self.context_manager)
+        self.container_service = ContainerService(config, self.context_manager, self.port_cache)
         self.stack_service = StackService(config, self.context_manager)
         self.config_service = ConfigService(config, self.context_manager)
         self.cleanup_service = CleanupService(config)
@@ -293,40 +333,110 @@ class DockerMCPServer:
         self.app.tool(self.docker_container)  # Consolidates: list_containers, get_container_info, manage_container, get_container_logs
         self.app.tool(self.docker_compose)    # Consolidates: deploy_stack, manage_stack, list_stacks, discover_compose_paths + NEW: logs capability
 
+        # Register MCP resources for data access (complement tools with clean URI-based data retrieval)
+        self._register_resources()
+
+    def _register_resources(self) -> None:
+        """Register MCP resources for data access.
+        
+        Resources provide clean, URI-based access to data without side effects.
+        They complement tools by offering cacheable, parametrized data retrieval.
+        """
+        try:
+            # Port mapping resource - ports://{host_id}
+            port_resource = PortMappingResource(
+                container_service=self.container_service,
+                server_instance=self
+            )
+            self.app.add_resource(port_resource)
+
+            # Docker host info resource - docker://{host_id}/info
+            info_resource = DockerInfoResource(
+                context_manager=self.context_manager,
+                host_service=self.host_service
+            )
+            self.app.add_resource(info_resource)
+
+            # Docker containers resource - docker://{host_id}/containers
+            containers_resource = DockerContainersResource(
+                container_service=self.container_service
+            )
+            self.app.add_resource(containers_resource)
+
+            # Docker compose resource - docker://{host_id}/compose
+            compose_resource = DockerComposeResource(
+                stack_service=self.stack_service
+            )
+            self.app.add_resource(compose_resource)
+
+            self.logger.info(
+                "MCP resources registered successfully",
+                resources_count=4,
+                uri_schemes=["ports://", "docker://"],
+            )
+
+        except Exception as e:
+            self.logger.error(
+                "Failed to register MCP resources",
+                error=str(e)
+            )
+            # Don't fail the server startup, just log the error
+            # Resources are optional enhancements to the tool-based API
+
     # Consolidated Tools Implementation
 
     async def docker_hosts(
         self,
-        action: Annotated[Literal["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule"], Field(description="Action to perform")],
-        host_id: Annotated[str, Field(default="", description="Host identifier **(used by: add, ports, compose_path)**")] = "",
-        ssh_host: Annotated[str, Field(default="", description="SSH hostname or IP address **(used by: add)**")] = "",
-        ssh_user: Annotated[str, Field(default="", description="SSH username **(used by: add)**")] = "",
-        ssh_port: Annotated[int, Field(default=22, ge=1, le=65535, description="SSH port number **(used by: add)**")] = 22,
-        ssh_key_path: Annotated[str | None, Field(default=None, description="Path to SSH private key file **(used by: add)**")] = None,
-        description: Annotated[str, Field(default="", description="Host description **(used by: add)**")] = "",
-        tags: Annotated[list[str], Field(default_factory=list, description="Host tags **(used by: add)**")] = None,
-        test_connection: Annotated[bool, Field(default=True, description="Test connection when adding host **(used by: add)**")] = True,
-        include_stopped: Annotated[bool, Field(default=False, description="Include stopped containers in listings **(used by: ports)**")] = False,
-        compose_path: Annotated[str | None, Field(default=None, description="Docker Compose file path **(used by: add, compose_path)**")] = None,
-        enabled: Annotated[bool, Field(default=True, description="Whether host is enabled **(used by: add)**")] = True,
-        ssh_config_path: Annotated[str | None, Field(default=None, description="Path to SSH config file **(used by: import_ssh)**")] = None,
-        selected_hosts: Annotated[str | None, Field(default=None, description="Comma-separated list of hosts to select **(used by: import_ssh)**")] = None,
-        compose_path_overrides: Annotated[dict[str, str], Field(default_factory=dict, description="Per-host compose path overrides **(used by: import_ssh)**")] = None,
-        auto_confirm: Annotated[bool, Field(default=False, description="Auto-confirm operations without prompting **(used by: add, import_ssh)**")] = False,
-        cleanup_type: Annotated[str | None, Field(default=None, description="Type of cleanup to perform (check, safe, moderate, aggressive) **(used by: cleanup)**")] = None,
-        schedule_action: Annotated[str | None, Field(default=None, description="Schedule action to perform (add, remove, list, enable, disable) **(used by: schedule)**")] = None,
-        schedule_frequency: Annotated[str | None, Field(default=None, description="Cleanup frequency (daily, weekly, monthly, custom) **(used by: schedule add)**")] = None,
-        schedule_time: Annotated[str | None, Field(default=None, description="Time to run cleanup (e.g., '02:00') **(used by: schedule add)**")] = None,
-        schedule_id: Annotated[str | None, Field(default=None, description="Schedule identifier for management **(used by: schedule remove/enable/disable)**")] = None,
+        action: Annotated[Literal["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule", "reserve_port", "release_port", "list_reservations"], Field(description="Action to perform")],
+        host_id: Annotated[str, Field(default="", description="Host identifier", min_length=1)] = "",
+        ssh_host: Annotated[str, Field(default="", description="SSH hostname or IP address", min_length=1)] = "",
+        ssh_user: Annotated[str, Field(default="", description="SSH username", min_length=1)] = "",
+        ssh_port: Annotated[int, Field(default=22, ge=1, le=65535, description="SSH port number")] = 22,
+        ssh_key_path: Annotated[str, Field(default="", description="Path to SSH private key file")] = "",
+        description: Annotated[str, Field(default="", description="Host description")] = "",
+        tags: Annotated[list[str], Field(default_factory=list, description="Host tags")] = [],
+        test_connection: Annotated[bool, Field(default=True, description="Test connection when adding host")] = True,
+        include_stopped: Annotated[bool, Field(default=False, description="Include stopped containers in listings")] = False,
+        compose_path: Annotated[str, Field(default="", description="Docker Compose file path")] = "",
+        enabled: Annotated[bool, Field(default=True, description="Whether host is enabled")] = True,
+        ssh_config_path: Annotated[str, Field(default="", description="Path to SSH config file")] = "",
+        selected_hosts: Annotated[str, Field(default="", description="Comma-separated list of hosts to select")] = "",
+        compose_path_overrides: Annotated[dict[str, str], Field(default_factory=dict, description="Per-host compose path overrides")] = {},
+        auto_confirm: Annotated[bool, Field(default=False, description="Auto-confirm operations without prompting")] = False,
+        cleanup_type: Annotated[str, Field(default="", description="Type of cleanup to perform")] = "",
+        schedule_action: Annotated[str, Field(default="", description="Schedule action to perform")] = "",
+        schedule_frequency: Annotated[str, Field(default="", description="Cleanup frequency")] = "",
+        schedule_time: Annotated[str, Field(default="", pattern=r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$", description="Time to run cleanup in HH:MM format (24-hour)")] = "",
+        schedule_id: Annotated[str, Field(default="", description="Schedule identifier for management")] = "",
+
+        # Enhanced port action parameters
+        export_format: Annotated[str, Field(default="", description="Export format for port data")] = "",
+        filter_project: Annotated[str, Field(default="", description="Filter by compose project")] = "",
+        filter_range: Annotated[str, Field(default="", description="Filter by port range (e.g., '8000-9000')")] = "",
+        filter_protocol: Annotated[str, Field(default="", description="Filter by protocol")] = "",
+        scan_available: Annotated[bool, Field(default=False, description="Scan for truly available ports")] = False,
+        suggest_next: Annotated[bool, Field(default=False, description="Suggest next available port")] = False,
+        use_cache: Annotated[bool, Field(default=True, description="Use cached data (default: True)")] = True,
+
+        # Port reservation parameters
+        port: Annotated[int, Field(default=0, ge=1, le=65535, description="Port number for reservation operations")] = 0,
+        protocol: Annotated[Literal["TCP", "UDP"], Field(default="TCP", description="Protocol for port reservation")] = "TCP",
+        service_name: Annotated[str, Field(default="", description="Service name for port reservation", min_length=1)] = "",
+        reserved_by: Annotated[str, Field(default="user", description="Who is reserving the port")] = "user",
+        expires_days: Annotated[int, Field(default=0, ge=0, description="Days until reservation expires (0 for permanent)")] = 0,
+        notes: Annotated[str, Field(default="", description="Notes for the reservation")] = "",
     ) -> dict[str, Any]:
         """Consolidated Docker hosts management tool.
         
         Actions:
         - list: List all configured Docker hosts  
         - add: Add a new Docker host (requires: host_id, ssh_host, ssh_user; optional: ssh_port, ssh_key_path, description, tags, compose_path, enabled)
-        - ports: List port mappings for a host (requires: host_id)
+        - ports: List port mappings for a host (requires: host_id; supports filtering, export, availability scanning)
         - compose_path: Update host compose path (requires: host_id, compose_path)
         - import_ssh: Import hosts from SSH config
+        - reserve_port: Reserve a port on a host (requires: host_id, port, service_name; optional: protocol, reserved_by, expires_days, notes)
+        - release_port: Release a port reservation (requires: host_id, port; optional: protocol)
+        - list_reservations: List port reservations for a host (requires: host_id)
         """
         # Handle default values for list parameters
         if tags is None:
@@ -369,10 +479,32 @@ class DockerMCPServer:
                 if not host_id:
                     return {"success": False, "error": "host_id is required for ports action"}
 
-                result = await self.list_host_ports(host_id, include_stopped)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, 'content') and hasattr(result, 'structured_content'):
-                    return result.structured_content or {"success": True, "data": str(result.content)}
+                # Validate export format
+                if export_format and export_format not in ["json", "csv", "markdown"]:
+                    return {"success": False, "error": "export_format must be one of: json, csv, markdown"}
+
+                # Validate filter protocol
+                if filter_protocol and filter_protocol.upper() not in ["TCP", "UDP"]:
+                    return {"success": False, "error": "filter_protocol must be TCP or UDP"}
+
+                # Validate port range format
+                if filter_range:
+                    try:
+                        if '-' in filter_range:
+                            start, end = map(int, filter_range.split('-'))
+                            if not (1 <= start <= end <= 65535):
+                                raise ValueError("Invalid range")
+                        else:
+                            port = int(filter_range)
+                            if not (1 <= port <= 65535):
+                                raise ValueError("Invalid port")
+                    except ValueError:
+                        return {"success": False, "error": "filter_range must be a port number or range like '8000-9000'"}
+
+                result = await self.list_host_ports_enhanced(
+                    host_id, include_stopped, export_format, filter_project,
+                    filter_range, filter_protocol, scan_available, suggest_next, use_cache
+                )
                 return result
 
             elif action == "compose_path":
@@ -427,6 +559,41 @@ class DockerMCPServer:
                     schedule_frequency, schedule_time, schedule_id
                 )
 
+            elif action == "reserve_port":
+                # Validate required parameters for reserve_port action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for reserve_port action"}
+                if port <= 0:
+                    return {"success": False, "error": "port is required for reserve_port action"}
+                if not service_name:
+                    return {"success": False, "error": "service_name is required for reserve_port action"}
+
+                # Validate protocol
+                if protocol.upper() not in ["TCP", "UDP"]:
+                    return {"success": False, "error": "protocol must be TCP or UDP"}
+
+                return await self.reserve_port(host_id, port, protocol.upper(), service_name, reserved_by, expires_days, notes)
+
+            elif action == "release_port":
+                # Validate required parameters for release_port action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for release_port action"}
+                if port <= 0:
+                    return {"success": False, "error": "port is required for release_port action"}
+
+                # Validate protocol
+                if protocol.upper() not in ["TCP", "UDP"]:
+                    return {"success": False, "error": "protocol must be TCP or UDP"}
+
+                return await self.release_port(host_id, port, protocol.upper())
+
+            elif action == "list_reservations":
+                # Validate required parameters for list_reservations action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for list_reservations action"}
+
+                return await self.list_port_reservations(host_id)
+
         except Exception as e:
             self.logger.error("docker_hosts tool error", action=action, error=str(e))
             return {
@@ -438,15 +605,15 @@ class DockerMCPServer:
     async def docker_container(
         self,
         action: Annotated[Literal["list", "info", "start", "stop", "restart", "build", "logs"], Field(description="Action to perform")],
-        host_id: Annotated[str, Field(default="", description="Host identifier **(required for all actions)**")] = "",
-        container_id: Annotated[str, Field(default="", description="Container identifier **(used by: info, start, stop, restart, build, logs)**")] = "",
-        all_containers: Annotated[bool, Field(default=False, description="Include all containers, not just running **(used by: list)**")] = False,
-        limit: Annotated[int, Field(default=20, ge=1, le=1000, description="Maximum number of results to return **(used by: list)**")] = 20,
-        offset: Annotated[int, Field(default=0, ge=0, description="Number of results to skip **(used by: list)**")] = 0,
-        follow: Annotated[bool, Field(default=False, description="Follow log output **(used by: logs)**")] = False,
-        lines: Annotated[int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve **(used by: logs)**")] = 100,
-        force: Annotated[bool, Field(default=False, description="Force the operation **(used by: stop)**")] = False,
-        timeout: Annotated[int, Field(default=10, ge=1, le=300, description="Operation timeout in seconds **(used by: start, stop, restart)**")] = 10
+        host_id: Annotated[str, Field(default="", description="Host identifier", min_length=1)] = "",
+        container_id: Annotated[str, Field(default="", description="Container identifier", min_length=1)] = "",
+        all_containers: Annotated[bool, Field(default=False, description="Include all containers, not just running")] = False,
+        limit: Annotated[int, Field(default=20, ge=1, le=1000, description="Maximum number of results to return")] = 20,
+        offset: Annotated[int, Field(default=0, ge=0, description="Number of results to skip")] = 0,
+        follow: Annotated[bool, Field(default=False, description="Follow log output")] = False,
+        lines: Annotated[int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve")] = 100,
+        force: Annotated[bool, Field(default=False, description="Force the operation")] = False,
+        timeout: Annotated[int, Field(default=10, ge=1, le=300, description="Operation timeout in seconds")] = 10
     ) -> dict[str, Any]:
         """Consolidated Docker container management tool.
         
@@ -554,20 +721,20 @@ class DockerMCPServer:
     async def docker_compose(
         self,
         action: Annotated[Literal["list", "deploy", "up", "down", "restart", "build", "discover", "logs", "migrate"], Field(description="Action to perform")],
-        host_id: Annotated[str, Field(default="", description="Host identifier **(required for all actions)**")] = "",
-        stack_name: Annotated[str, Field(default="", description="Stack name **(used by: deploy, up, down, restart, build, logs, migrate)**")] = "",
-        compose_content: Annotated[str, Field(default="", description="Docker Compose file content **(used by: deploy)**")] = "",
-        environment: Annotated[dict[str, str], Field(default_factory=dict, description="Environment variables **(used by: deploy, up)**")] = None,
-        pull_images: Annotated[bool, Field(default=True, description="Pull images before deploying **(used by: deploy, up)**")] = True,
-        recreate: Annotated[bool, Field(default=False, description="Recreate containers **(used by: up)**")] = False,
-        follow: Annotated[bool, Field(default=False, description="Follow log output **(used by: logs)**")] = False,
-        lines: Annotated[int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve **(used by: logs)**")] = 100,
-        dry_run: Annotated[bool, Field(default=False, description="Perform a dry run without making changes **(used by: migrate)**")] = False,
-        options: Annotated[dict[str, str] | None, Field(default=None, description="Additional options for the operation **(used by: up, down, restart, build)**")] = None,
-        target_host_id: Annotated[str, Field(default="", description="Target host ID for migration **(used by: migrate)**")] = "",
-        remove_source: Annotated[bool, Field(default=False, description="Remove source stack after migration **(used by: migrate)**")] = False,
-        skip_stop_source: Annotated[bool, Field(default=False, description="Skip stopping source stack before migration **(used by: migrate)**")] = False,
-        start_target: Annotated[bool, Field(default=True, description="Start target stack after migration **(used by: migrate)**")] = True
+        host_id: Annotated[str, Field(default="", description="Host identifier", min_length=1)] = "",
+        stack_name: Annotated[str, Field(default="", description="Stack name", min_length=1)] = "",
+        compose_content: Annotated[str, Field(default="", description="Docker Compose file content")] = "",
+        environment: Annotated[dict[str, str], Field(default_factory=dict, description="Environment variables")] = {},
+        pull_images: Annotated[bool, Field(default=True, description="Pull images before deploying")] = True,
+        recreate: Annotated[bool, Field(default=False, description="Recreate containers")] = False,
+        follow: Annotated[bool, Field(default=False, description="Follow log output")] = False,
+        lines: Annotated[int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve")] = 100,
+        dry_run: Annotated[bool, Field(default=False, description="Perform a dry run without making changes")] = False,
+        options: Annotated[dict[str, str], Field(default_factory=dict, description="Additional options for the operation")] = {},
+        target_host_id: Annotated[str, Field(default="", description="Target host ID for migration", min_length=1)] = "",
+        remove_source: Annotated[bool, Field(default=False, description="Remove source stack after migration")] = False,
+        skip_stop_source: Annotated[bool, Field(default=False, description="Skip stopping source stack before migration")] = False,
+        start_target: Annotated[bool, Field(default=True, description="Start target stack after migration")] = True
     ) -> dict[str, Any]:
         """Consolidated Docker Compose stack management tool.
         
@@ -840,6 +1007,437 @@ class DockerMCPServer:
     async def list_host_ports(self, host_id: str, include_stopped: bool = False) -> ToolResult:
         """List all ports currently in use by containers on a Docker host."""
         return await self.container_service.list_host_ports(host_id, include_stopped)
+
+    async def list_host_ports_enhanced(
+        self,
+        host_id: str,
+        include_stopped: bool = False,
+        export_format: str | None = None,
+        filter_project: str | None = None,
+        filter_range: str | None = None,
+        filter_protocol: str | None = None,
+        scan_available: bool = False,
+        suggest_next: bool = False,
+        use_cache: bool = True,
+    ) -> dict[str, Any]:
+        """Enhanced port listing with filtering, scanning, and export capabilities."""
+        try:
+            # Get base port information
+            result = await self.container_service.list_host_ports(host_id, include_stopped, use_cache)
+
+            # Convert ToolResult to dict if needed
+            if hasattr(result, 'structured_content'):
+                port_data = result.structured_content
+            else:
+                port_data = result
+
+            if not port_data.get("success", False):
+                return port_data
+
+            # Apply filters if specified
+            port_mappings = port_data.get("port_mappings", [])
+            if filter_project or filter_range or filter_protocol:
+                port_mappings = await self._apply_port_filters(
+                    port_mappings, filter_project, filter_range, filter_protocol
+                )
+
+            # Scan for available ports if requested
+            available_ports = []
+            suggested_port = None
+            if scan_available or suggest_next:
+                available_ports, suggested_port = await self._scan_available_ports(
+                    host_id, filter_range, filter_protocol, suggest_next
+                )
+
+            # Update counts after filtering
+            port_data["port_mappings"] = port_mappings
+            port_data["total_ports"] = len(port_mappings)
+
+            # Add enhanced data
+            if scan_available:
+                port_data["available_ports"] = available_ports
+                port_data["available_count"] = len(available_ports)
+
+            if suggest_next and suggested_port:
+                port_data["suggested_next_port"] = suggested_port
+
+            # Handle export format
+            if export_format:
+                export_data = await self._export_port_data(port_data, export_format)
+                port_data["export_data"] = export_data
+                port_data["export_format"] = export_format
+
+            # Add enhanced metadata
+            port_data["filters_applied"] = {
+                "project": filter_project,
+                "range": filter_range,
+                "protocol": filter_protocol,
+            }
+            port_data["enhancements"] = {
+                "scanned_available": scan_available,
+                "suggested_next": suggest_next and suggested_port is not None,
+                "exported": export_format is not None,
+            }
+
+            return port_data
+
+        except Exception as e:
+            self.logger.error("Failed to list enhanced host ports", host_id=host_id, error=str(e))
+            return {
+                "success": False,
+                "error": f"Enhanced port listing failed: {str(e)}",
+                "host_id": host_id,
+            }
+
+    async def _apply_port_filters(
+        self,
+        port_mappings: list[dict[str, Any]],
+        filter_project: str | None,
+        filter_range: str | None,
+        filter_protocol: str | None
+    ) -> list[dict[str, Any]]:
+        """Apply filtering criteria to port mappings."""
+        filtered_mappings = []
+
+        for mapping in port_mappings:
+            # Filter by compose project
+            if filter_project:
+                compose_project = mapping.get("compose_project", "")
+                if not compose_project or filter_project.lower() not in compose_project.lower():
+                    continue
+
+            # Filter by protocol
+            if filter_protocol:
+                if mapping.get("protocol", "").upper() != filter_protocol.upper():
+                    continue
+
+            # Filter by port range
+            if filter_range:
+                try:
+                    host_port = int(mapping.get("host_port", 0))
+                    if '-' in filter_range:
+                        start, end = map(int, filter_range.split('-'))
+                        if not (start <= host_port <= end):
+                            continue
+                    else:
+                        if host_port != int(filter_range):
+                            continue
+                except (ValueError, TypeError):
+                    continue
+
+            filtered_mappings.append(mapping)
+
+        return filtered_mappings
+
+    async def _scan_available_ports(
+        self,
+        host_id: str,
+        filter_range: str | None,
+        filter_protocol: str | None,
+        suggest_next: bool
+    ) -> tuple[list[int], int | None]:
+        """Scan for available ports on the host."""
+        try:
+            # Default range if not specified
+            if filter_range:
+                if '-' in filter_range:
+                    start, end = map(int, filter_range.split('-'))
+                else:
+                    port = int(filter_range)
+                    start, end = port, port + 100  # Scan 100 ports from the specified port
+            else:
+                start, end = 8000, 9000  # Default range for user applications
+
+            protocol = filter_protocol.upper() if filter_protocol else "TCP"
+            range_str = f"{start}-{end}"
+
+            # Check cache first
+            if self.port_cache:
+                cached_ports = await self.port_cache.get_available_ports(host_id, range_str, protocol)
+                if cached_ports is not None:
+                    suggested_port = cached_ports[0] if suggest_next and cached_ports else None
+                    return cached_ports, suggested_port
+
+            # Get currently used ports from Docker
+            result = await self.container_service.list_host_ports(host_id, include_stopped=True, use_cache=True)
+
+            if hasattr(result, 'structured_content'):
+                port_data = result.structured_content
+            else:
+                port_data = result
+
+            if not port_data.get("success", False):
+                return [], None
+
+            # Extract used ports for the protocol
+            used_ports = set()
+            for mapping in port_data.get("port_mappings", []):
+                if mapping.get("protocol", "").upper() == protocol:
+                    try:
+                        used_ports.add(int(mapping.get("host_port", 0)))
+                    except (ValueError, TypeError):
+                        continue
+
+            # Find available ports in range
+            available_ports = []
+            for port in range(start, end + 1):
+                if port not in used_ports:
+                    # Basic check if port is available (not a comprehensive system-wide check)
+                    available_ports.append(port)
+
+            # Cache the results
+            if self.port_cache:
+                await self.port_cache.set_available_ports(host_id, range_str, available_ports, protocol, ttl_minutes=15)
+
+            # Suggest next available port
+            suggested_port = available_ports[0] if suggest_next and available_ports else None
+
+            return available_ports, suggested_port
+
+        except Exception as e:
+            self.logger.warning("Failed to scan available ports", host_id=host_id, error=str(e))
+            return [], None
+
+    async def _export_port_data(self, port_data: dict[str, Any], export_format: str) -> str:
+        """Export port data in the specified format."""
+        try:
+            if export_format == "json":
+                import json
+                return json.dumps(port_data, indent=2)
+
+            elif export_format == "csv":
+                import csv
+                import io
+
+                output = io.StringIO()
+                writer = csv.writer(output)
+
+                # Headers
+                writer.writerow([
+                    "Host Port", "Container Port", "Protocol", "Container Name",
+                    "Container ID", "Image", "Compose Project", "Conflicts"
+                ])
+
+                # Data rows
+                for mapping in port_data.get("port_mappings", []):
+                    writer.writerow([
+                        mapping.get("host_port", ""),
+                        mapping.get("container_port", ""),
+                        mapping.get("protocol", ""),
+                        mapping.get("container_name", ""),
+                        mapping.get("container_id", ""),
+                        mapping.get("image", ""),
+                        mapping.get("compose_project", ""),
+                        "Yes" if mapping.get("is_conflict", False) else "No"
+                    ])
+
+                return output.getvalue()
+
+            elif export_format == "markdown":
+                lines = [
+                    f"# Port Mappings for {port_data.get('host_id', 'Unknown Host')}",
+                    "",
+                    f"**Total Ports:** {port_data.get('total_ports', 0)}",
+                    f"**Total Containers:** {port_data.get('total_containers', 0)}",
+                    f"**Conflicts:** {len(port_data.get('conflicts', []))}",
+                    "",
+                    "| Host Port | Container Port | Protocol | Container | Image | Project | Conflicts |",
+                    "|-----------|----------------|----------|-----------|-------|---------|-----------|"
+                ]
+
+                for mapping in port_data.get("port_mappings", []):
+                    lines.append(
+                        f"| {mapping.get('host_port', '')} | {mapping.get('container_port', '')} | "
+                        f"{mapping.get('protocol', '')} | {mapping.get('container_name', '')} | "
+                        f"{mapping.get('image', '')} | {mapping.get('compose_project', '')} | "
+                        f"{'⚠️' if mapping.get('is_conflict', False) else '✅'} |"
+                    )
+
+                if port_data.get("available_ports"):
+                    lines.extend([
+                        "",
+                        "## Available Ports",
+                        f"Found {len(port_data['available_ports'])} available ports in scanned range.",
+                        ""
+                    ])
+
+                    if port_data.get("suggested_next_port"):
+                        lines.append(f"**Suggested next port:** {port_data['suggested_next_port']}")
+
+                return "\n".join(lines)
+
+            else:
+                return f"Unsupported export format: {export_format}"
+
+        except Exception as e:
+            self.logger.error("Failed to export port data", export_format=export_format, error=str(e))
+            return f"Export failed: {str(e)}"
+
+    async def reserve_port(
+        self,
+        host_id: str,
+        port: int,
+        protocol: str,
+        service_name: str,
+        reserved_by: str,
+        expires_days: int | None,
+        notes: str
+    ) -> dict[str, Any]:
+        """Reserve a port on a host."""
+        try:
+            # Validate host exists
+            if host_id not in self.config.hosts:
+                return {"success": False, "error": f"Host '{host_id}' not found"}
+
+            # Initialize cache if needed
+            if self.port_cache:
+                await self.port_cache.initialize()
+            else:
+                return {"success": False, "error": "Port cache not available"}
+
+            # Create reservation object
+            from datetime import datetime, timedelta
+
+            from .core.cache import PortReservation
+
+            reserved_at = datetime.now().isoformat()
+            expires_at = None
+            if expires_days:
+                expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat()
+
+            reservation = PortReservation(
+                host_id=host_id,
+                port=port,
+                protocol=protocol,
+                service_name=service_name,
+                reserved_by=reserved_by,
+                reserved_at=reserved_at,
+                expires_at=expires_at,
+                notes=notes
+            )
+
+            # Try to reserve the port
+            success = await self.port_cache.reserve_port(reservation)
+
+            if success:
+                return {
+                    "success": True,
+                    "message": f"Port {port}/{protocol} reserved for {service_name}",
+                    "reservation": reservation.model_dump(),
+                    "host_id": host_id,
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Port {port}/{protocol} is already reserved on {host_id}",
+                    "host_id": host_id,
+                }
+
+        except Exception as e:
+            self.logger.error("Failed to reserve port", host_id=host_id, port=port, error=str(e))
+            return {
+                "success": False,
+                "error": f"Port reservation failed: {str(e)}",
+                "host_id": host_id,
+            }
+
+    async def release_port(
+        self,
+        host_id: str,
+        port: int,
+        protocol: str
+    ) -> dict[str, Any]:
+        """Release a port reservation."""
+        try:
+            # Validate host exists
+            if host_id not in self.config.hosts:
+                return {"success": False, "error": f"Host '{host_id}' not found"}
+
+            # Initialize cache if needed
+            if self.port_cache:
+                await self.port_cache.initialize()
+            else:
+                return {"success": False, "error": "Port cache not available"}
+
+            # Try to release the port
+            success = await self.port_cache.release_port(host_id, port, protocol)
+
+            if success:
+                return {
+                    "success": True,
+                    "message": f"Port {port}/{protocol} reservation released",
+                    "host_id": host_id,
+                    "port": port,
+                    "protocol": protocol,
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"No reservation found for port {port}/{protocol} on {host_id}",
+                    "host_id": host_id,
+                }
+
+        except Exception as e:
+            self.logger.error("Failed to release port", host_id=host_id, port=port, error=str(e))
+            return {
+                "success": False,
+                "error": f"Port release failed: {str(e)}",
+                "host_id": host_id,
+            }
+
+    async def list_port_reservations(self, host_id: str) -> dict[str, Any]:
+        """List all port reservations for a host."""
+        try:
+            # Validate host exists
+            if host_id not in self.config.hosts:
+                return {"success": False, "error": f"Host '{host_id}' not found"}
+
+            # Initialize cache if needed
+            if self.port_cache:
+                await self.port_cache.initialize()
+            else:
+                return {"success": False, "error": "Port cache not available"}
+
+            # Get reservations
+            reservations = await self.port_cache.get_reservations(host_id)
+
+            # Separate active and expired reservations
+            from datetime import datetime
+            now = datetime.now().isoformat()
+
+            active_reservations = []
+            expired_reservations = []
+
+            for reservation in reservations:
+                if reservation.expires_at and reservation.expires_at < now:
+                    expired_reservations.append(reservation.model_dump())
+                else:
+                    active_reservations.append(reservation.model_dump())
+
+            return {
+                "success": True,
+                "host_id": host_id,
+                "total_reservations": len(reservations),
+                "active_reservations": active_reservations,
+                "expired_reservations": expired_reservations,
+                "summary": {
+                    "total": len(reservations),
+                    "active": len(active_reservations),
+                    "expired": len(expired_reservations),
+                    "protocols": {
+                        "TCP": len([r for r in reservations if r.protocol == "TCP"]),
+                        "UDP": len([r for r in reservations if r.protocol == "UDP"]),
+                    }
+                }
+            }
+
+        except Exception as e:
+            self.logger.error("Failed to list port reservations", host_id=host_id, error=str(e))
+            return {
+                "success": False,
+                "error": f"Listing reservations failed: {str(e)}",
+                "host_id": host_id,
+            }
 
     async def deploy_stack(
         self,

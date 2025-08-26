@@ -8,20 +8,23 @@ from pydantic import BaseModel, Field, computed_field
 class DockerHostsParams(BaseModel):
     """Parameters for the docker_hosts consolidated tool."""
 
-    action: Literal["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule"] = Field(
+    action: Literal["list", "add", "ports", "compose_path", "import_ssh", "cleanup", "disk_usage", "schedule", "reserve_port", "release_port", "list_reservations"] = Field(
         ...,
         description="Action to perform"
     )
     host_id: str = Field(
         default="",
+        min_length=1,
         description="Host identifier"
     )
     ssh_host: str = Field(
         default="",
+        min_length=1,
         description="SSH hostname or IP address"
     )
     ssh_user: str = Field(
         default="",
+        min_length=1,
         description="SSH username"
     )
     ssh_port: int = Field(
@@ -38,7 +41,7 @@ class DockerHostsParams(BaseModel):
         default="",
         description="Host description"
     )
-    tags: list[str] = Field(
+    tags: list[str] | None = Field(
         default_factory=list,
         description="Host tags"
     )
@@ -66,7 +69,7 @@ class DockerHostsParams(BaseModel):
         default=None,
         description="Comma-separated list of hosts to select"
     )
-    compose_path_overrides: dict[str, str] = Field(
+    compose_path_overrides: dict[str, str] | None = Field(
         default_factory=dict,
         description="Per-host compose path overrides"
     )
@@ -74,25 +77,86 @@ class DockerHostsParams(BaseModel):
         default=False,
         description="Auto-confirm operations without prompting"
     )
-    cleanup_type: str | None = Field(
+    cleanup_type: Literal["check", "safe", "moderate", "aggressive"] | None = Field(
         default=None,
-        description="Type of cleanup to perform (check, safe, moderate, aggressive) **(used by: cleanup)**"
+        description="Type of cleanup to perform"
     )
-    schedule_action: str | None = Field(
+    schedule_action: Literal["add", "remove", "list", "enable", "disable"] | None = Field(
         default=None,
-        description="Schedule action to perform (add, remove, list, enable, disable) **(used by: schedule)**"
+        description="Schedule management action"
     )
-    schedule_frequency: str | None = Field(
+    schedule_frequency: Literal["daily", "weekly", "monthly", "custom"] | None = Field(
         default=None,
-        description="Cleanup frequency (daily, weekly, monthly, custom) **(used by: schedule add)**"
+        description="Cleanup frequency"
     )
     schedule_time: str | None = Field(
         default=None,
-        description="Time to run cleanup (e.g., '02:00') **(used by: schedule add)**"
+        pattern=r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$",
+        description="Time to run cleanup in HH:MM format (24-hour)"
     )
     schedule_id: str | None = Field(
         default=None,
-        description="Schedule identifier for management **(used by: schedule remove/enable/disable)**"
+        description="Schedule identifier for management"
+    )
+
+    # Enhanced port action parameters
+    export_format: Literal["json", "csv", "markdown"] | None = Field(
+        default=None,
+        description="Export format for port data"
+    )
+    filter_project: str | None = Field(
+        default=None,
+        description="Filter by compose project name"
+    )
+    filter_range: str | None = Field(
+        default=None,
+        description="Filter by port range (e.g., '8000-9000')"
+    )
+    filter_protocol: Literal["TCP", "UDP"] | None = Field(
+        default=None,
+        description="Filter by protocol"
+    )
+    scan_available: bool = Field(
+        default=False,
+        description="Scan for truly available ports"
+    )
+    suggest_next: bool = Field(
+        default=False,
+        description="Suggest next available port"
+    )
+    use_cache: bool = Field(
+        default=True,
+        description="Use cached data when available"
+    )
+
+    # Port reservation parameters
+    port: int = Field(
+        default=0,
+        ge=1,
+        le=65535,
+        description="Port number for reservation operations"
+    )
+    protocol: Literal["TCP", "UDP"] = Field(
+        default="TCP",
+        description="Protocol type for port reservation"
+    )
+    service_name: str = Field(
+        default="",
+        min_length=1,
+        description="Service name for port reservation"
+    )
+    reserved_by: str = Field(
+        default="user",
+        description="Who is reserving the port"
+    )
+    expires_days: int | None = Field(
+        default=None,
+        ge=1,
+        description="Days until reservation expires (None for permanent)"
+    )
+    notes: str = Field(
+        default="",
+        description="Notes for the reservation"
     )
 
     @computed_field(return_type=list[str])
@@ -106,16 +170,18 @@ class DockerHostsParams(BaseModel):
 class DockerContainerParams(BaseModel):
     """Parameters for the docker_container consolidated tool."""
 
-    action: str = Field(
+    action: Literal["list", "info", "start", "stop", "restart", "build", "logs", "pull"] = Field(
         ...,
-        description="Action to perform (list, info, start, stop, restart, build, logs, pull)"
+        description="Action to perform"
     )
     host_id: str = Field(
         default="",
+        min_length=1,
         description="Host identifier"
     )
     container_id: str = Field(
         default="",
+        min_length=1,
         description="Container identifier"
     )
     all_containers: bool = Field(
@@ -158,23 +224,25 @@ class DockerContainerParams(BaseModel):
 class DockerComposeParams(BaseModel):
     """Parameters for the docker_compose consolidated tool."""
 
-    action: str = Field(
+    action: Literal["list", "deploy", "up", "down", "restart", "build", "discover", "logs", "migrate"] = Field(
         ...,
-        description="Action to perform (list, deploy, up, down, restart, build, discover, logs, migrate)"
+        description="Action to perform"
     )
     host_id: str = Field(
         default="",
+        min_length=1,
         description="Host identifier"
     )
     stack_name: str = Field(
         default="",
+        min_length=1,
         description="Stack name"
     )
     compose_content: str = Field(
         default="",
         description="Docker Compose file content"
     )
-    environment: dict[str, str] = Field(
+    environment: dict[str, str] | None = Field(
         default_factory=dict,
         description="Environment variables"
     )
@@ -206,6 +274,7 @@ class DockerComposeParams(BaseModel):
     )
     target_host_id: str = Field(
         default="",
+        min_length=1,
         description="Target host ID for migration operations"
     )
     remove_source: bool = Field(

@@ -204,8 +204,8 @@ class TestParameterModelIntegration:
                 model_class()
 
             # Should accept action field
-            instance = model_class(action="test")
-            assert instance.action == "test"
+            instance = model_class(action="list")
+            assert instance.action == "list"
 
     def test_model_serialization(self):
         """Test that models can be serialized to dict."""

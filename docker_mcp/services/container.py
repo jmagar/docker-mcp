@@ -10,6 +10,7 @@ import structlog
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
+from ..core.cache import PortCache
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..tools.containers import ContainerTools
@@ -18,10 +19,11 @@ from ..tools.containers import ContainerTools
 class ContainerService:
     """Service for Docker container management operations."""
 
-    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager, cache: PortCache | None = None):
         self.config = config
         self.context_manager = context_manager
-        self.container_tools = ContainerTools(config, context_manager)
+        self.cache = cache
+        self.container_tools = ContainerTools(config, context_manager, cache)
         self.logger = structlog.get_logger()
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
@@ -362,7 +364,7 @@ class ContainerService:
                 },
             )
 
-    async def list_host_ports(self, host_id: str, include_stopped: bool = False) -> ToolResult:
+    async def list_host_ports(self, host_id: str, include_stopped: bool = False, use_cache: bool = True) -> ToolResult:
         """List all ports currently in use by containers on a Docker host."""
         try:
             is_valid, error_msg = self._validate_host(host_id)
@@ -373,7 +375,7 @@ class ContainerService:
                 )
 
             # Use container tools to get port information
-            result = await self.container_tools.list_host_ports(host_id, include_stopped)
+            result = await self.container_tools.list_host_ports(host_id, include_stopped, use_cache)
 
             summary_lines = self._format_port_usage_summary(result, host_id)
 
@@ -387,6 +389,8 @@ class ContainerService:
                     "port_mappings": result["port_mappings"],
                     "conflicts": result["conflicts"],
                     "summary": result["summary"],
+                    "cached": result.get("cached", False),
+                    "timestamp": result.get("timestamp"),
                 },
             )
 
