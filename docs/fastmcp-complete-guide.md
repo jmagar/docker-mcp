@@ -308,15 +308,33 @@ async def docker_hosts(
     schedule_time: Annotated[str, Field(default="", pattern=r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$", description="Time to run cleanup in HH:MM format (24-hour)")] = ""
 ) -> dict[str, Any]:
     """Consolidated Docker hosts management tool.
-    
+
     Actions:
-    - list: List all configured Docker hosts  
-    - add: Add a new Docker host (requires: host_id, ssh_host, ssh_user; optional: ssh_port, ssh_key_path, description, tags)
-    - ports: List port mappings for a host (requires: host_id; supports filtering, export, availability scanning)
-    - compose_path: Update host compose path (requires: host_id, compose_path)
-    - import_ssh: Import hosts from SSH config
-    - reserve_port: Reserve a port on a host (requires: host_id, port, service_name; optional: protocol, reserved_by, expires_days, notes)
-    - release_port: Release a port reservation (requires: host_id, port; optional: protocol)
+    • list: List all configured Docker hosts
+      - Required: none
+      
+    • add: Add a new Docker host
+      - Required: host_id, ssh_host, ssh_user
+      - Optional: ssh_port, ssh_key_path, description, tags, compose_path, enabled, test_connection
+      
+    • ports: List port mappings for a host
+      - Required: host_id
+      - Optional: include_stopped, export_format, filter_project, filter_range, filter_protocol, scan_available, suggest_next, use_cache
+      
+    • compose_path: Update host compose path
+      - Required: host_id, compose_path
+      
+    • import_ssh: Import hosts from SSH config
+      - Required: none
+      - Optional: ssh_config_path, selected_hosts, compose_path_overrides, auto_confirm
+      
+    • reserve_port: Reserve a port on a host
+      - Required: host_id, port, service_name
+      - Optional: protocol, reserved_by, expires_days, notes
+      
+    • release_port: Release a port reservation
+      - Required: host_id, port
+      - Optional: protocol
     """
     
     # Validation
@@ -620,18 +638,26 @@ async def consolidated_tool(
 @mcp.tool
 async def domain_manager(action, ...):
     """Consolidated domain management tool.
-    
+
     Actions:
-    - list: List all resources
-    - create: Create a new resource (requires: name; optional: description, tags)
-    - update: Update resource (requires: resource_id; optional: name, description)
-    - delete: Delete resource (requires: resource_id; optional: force)
-    - deploy: Deploy resource (requires: resource_id, config; optional: dry_run)
-    
-    Examples:
-    - List all: action="list"
-    - Create new: action="create", name="my-resource", description="My resource"
-    - Update existing: action="update", resource_id="123", name="new-name"
+    • list: List all resources
+      - Required: none
+      
+    • create: Create a new resource
+      - Required: name
+      - Optional: description, tags
+      
+    • update: Update resource
+      - Required: resource_id
+      - Optional: name, description
+      
+    • delete: Delete resource
+      - Required: resource_id
+      - Optional: force
+      
+    • deploy: Deploy resource
+      - Required: resource_id, config
+      - Optional: dry_run
     """
 ```
 
@@ -779,7 +805,12 @@ After making changes:
 3. **Collections**: Use `default_factory=list` or `default_factory=dict`
 4. **No Unions**: Avoid `| None` entirely
 5. **Explicit Defaults**: Always specify `default=` in Field for optional parameters
-6. **Use `str` for optional enums**: Instead of `Literal` for optional enum-like parameters
+6. **Use Enums**: For action parameters, use proper Enum classes instead of Literal types for better type safety
+
+### For Documentation Format:
+- **Use bullet points**: • for main actions, - for sub-bullets
+- **Clear parameter organization**: Separate Required and Optional sections
+- **Consistent formatting**: Same format across all consolidated tools
 
 Together, these patterns create FastMCP servers that are:
 - **Token-efficient** (critical for context limits)

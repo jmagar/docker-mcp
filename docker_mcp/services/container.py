@@ -10,7 +10,6 @@ import structlog
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
 
-from ..core.cache import PortCache
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..tools.containers import ContainerTools
@@ -19,12 +18,125 @@ from ..tools.containers import ContainerTools
 class ContainerService:
     """Service for Docker container management operations."""
 
-    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager, cache: PortCache | None = None):
+    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
         self.config = config
         self.context_manager = context_manager
-        self.cache = cache
-        self.container_tools = ContainerTools(config, context_manager, cache)
+        self.cache_manager = None
+        self.container_tools = ContainerTools(config, context_manager)
         self.logger = structlog.get_logger()
+
+    def set_cache_manager(self, cache_manager):
+        """Set the cache manager after initialization."""
+        self.cache_manager = cache_manager
+
+    async def _list_containers_cached(self, host_id: str, all_containers: bool = False, limit: int = 20, offset: int = 0) -> dict:
+        """List containers using cache manager."""
+        try:
+            # Get containers from cache
+            cached_containers = await self.cache_manager.get_containers(host_id)
+            
+            # Filter by status if not showing all containers
+            if not all_containers:
+                # Only show running containers
+                filtered_containers = [c for c in cached_containers if c.status.lower() in ['running', 'up']]
+            else:
+                filtered_containers = cached_containers
+
+            # Convert cache objects to dict format using optimized method
+            containers = [cached_container.to_service_dict() for cached_container in filtered_containers]
+
+            # Apply pagination
+            total = len(containers)
+            start_idx = offset
+            end_idx = min(offset + limit, total)
+            paginated_containers = containers[start_idx:end_idx]
+            
+            # Build pagination info
+            pagination = {
+                "total": total,
+                "returned": len(paginated_containers),
+                "offset": offset,
+                "limit": limit,
+                "has_next": end_idx < total,
+            }
+            
+            self.logger.info(
+                "Listed containers from cache",
+                host_id=host_id,
+                total_containers=total,
+                returned=len(paginated_containers),
+                all_containers=all_containers
+            )
+
+            return {
+                "success": True,
+                "host_id": host_id,
+                "containers": paginated_containers,
+                "pagination": pagination,
+            }
+
+        except Exception as e:
+            self.logger.error("Failed to list containers from cache", host_id=host_id, error=str(e))
+            # Fall back to container tools
+            return await self.container_tools.list_containers(host_id, all_containers, limit, offset)
+
+    async def _get_container_info_cached(self, host_id: str, container_id: str) -> dict:
+        """Get container info using cache manager."""
+        try:
+            # Get specific container from cache
+            cached_container = await self.cache_manager.get_container(host_id, container_id)
+            
+            if not cached_container:
+                return {"error": f"Container '{container_id}' not found on host '{host_id}'"}
+
+            # Convert cache object to dict format expected by the service
+            container_info = {
+                "success": True,
+                "host_id": host_id,
+                "container": {
+                    "id": cached_container.container_id,
+                    "name": cached_container.name,
+                    "image": cached_container.image,
+                    "status": cached_container.status,
+                    "state": "running" if cached_container.status.lower() in ['running', 'up'] else "stopped",
+                    "created": cached_container.created,
+                    "started": cached_container.started,
+                    "ports": cached_container.ports,
+                    "labels": cached_container.labels,
+                    "environment": {},  # Removed from cache for memory optimization
+                    "mounts": {
+                        "bind_mounts": cached_container.bind_mounts,
+                        "volumes": cached_container.volumes,
+                        "volume_drivers": cached_container.volume_drivers,
+                    },
+                    "networks": cached_container.network_aliases,
+                    "compose_project": cached_container.compose_project,
+                    "compose_service": cached_container.compose_service,
+                    "compose_config_files": cached_container.compose_config_files,
+                    "compose_working_dir": cached_container.compose_working_dir,
+                    "health_status": cached_container.health_status,
+                    "restart_policy": cached_container.restart_policy,
+                    "cpu_usage": cached_container.cpu_usage,
+                    "memory_usage": cached_container.memory_usage,
+                    "memory_limit": cached_container.memory_limit,
+                    "log_tail": [],  # Removed from cache for memory optimization
+                    "working_dir": cached_container.working_dir,
+                }
+            }
+            
+            self.logger.info(
+                "Retrieved container info from cache",
+                host_id=host_id,
+                container_id=container_id,
+                container_name=cached_container.name
+            )
+
+            return container_info
+
+        except Exception as e:
+            self.logger.error("Failed to get container info from cache", host_id=host_id, container_id=container_id, error=str(e))
+            # Fall back to container tools
+            return await self.container_tools.get_container_info(host_id, container_id)
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
         """Validate host exists in configuration."""
@@ -72,10 +184,14 @@ class ContainerService:
                     structured_content={"success": False, "error": error_msg},
                 )
 
-            # Use container tools to get containers with pagination
-            result = await self.container_tools.list_containers(
-                host_id, all_containers, limit, offset
-            )
+            # Use cache manager if available, otherwise fall back to container tools
+            if self.cache_manager:
+                result = await self._list_containers_cached(host_id, all_containers, limit, offset)
+            else:
+                # Use container tools to get containers with pagination
+                result = await self.container_tools.list_containers(
+                    host_id, all_containers, limit, offset
+                )
 
             # Create clean, professional summary
             containers = result["containers"]
@@ -152,8 +268,12 @@ class ContainerService:
                     structured_content={"success": False, "error": error_msg},
                 )
 
-            # Use container tools to get container info
-            container_info = await self.container_tools.get_container_info(host_id, container_id)
+            # Use cache manager if available, otherwise fall back to container tools
+            if self.cache_manager:
+                container_info = await self._get_container_info_cached(host_id, container_id)
+            else:
+                # Use container tools to get container info
+                container_info = await self.container_tools.get_container_info(host_id, container_id)
 
             if "error" in container_info:
                 return ToolResult(
@@ -364,8 +484,8 @@ class ContainerService:
                 },
             )
 
-    async def list_host_ports(self, host_id: str, include_stopped: bool = False, use_cache: bool = True) -> ToolResult:
-        """List all ports currently in use by containers on a Docker host."""
+    async def list_host_ports(self, host_id: str) -> ToolResult:
+        """List all ports currently in use by containers on a Docker host (includes stopped containers)."""
         try:
             is_valid, error_msg = self._validate_host(host_id)
             if not is_valid:
@@ -374,8 +494,8 @@ class ContainerService:
                     structured_content={"success": False, "error": error_msg},
                 )
 
-            # Use container tools to get port information
-            result = await self.container_tools.list_host_ports(host_id, include_stopped, use_cache)
+            # Use container tools to get port information (always include stopped containers)
+            result = await self.container_tools.list_host_ports(host_id)
 
             summary_lines = self._format_port_usage_summary(result, host_id)
 
@@ -507,3 +627,57 @@ class ContainerService:
                 lines.append(f"    Conflicts with: {conflict_with}")
 
         return lines
+
+    async def check_port_availability(self, host_id: str, port: int) -> dict[str, Any]:
+        """Check if a specific port is available on a host.
+
+        Args:
+            host_id: Host identifier to check
+            port: Port number to check
+
+        Returns:
+            Port availability information
+        """
+        try:
+            is_valid, error_msg = self._validate_host(host_id)
+            if not is_valid:
+                return {"success": False, "error": error_msg}
+
+            # Get current port usage (always include stopped containers)
+            result = await self.container_tools.list_host_ports(host_id)
+            
+            if "error" in result:
+                return {"success": False, "error": result["error"]}
+
+            # Check if the specific port is in use
+            port_mappings = result.get("port_mappings", [])
+            
+            conflicts = []
+            for mapping in port_mappings:
+                if mapping.get("host_port") == str(port):
+                    conflicts.append({
+                        "container_name": mapping.get("container_name"),
+                        "container_id": mapping.get("container_id"),
+                        "image": mapping.get("image"),
+                        "protocol": mapping.get("protocol", "tcp"),
+                    })
+
+            is_available = len(conflicts) == 0
+            
+            return {
+                "success": True,
+                "host_id": host_id,
+                "port": port,
+                "available": is_available,
+                "conflicts": conflicts,
+                "message": f"Port {port} is {'available' if is_available else 'in use'}",
+            }
+
+        except Exception as e:
+            self.logger.error("Failed to check port availability", host_id=host_id, port=port, error=str(e))
+            return {
+                "success": False,
+                "error": f"Port check failed: {str(e)}",
+                "host_id": host_id,
+                "port": port,
+            }

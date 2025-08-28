@@ -77,18 +77,33 @@ class PortMappingResource(FunctionResource):
                 use_cache=use_cache,
             )
 
-            # Use the server's enhanced port listing functionality
-            result = await self.server_instance.list_host_ports_enhanced(
+            # Use the existing port listing functionality
+            result = await self.server_instance.list_host_ports(
                 host_id=host_id,
                 include_stopped=include_stopped,
-                export_format=export_format,
-                filter_project=filter_project,
-                filter_range=filter_range,
-                filter_protocol=filter_protocol,
-                scan_available=scan_available,
-                suggest_next=suggest_next,
-                use_cache=use_cache,
             )
+            
+            # Convert ToolResult to dict if needed
+            if hasattr(result, 'content'):
+                # Handle ToolResult format
+                if result.content and len(result.content) > 0:
+                    if hasattr(result.content[0], 'text'):
+                        # Extract the actual data from the ToolResult
+                        import json
+                        try:
+                            result = json.loads(result.content[0].text)
+                        except (json.JSONDecodeError, AttributeError):
+                            result = {"success": False, "error": "Failed to parse port data"}
+                    else:
+                        result = {"success": False, "error": "No content in response"}
+                else:
+                    result = {"success": False, "error": "Empty response"}
+            
+            # TODO: Implement additional filtering parameters in future versions
+            # Currently only basic host_id and include_stopped are supported
+            if filter_project or filter_range or filter_protocol or scan_available or suggest_next:
+                if isinstance(result, dict) and result.get("success"):
+                    result["warning"] = "Advanced filtering parameters not yet implemented"
 
             # Add resource metadata
             result["resource_uri"] = f"ports://{host_id}"

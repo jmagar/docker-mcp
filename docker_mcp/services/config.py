@@ -261,8 +261,6 @@ class ConfigService:
         self,
         ssh_config_path: str | None = None,
         selected_hosts: str | None = None,
-        compose_path_overrides: dict[str, str] | None = None,
-        auto_confirm: bool = False,
         config_path: str | None = None,
     ) -> ToolResult:
         """Import hosts from SSH config with interactive selection and compose path discovery."""
@@ -297,7 +295,7 @@ class ConfigService:
 
             # Process selected hosts
             imported_hosts, compose_path_configs = await self._import_selected_hosts(
-                hosts_to_import, compose_path_overrides, auto_confirm
+                hosts_to_import
             )
 
             if not imported_hosts:
@@ -362,8 +360,8 @@ class ConfigService:
             '  import_ssh_config(selected_hosts="1,3,5")  # Import hosts 1, 3, and 5',
             '  import_ssh_config(selected_hosts="all")     # Import all hosts',
             "",
-            "To import all hosts with auto-confirmation:",
-            '  import_ssh_config(selected_hosts="all", auto_confirm=True)',
+            "To import all hosts:",
+            '  import_ssh_config(selected_hosts="all")',
         ])
 
         return ToolResult(
@@ -410,8 +408,6 @@ class ConfigService:
     async def _import_selected_hosts(
         self,
         hosts_to_import: list,
-        compose_path_overrides: dict[str, str] | None,
-        auto_confirm: bool,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Import selected hosts with compose path discovery."""
         imported_hosts = []
@@ -432,9 +428,7 @@ class ConfigService:
             self.config.hosts[host_id] = docker_host
 
             # Discover compose path for this host
-            compose_path = await self._discover_compose_path_for_host(
-                host_id, compose_path_overrides, auto_confirm
-            )
+            compose_path = await self._discover_compose_path_for_host(host_id)
 
             # Set compose path if discovered or provided
             if compose_path:
@@ -442,7 +436,7 @@ class ConfigService:
                 compose_path_configs.append({
                     "host_id": host_id,
                     "compose_path": compose_path,
-                    "discovered": compose_path not in (compose_path_overrides or {}).values(),
+                    "discovered": True,
                 })
 
             # Update the host in configuration
@@ -460,17 +454,8 @@ class ConfigService:
     async def _discover_compose_path_for_host(
         self,
         host_id: str,
-        compose_path_overrides: dict[str, str] | None,
-        auto_confirm: bool,
     ) -> str | None:
         """Discover compose path for a specific host."""
-        if auto_confirm:
-            return None
-
-        # Check for override
-        if compose_path_overrides and host_id in compose_path_overrides:
-            return compose_path_overrides[host_id]
-
         # Try to discover compose path
         try:
             discovery_result = await self.compose_manager.discover_compose_locations(host_id)

@@ -33,18 +33,6 @@ class CacheEntry(BaseModel):
         return time.time() - self.created_at
 
 
-class PortReservation(BaseModel):
-    """Port reservation record."""
-
-    host_id: str
-    port: int
-    protocol: str
-    service_name: str
-    reserved_by: str  # User or system identifier
-    reserved_at: str  # ISO timestamp
-    expires_at: str | None = None  # ISO timestamp, None for permanent
-    notes: str = ""
-
 
 class PortCache:
     """SQLite-based cache for port and container data with TTL support."""
@@ -88,21 +76,6 @@ class PortCache:
                 )
             """)
 
-            # Port reservations table (persistent)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS port_reservations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    host_id TEXT NOT NULL,
-                    port INTEGER NOT NULL,
-                    protocol TEXT NOT NULL DEFAULT 'TCP',
-                    service_name TEXT NOT NULL,
-                    reserved_by TEXT NOT NULL,
-                    reserved_at TEXT NOT NULL,  -- ISO timestamp
-                    expires_at TEXT,  -- ISO timestamp, NULL for permanent
-                    notes TEXT DEFAULT '',
-                    UNIQUE(host_id, port, protocol)
-                )
-            """)
 
             # Container inspect cache table
             await db.execute("""
@@ -137,7 +110,6 @@ class PortCache:
             # Create indexes for better performance
             await db.execute("CREATE INDEX IF NOT EXISTS idx_port_mappings_host_expires ON port_mappings_cache(host_id, expires_at)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_available_ports_host_range ON available_ports_cache(host_id, port_range, expires_at)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_reservations_host_port ON port_reservations(host_id, port, protocol)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_inspect_cache_host_container ON container_inspect_cache(host_id, container_id, expires_at)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_usage_history_host_port ON port_usage_history(host_id, port, protocol)")
 
@@ -163,10 +135,6 @@ class PortCache:
             cursor = await db.execute("DELETE FROM container_inspect_cache WHERE expires_at < ?", (current_time,))
             removed_count += cursor.rowcount
 
-            # Clean expired port reservations (only those with expires_at set)
-            current_iso = datetime.now().isoformat()
-            cursor = await db.execute("DELETE FROM port_reservations WHERE expires_at IS NOT NULL AND expires_at < ?", (current_iso,))
-            removed_count += cursor.rowcount
 
             await db.commit()
 
@@ -299,73 +267,6 @@ class PortCache:
 
         logger.debug("Cached container inspect data", host_id=host_id, container_id=container_id, ttl_minutes=ttl_minutes)
 
-    async def reserve_port(self, reservation: PortReservation) -> bool:
-        """Reserve a port. Returns True if successful, False if port already reserved."""
-        async with aiosqlite.connect(self.db_path) as db:
-            # Check if port is already reserved
-            cursor = await db.execute(
-                "SELECT service_name, reserved_by FROM port_reservations WHERE host_id = ? AND port = ? AND protocol = ?",
-                (reservation.host_id, reservation.port, reservation.protocol)
-            )
-            existing = await cursor.fetchone()
-
-            if existing:
-                logger.warning("Port already reserved", host_id=reservation.host_id, port=reservation.port,
-                             existing_service=existing[0], existing_reserved_by=existing[1])
-                return False
-
-            # Reserve the port
-            await db.execute(
-                "INSERT INTO port_reservations (host_id, port, protocol, service_name, reserved_by, reserved_at, expires_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (reservation.host_id, reservation.port, reservation.protocol, reservation.service_name,
-                 reservation.reserved_by, reservation.reserved_at, reservation.expires_at, reservation.notes)
-            )
-            await db.commit()
-
-        logger.info("Port reserved", host_id=reservation.host_id, port=reservation.port,
-                   service=reservation.service_name, reserved_by=reservation.reserved_by)
-        return True
-
-    async def release_port(self, host_id: str, port: int, protocol: str = "TCP") -> bool:
-        """Release a port reservation. Returns True if successful, False if not found."""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "DELETE FROM port_reservations WHERE host_id = ? AND port = ? AND protocol = ?",
-                (host_id, port, protocol)
-            )
-            await db.commit()
-
-            if cursor.rowcount > 0:
-                logger.info("Port reservation released", host_id=host_id, port=port, protocol=protocol)
-                return True
-            else:
-                logger.warning("Port reservation not found for release", host_id=host_id, port=port, protocol=protocol)
-                return False
-
-    async def get_reservations(self, host_id: str) -> list[PortReservation]:
-        """Get all port reservations for a host."""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT host_id, port, protocol, service_name, reserved_by, reserved_at, expires_at, notes FROM port_reservations WHERE host_id = ? ORDER BY port",
-                (host_id,)
-            )
-            rows = await cursor.fetchall()
-
-            reservations = []
-            for row in rows:
-                reservation = PortReservation(
-                    host_id=row[0],
-                    port=row[1],
-                    protocol=row[2],
-                    service_name=row[3],
-                    reserved_by=row[4],
-                    reserved_at=row[5],
-                    expires_at=row[6],
-                    notes=row[7]
-                )
-                reservations.append(reservation)
-
-            return reservations
 
     async def record_port_usage(self, mappings: list[PortMapping]) -> None:
         """Record port usage in historical table."""
@@ -465,9 +366,6 @@ class PortCache:
             cursor = await db.execute("SELECT COUNT(*) FROM container_inspect_cache WHERE expires_at > ?", (time.time(),))
             stats["active_inspect_cache_entries"] = (await cursor.fetchone())[0]
 
-            # Reservation stats
-            cursor = await db.execute("SELECT COUNT(*) FROM port_reservations")
-            stats["total_port_reservations"] = (await cursor.fetchone())[0]
 
             # Historical data stats
             cursor = await db.execute("SELECT COUNT(*) FROM port_usage_history")

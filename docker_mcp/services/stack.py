@@ -224,6 +224,53 @@ class StackService:
 
         return summary_lines
 
+    async def get_stack_compose_file(self, host_id: str, stack_name: str) -> ToolResult:
+        """Get the docker-compose.yml content for a specific stack."""
+        try:
+            is_valid, error_msg = self._validate_host(host_id)
+            if not is_valid:
+                return ToolResult(
+                    content=[TextContent(type="text", text=f"Error: {error_msg}")],
+                    structured_content={"success": False, "error": error_msg},
+                )
+
+            # Use stack tools to get the compose file content
+            result = await self.stack_tools.get_stack_compose_content(host_id, stack_name)
+
+            if result["success"]:
+                compose_content = result.get("compose_content", "")
+                return ToolResult(
+                    content=[TextContent(type="text", text=compose_content)],
+                    structured_content={
+                        "success": True,
+                        "host_id": host_id,
+                        "stack_name": stack_name,
+                        "compose_content": compose_content
+                    },
+                )
+            else:
+                return ToolResult(
+                    content=[TextContent(type="text", text=f"❌ {result['error']}")],
+                    structured_content=result,
+                )
+
+        except Exception as e:
+            self.logger.error(
+                "Failed to get stack compose file",
+                host_id=host_id,
+                stack_name=stack_name,
+                error=str(e)
+            )
+            return ToolResult(
+                content=[TextContent(type="text", text=f"❌ Failed to get compose file: {str(e)}")],
+                structured_content={
+                    "success": False,
+                    "error": str(e),
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                },
+            )
+
     async def migrate_stack(
         self,
         source_host_id: str,

@@ -8,8 +8,9 @@ import asyncio
 import json
 import shutil
 import subprocess
-from typing import Any
+from typing import Any, Optional
 
+import docker
 import structlog
 
 from .config_loader import DockerHost, DockerMCPConfig
@@ -24,6 +25,7 @@ class DockerContextManager:
     def __init__(self, config: DockerMCPConfig):
         self.config = config
         self._context_cache: dict[str, str] = {}
+        self._client_cache: dict[str, docker.DockerClient] = {}
         self._docker_bin = shutil.which("docker") or "docker"
 
     async def _run_docker_command(self, args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
@@ -168,6 +170,7 @@ class DockerContextManager:
             "system",
             "info",
             "version",
+            "rm",  # Added for test cleanup
         }
 
         parts = command.strip().split()
@@ -260,3 +263,74 @@ class DockerContextManager:
         except Exception as e:
             logger.error("Docker context test error", host_id=host_id, error=str(e))
             return False
+            
+    async def get_client(self, host_id: str) -> Optional[docker.DockerClient]:
+        """Get Docker SDK client for a host.
+        
+        Creates a Docker SDK client that can connect to the host via SSH.
+        Uses Docker contexts to establish the connection.
+        """
+        try:
+            # Check cache first
+            if host_id in self._client_cache:
+                client = self._client_cache[host_id]
+                # Test if client is still alive
+                try:
+                    client.ping()
+                    return client
+                except Exception:
+                    # Client is dead, remove from cache
+                    self._client_cache.pop(host_id, None)
+            
+            if host_id not in self.config.hosts:
+                raise DockerContextError(f"Host {host_id} not configured")
+            
+            # Ensure context exists
+            context_name = await self.ensure_context(host_id)
+            
+            # Create Docker SDK client using the context
+            # This uses the Docker context's SSH configuration
+            client = docker.from_env(use_ssh_client=True)
+            
+            # Override the base_url to use our context
+            host_config = self.config.hosts[host_id]
+            ssh_url = f"ssh://{host_config.user}@{host_config.hostname}"
+            if host_config.port != 22:
+                ssh_url += f":{host_config.port}"
+                
+            # Create client with SSH connection
+            try:
+                client = docker.DockerClient(base_url=ssh_url)
+                # Test the connection
+                client.ping()
+                
+                # Cache the working client
+                self._client_cache[host_id] = client
+                
+                logger.debug(f"Created Docker SDK client for host {host_id}")
+                return client
+                
+            except Exception as e:
+                logger.warning(f"Failed to create Docker SDK client for {host_id}: {e}")
+                # Try fallback with context
+                try:
+                    # Use docker context with environment
+                    import os
+                    env = os.environ.copy()
+                    env['DOCKER_CONTEXT'] = context_name
+                    
+                    # This creates a client that will use the context
+                    client = docker.from_env(environment=env)
+                    client.ping()
+                    
+                    self._client_cache[host_id] = client
+                    logger.debug(f"Created Docker SDK client using context for host {host_id}")
+                    return client
+                    
+                except Exception as context_e:
+                    logger.error(f"Failed to create Docker client with context for {host_id}: {context_e}")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Error getting Docker client for {host_id}: {e}")
+            return None

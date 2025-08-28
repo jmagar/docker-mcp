@@ -607,6 +607,80 @@ class StackTools:
 
         return None
 
+    async def get_stack_compose_content(self, host_id: str, stack_name: str) -> dict[str, Any]:
+        """Get the docker-compose.yml content for a specific stack."""
+        try:
+            compose_info = await self._get_compose_file_info(host_id, stack_name)
+            
+            if not compose_info["exists"]:
+                return {
+                    "success": False,
+                    "error": f"Compose file not found for stack '{stack_name}'",
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            
+            # Get the compose file path
+            compose_file_path = compose_info["path"]
+            
+            # Read the file content via SSH
+            host = self.config.hosts[host_id]
+            ssh_cmd = [
+                "ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR",
+            ]
+            
+            # Add key file if specified
+            if host.key_file:
+                ssh_cmd.extend(["-i", host.key_file])
+            
+            # Add port if not default
+            if host.port != 22:
+                ssh_cmd.extend(["-p", str(host.port)])
+            
+            # SSH connection and cat command
+            ssh_cmd.append(f"{host.user}@{host.hostname}")
+            ssh_cmd.append(f"cat {compose_file_path}")
+            
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: subprocess.run(  # nosec B603
+                    ssh_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            )
+            
+            if result.returncode == 0:
+                return {
+                    "success": True,
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                    "compose_content": result.stdout,
+                    "compose_file_path": compose_file_path,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed to read compose file: {result.stderr}",
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to get compose content: {str(e)}",
+                "host_id": host_id,
+                "stack_name": stack_name,
+                "timestamp": datetime.now().isoformat(),
+            }
+
     async def _get_compose_file_info(self, host_id: str, stack_name: str) -> dict[str, Any]:
         """Get compose file information for a stack."""
         compose_file_exists = await self.compose_manager.compose_file_exists(host_id, stack_name)

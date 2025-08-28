@@ -89,3 +89,6 @@ tmp/
 
 # Fix files
 *-fixes.md
+
+# Tests (exclude from git tracking)
+tests/

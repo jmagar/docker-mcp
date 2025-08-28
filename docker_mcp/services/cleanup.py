@@ -7,6 +7,7 @@ Business logic for Docker cleanup and disk usage operations.
 import asyncio
 import re
 import subprocess
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -856,3 +857,288 @@ class CleanupService:
         }
 
         return formatted
+
+    # Schedule Management Methods (consolidated from ScheduleService)
+    
+    async def handle_schedule_action(
+        self,
+        schedule_action: str,
+        host_id: str | None = None,
+        cleanup_type: str | None = None,
+        schedule_frequency: str | None = None,
+        schedule_time: str | None = None,
+        schedule_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Handle schedule-related actions.
+        
+        Args:
+            schedule_action: Action to perform (add, remove, list, enable, disable)
+            host_id: Target Docker host identifier
+            cleanup_type: Type of cleanup (safe, moderate only)
+            schedule_frequency: Cleanup frequency (daily, weekly, monthly, custom)
+            schedule_time: Time to run cleanup (e.g., '02:00')
+            schedule_id: Schedule identifier for management
+            
+        Returns:
+            Action result
+        """
+        try:
+            if schedule_action == "add":
+                return await self._add_schedule(host_id, cleanup_type, schedule_frequency, schedule_time)
+            elif schedule_action == "remove":
+                return await self._remove_schedule(schedule_id)
+            elif schedule_action == "list":
+                return await self._list_schedules()
+            elif schedule_action == "enable":
+                return await self._toggle_schedule(schedule_id, True)
+            elif schedule_action == "disable":
+                return await self._toggle_schedule(schedule_id, False)
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unknown schedule action: {schedule_action}",
+                    "valid_actions": ["add", "remove", "list", "enable", "disable"],
+                }
+
+        except Exception as e:
+            self.logger.error("Schedule action failed", action=schedule_action, error=str(e))
+            return {"success": False, "error": str(e)}
+
+    async def _add_schedule(
+        self,
+        host_id: str | None,
+        cleanup_type: str | None,
+        schedule_frequency: str | None,
+        schedule_time: str | None,
+    ) -> dict[str, Any]:
+        """Add a new cleanup schedule."""
+        # Validation
+        if not host_id:
+            return {"success": False, "error": "host_id is required"}
+        if not cleanup_type or cleanup_type not in ["safe", "moderate"]:
+            return {"success": False, "error": "cleanup_type must be 'safe' or 'moderate'"}
+        if not schedule_frequency or schedule_frequency not in ["daily", "weekly", "monthly", "custom"]:
+            return {"success": False, "error": "schedule_frequency must be daily, weekly, monthly, or custom"}
+        if not schedule_time or not self._validate_time_format(schedule_time):
+            return {"success": False, "error": "schedule_time must be in HH:MM format (24-hour)"}
+
+        is_valid, error_msg = self._validate_host(host_id)
+        if not is_valid:
+            return {"success": False, "error": error_msg}
+
+        # Generate schedule ID
+        schedule_id = f"{host_id}_{cleanup_type}_{schedule_frequency}"
+        
+        # Check if schedule already exists
+        if schedule_id in self.config.cleanup_schedules:
+            return {
+                "success": False,
+                "error": f"Schedule already exists: {schedule_id}",
+                "existing_schedule": self._format_schedule_display(
+                    self.config.cleanup_schedules[schedule_id].model_dump()
+                ),
+            }
+
+        # Create schedule configuration
+        from ..core.config_loader import CleanupSchedule
+        
+        schedule_config = CleanupSchedule(
+            host_id=host_id,
+            cleanup_type=cleanup_type,
+            frequency=schedule_frequency,
+            time=schedule_time,
+            enabled=True,
+            created_at=datetime.now().isoformat(),
+        )
+
+        # Add to configuration
+        self.config.cleanup_schedules[schedule_id] = schedule_config
+
+        # Generate cron expression
+        cron_expression = self._generate_cron_expression(schedule_frequency, schedule_time)
+        cleanup_command = self._generate_cleanup_command(schedule_config.model_dump())
+
+        # Update crontab
+        cron_entry = f"{cron_expression} {cleanup_command} # docker-mcp-{schedule_id}"
+        cron_result = await self._update_crontab(schedule_id, "add", cron_entry)
+
+        if not cron_result["success"]:
+            # Remove from config if cron update failed
+            del self.config.cleanup_schedules[schedule_id]
+            return cron_result
+
+        self.logger.info("Cleanup schedule added", schedule_id=schedule_id, host_id=host_id)
+
+        return {
+            "success": True,
+            "message": f"Cleanup schedule added: {schedule_id}",
+            "schedule_id": schedule_id,
+            "schedule": self._format_schedule_display(schedule_config.model_dump()),
+            "cron_expression": cron_expression,
+        }
+
+    async def _remove_schedule(self, schedule_id: str | None) -> dict[str, Any]:
+        """Remove a cleanup schedule."""
+        if not schedule_id:
+            return {"success": False, "error": "schedule_id is required"}
+
+        if schedule_id not in self.config.cleanup_schedules:
+            return {"success": False, "error": f"Schedule not found: {schedule_id}"}
+
+        # Remove from crontab
+        cron_result = await self._update_crontab(schedule_id, "remove")
+        if not cron_result["success"]:
+            return cron_result
+
+        # Remove from configuration
+        removed_schedule = self.config.cleanup_schedules.pop(schedule_id)
+        
+        self.logger.info("Cleanup schedule removed", schedule_id=schedule_id)
+
+        return {
+            "success": True,
+            "message": f"Cleanup schedule removed: {schedule_id}",
+            "schedule_id": schedule_id,
+            "removed_schedule": self._format_schedule_display(removed_schedule.model_dump()),
+        }
+
+    async def _toggle_schedule(self, schedule_id: str | None, enabled: bool) -> dict[str, Any]:
+        """Enable or disable a cleanup schedule."""
+        if not schedule_id:
+            return {"success": False, "error": "schedule_id is required"}
+
+        if schedule_id not in self.config.cleanup_schedules:
+            return {"success": False, "error": f"Schedule not found: {schedule_id}"}
+
+        schedule = self.config.cleanup_schedules[schedule_id]
+        action = "enable" if enabled else "disable"
+
+        if schedule.enabled == enabled:
+            return {
+                "success": False,
+                "error": f"Schedule is already {action}d",
+                "schedule": self._format_schedule_display(schedule.model_dump()),
+            }
+
+        # Update configuration
+        schedule.enabled = enabled
+
+        # Update crontab (comment/uncomment the entry)
+        cron_result = await self._update_crontab(schedule_id, action)
+        if not cron_result["success"]:
+            schedule.enabled = not enabled  # Revert on failure
+            return cron_result
+
+        self.logger.info(f"Cleanup schedule {action}d", schedule_id=schedule_id)
+
+        return {
+            "success": True,
+            "message": f"Cleanup schedule {action}d: {schedule_id}",
+            "schedule_id": schedule_id,
+            "schedule": self._format_schedule_display(schedule.model_dump()),
+        }
+
+    async def _list_schedules(self) -> dict[str, Any]:
+        """List all cleanup schedules."""
+        schedules = []
+        for schedule_id, schedule_config in self.config.cleanup_schedules.items():
+            schedule_data = self._format_schedule_display(schedule_config.model_dump())
+            schedule_data["schedule_id"] = schedule_id
+            schedules.append(schedule_data)
+
+        return {
+            "success": True,
+            "schedules": schedules,
+            "total_schedules": len(schedules),
+            "active_schedules": len([s for s in schedules if s["enabled"]]),
+        }
+
+    def _validate_time_format(self, time_str: str) -> bool:
+        """Validate time format (HH:MM)."""
+        try:
+            parts = time_str.split(":")
+            if len(parts) != 2:
+                return False
+            
+            hour, minute = int(parts[0]), int(parts[1])
+            return 0 <= hour <= 23 and 0 <= minute <= 59
+        except (ValueError, AttributeError):
+            return False
+
+    def _generate_cron_expression(self, frequency: str, time: str) -> str:
+        """Generate cron expression from frequency and time."""
+        hour, minute = time.split(":")
+        
+        if frequency == "daily":
+            return f"{minute} {hour} * * *"
+        elif frequency == "weekly":
+            return f"{minute} {hour} * * 0"  # Sunday
+        elif frequency == "monthly":
+            return f"{minute} {hour} 1 * *"  # First day of month
+        elif frequency == "custom":
+            # For custom schedules, default to daily
+            return f"{minute} {hour} * * *"
+        else:
+            raise ValueError(f"Unsupported frequency: {frequency}")
+
+    async def _update_crontab(self, schedule_id: str, action: str, cron_entry: str = ""):
+        """Update system crontab for cleanup schedule."""
+        try:
+            if action == "add":
+                # Add new cron entry
+                result = await asyncio.create_subprocess_shell(
+                    f"(crontab -l 2>/dev/null; echo '{cron_entry}') | crontab -",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
+                
+            elif action == "remove":
+                # Remove cron entry
+                result = await asyncio.create_subprocess_shell(
+                    f"crontab -l 2>/dev/null | grep -v 'docker-mcp-{schedule_id}' | crontab -",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
+                
+            else:  # enable/disable
+                comment_char = "" if action == "enable" else "#"
+                result = await asyncio.create_subprocess_shell(
+                    f"crontab -l 2>/dev/null | sed 's/^#*\\(.*docker-mcp-{schedule_id}\\)/{comment_char}\\1/' | crontab -",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                return {"success": True, "message": f"Crontab updated for {action} action"}
+            else:
+                error_msg = stderr.decode().strip() if stderr else f"Crontab {action} failed"
+                return {"success": False, "error": error_msg}
+
+        except Exception as e:
+            return {"success": False, "error": f"Crontab update failed: {str(e)}"}
+
+    def _generate_cleanup_command(self, schedule_config: dict) -> str:
+        """Generate the command to run for scheduled cleanup."""
+        host_id = schedule_config["host_id"]
+        cleanup_type = schedule_config["cleanup_type"]
+        
+        # This would typically call the Docker MCP tool
+        return f"docker-mcp cleanup --host {host_id} --type {cleanup_type}"
+
+    def _format_schedule_display(self, schedule_config: dict) -> dict[str, Any]:
+        """Format schedule configuration for display."""
+        cron_expr = self._generate_cron_expression(schedule_config["frequency"], schedule_config["time"])
+        
+        return {
+            "host_id": schedule_config["host_id"],
+            "cleanup_type": schedule_config["cleanup_type"],
+            "frequency": schedule_config["frequency"],
+            "time": schedule_config["time"],
+            "enabled": schedule_config["enabled"],
+            "created_at": schedule_config["created_at"],
+            "cron_expression": cron_expr,
+            "description": f"Run {schedule_config['cleanup_type']} cleanup {schedule_config['frequency']} at {schedule_config['time']}",
+        }
