@@ -8,7 +8,7 @@ import asyncio
 import json
 import shutil
 import subprocess
-from typing import Any, Optional
+from typing import Any
 
 import docker
 import structlog
@@ -28,7 +28,9 @@ class DockerContextManager:
         self._client_cache: dict[str, docker.DockerClient] = {}
         self._docker_bin = shutil.which("docker") or "docker"
 
-    async def _run_docker_command(self, args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    async def _run_docker_command(
+        self, args: list[str], timeout: int = 30
+    ) -> subprocess.CompletedProcess:
         """Safely execute docker command."""
         cmd = [self._docker_bin] + args
         return await asyncio.get_event_loop().run_in_executor(
@@ -74,7 +76,9 @@ class DockerContextManager:
     async def _context_exists(self, context_name: str) -> bool:
         """Check if Docker context exists."""
         try:
-            result = await self._run_docker_command(["context", "inspect", context_name], timeout=10)
+            result = await self._run_docker_command(
+                ["context", "inspect", context_name], timeout=10
+            )
             return result.returncode == 0
         except Exception:
             return False
@@ -184,7 +188,9 @@ class DockerContextManager:
     async def list_contexts(self) -> list[dict[str, Any]]:
         """List all Docker contexts."""
         try:
-            result = await self._run_docker_command(["context", "ls", "--format", "json"], timeout=10)
+            result = await self._run_docker_command(
+                ["context", "ls", "--format", "json"], timeout=10
+            )
 
             if result.returncode != 0:
                 raise DockerContextError(f"Failed to list contexts: {result.stderr}")
@@ -235,7 +241,9 @@ class DockerContextManager:
         try:
             context_name = await self.ensure_context(host_id)
 
-            result = await self._run_docker_command(["--context", context_name, "version", "--format", "json"], timeout=15)
+            result = await self._run_docker_command(
+                ["--context", context_name, "version", "--format", "json"], timeout=15
+            )
 
             if result.returncode == 0:
                 try:
@@ -263,10 +271,10 @@ class DockerContextManager:
         except Exception as e:
             logger.error("Docker context test error", host_id=host_id, error=str(e))
             return False
-            
-    async def get_client(self, host_id: str) -> Optional[docker.DockerClient]:
+
+    async def get_client(self, host_id: str) -> docker.DockerClient | None:
         """Get Docker SDK client for a host.
-        
+
         Creates a Docker SDK client that can connect to the host via SSH.
         Uses Docker contexts to establish the connection.
         """
@@ -281,56 +289,58 @@ class DockerContextManager:
                 except Exception:
                     # Client is dead, remove from cache
                     self._client_cache.pop(host_id, None)
-            
+
             if host_id not in self.config.hosts:
                 raise DockerContextError(f"Host {host_id} not configured")
-            
+
             # Ensure context exists
             context_name = await self.ensure_context(host_id)
-            
-            # Create Docker SDK client using the context
-            # This uses the Docker context's SSH configuration
-            client = docker.from_env(use_ssh_client=True)
-            
-            # Override the base_url to use our context
+
+            # Create Docker SDK client with paramiko SSH support
             host_config = self.config.hosts[host_id]
             ssh_url = f"ssh://{host_config.user}@{host_config.hostname}"
             if host_config.port != 22:
                 ssh_url += f":{host_config.port}"
-                
-            # Create client with SSH connection
+
+            # Create client with SSH connection using paramiko
             try:
-                client = docker.DockerClient(base_url=ssh_url)
+                # Docker SDK with use_ssh_client=False uses paramiko directly for SSH connections.
+                # This is faster and more reliable than use_ssh_client=True which shells out
+                # to the system SSH command and can have timeout issues.
+                client = docker.DockerClient(base_url=ssh_url, use_ssh_client=False, timeout=10)
                 # Test the connection
                 client.ping()
-                
+
                 # Cache the working client
                 self._client_cache[host_id] = client
-                
+
                 logger.debug(f"Created Docker SDK client for host {host_id}")
                 return client
-                
+
             except Exception as e:
                 logger.warning(f"Failed to create Docker SDK client for {host_id}: {e}")
                 # Try fallback with context
                 try:
                     # Use docker context with environment
                     import os
+
                     env = os.environ.copy()
-                    env['DOCKER_CONTEXT'] = context_name
-                    
+                    env["DOCKER_CONTEXT"] = context_name
+
                     # This creates a client that will use the context
-                    client = docker.from_env(environment=env)
+                    client = docker.from_env(environment=env, timeout=10)
                     client.ping()
-                    
+
                     self._client_cache[host_id] = client
                     logger.debug(f"Created Docker SDK client using context for host {host_id}")
                     return client
-                    
+
                 except Exception as context_e:
-                    logger.error(f"Failed to create Docker client with context for {host_id}: {context_e}")
+                    logger.error(
+                        f"Failed to create Docker client with context for {host_id}: {context_e}"
+                    )
                     return None
-                    
+
         except Exception as e:
             logger.error(f"Error getting Docker client for {host_id}: {e}")
             return None

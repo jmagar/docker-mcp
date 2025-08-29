@@ -6,8 +6,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+import docker
 import structlog
 
+from ..constants import DOCKER_COMPOSE_CONFIG_FILES, DOCKER_COMPOSE_PROJECT
 from .config_loader import DockerMCPConfig
 from .docker_context import DockerContextManager
 
@@ -78,7 +80,9 @@ class ComposeManager:
             location_analysis, compose_stacks = await self._analyze_containers(host_id, result)
 
             # Build final result
-            return self._build_discovery_result(discovery_result, location_analysis, compose_stacks, host_id)
+            return self._build_discovery_result(
+                discovery_result, location_analysis, compose_stacks, host_id
+            )
 
         except Exception as e:
             logger.error("Discovery failed", host_id=host_id, error=str(e))
@@ -97,12 +101,57 @@ class ComposeManager:
 
     async def _get_containers(self, host_id: str) -> dict | None:
         """Get containers from Docker."""
-        cmd = "ps --format json --no-trunc"
-        result = await self.context_manager.execute_docker_command(host_id, cmd)
+        try:
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
-        if not isinstance(result, dict) or "output" not in result:
+            # Use Docker SDK to get containers
+            docker_containers = await loop.run_in_executor(
+                None, lambda: client.containers.list(all=True)
+            )
+
+            # Format output to match expected JSON lines format
+            json_lines = []
+            for container in docker_containers:
+                container_json = {
+                    "ID": container.id,
+                    "Names": container.name,
+                    "Image": container.image.tags[0]
+                    if container.image.tags
+                    else container.image.id,
+                    "Command": " ".join(container.attrs.get("Config", {}).get("Cmd", []) or []),
+                    "CreatedAt": container.attrs.get("Created", ""),
+                    "Status": container.status,
+                    "Ports": self._format_ports_from_dict(container.ports),
+                    "Labels": ",".join([f"{k}={v}" for k, v in container.labels.items()]),
+                }
+                json_lines.append(json.dumps(container_json))
+
+            return {"success": True, "output": "\n".join(json_lines), "returncode": 0}
+
+        except Exception as e:
+            logger.error("Failed to get containers via Docker SDK", host_id=host_id, error=str(e))
             return None
-        return result
+
+    def _format_ports_from_dict(self, ports_dict: dict[str, list[dict] | None]) -> str:
+        """Format Docker SDK ports dict to match docker ps format."""
+        if not ports_dict:
+            return ""
+
+        formatted_ports = []
+        for container_port, host_bindings in ports_dict.items():
+            if host_bindings:
+                for binding in host_bindings:
+                    host_ip = binding.get("HostIp", "0.0.0.0")
+                    host_port = binding.get("HostPort", "")
+                    if host_ip == "0.0.0.0":
+                        formatted_ports.append(f"{host_port}:{container_port}")
+                    else:
+                        formatted_ports.append(f"{host_ip}:{host_port}:{container_port}")
+            else:
+                formatted_ports.append(container_port)
+
+        return ", ".join(formatted_ports)
 
     async def _analyze_containers(self, host_id: str, result: dict) -> tuple[dict, dict]:
         """Analyze containers for compose information."""
@@ -138,26 +187,35 @@ class ComposeManager:
 
     async def _get_container_info(self, host_id: str, container_id: str) -> dict | None:
         """Get detailed container information."""
-        inspect_result = await self.context_manager.execute_docker_command(
-            host_id, f"inspect {container_id}"
-        )
+        try:
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
-        if isinstance(inspect_result, list) and len(inspect_result) > 0:
-            return inspect_result[0]
-        elif isinstance(inspect_result, dict) and "output" in inspect_result:
-            try:
-                inspect_data = json.loads(inspect_result["output"])
-                if isinstance(inspect_data, list) and len(inspect_data) > 0:
-                    return inspect_data[0]
-            except json.JSONDecodeError:
-                pass
-        return None
+            # Get container using Docker SDK
+            container = await loop.run_in_executor(
+                None, lambda: client.containers.get(container_id)
+            )
+
+            # Return container attributes (inspect data)
+            return container.attrs
+
+        except docker.errors.NotFound:
+            logger.debug("Container not found during info retrieval", container_id=container_id)
+            return None
+        except docker.errors.APIError as e:
+            logger.debug(
+                "API error getting container info", container_id=container_id, error=str(e)
+            )
+            return None
+        except Exception as e:
+            logger.debug("Error getting container info", container_id=container_id, error=str(e))
+            return None
 
     def _extract_compose_info(self, container_info: dict) -> dict | None:
         """Extract compose information from container labels."""
         labels = container_info.get("Config", {}).get("Labels", {}) or {}
-        compose_project = labels.get("com.docker.compose.project", "")
-        compose_file = labels.get("com.docker.compose.project.config_files", "")
+        compose_project = labels.get(DOCKER_COMPOSE_PROJECT, "")
+        compose_file = labels.get(DOCKER_COMPOSE_CONFIG_FILES, "")
 
         # Skip containers that aren't part of compose projects
         if not compose_project or not compose_file:
@@ -177,7 +235,9 @@ class ComposeManager:
             "stack_dir": str(compose_path.parent),
         }
 
-    def _update_location_analysis(self, stack_info: dict, compose_stacks: dict, location_analysis: dict) -> None:
+    def _update_location_analysis(
+        self, stack_info: dict, compose_stacks: dict, location_analysis: dict
+    ) -> None:
         """Update location analysis with stack information."""
         compose_project = stack_info["project"]
         parent_dir = stack_info["parent_dir"]
@@ -195,7 +255,9 @@ class ComposeManager:
             location_analysis[parent_dir]["count"] += 1
             location_analysis[parent_dir]["stacks"].append(compose_project)
 
-    def _build_discovery_result(self, discovery_result: dict, location_analysis: dict, compose_stacks: dict, host_id: str) -> dict:
+    def _build_discovery_result(
+        self, discovery_result: dict, location_analysis: dict, compose_stacks: dict, host_id: str
+    ) -> dict:
         """Build the final discovery result."""
         discovery_result["stacks_found"] = list(compose_stacks.values())
         discovery_result["compose_locations"] = location_analysis
@@ -422,15 +484,17 @@ class ComposeManager:
             try:
                 os.unlink(temp_local_path)
             except Exception as e:
-                logger.debug("Failed to cleanup temporary file", temp_path=temp_local_path, error=str(e))
+                logger.debug(
+                    "Failed to cleanup temporary file", temp_path=temp_local_path, error=str(e)
+                )
 
     async def _file_exists_via_ssh(self, host_id: str, file_path: str) -> bool:
         """Check if a specific file exists on remote host via SSH.
-        
+
         Args:
             host_id: Host identifier
             file_path: Full path to file to check
-            
+
         Returns:
             True if file exists on remote host
         """
@@ -456,11 +520,16 @@ class ComposeManager:
                 ssh_cmd.extend(["-i", host_config.identity_file])
 
             # Add common SSH options for automation
-            ssh_cmd.extend([
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "LogLevel=ERROR",
-            ])
+            ssh_cmd.extend(
+                [
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
+                    "-o",
+                    "LogLevel=ERROR",
+                ]
+            )
 
             # Add the test command
             ssh_cmd.extend([ssh_host, f"test -f {file_path}"])
@@ -508,7 +577,7 @@ class ComposeManager:
             f"{compose_base_dir}/{stack_name}/docker-compose.yml",
             f"{compose_base_dir}/{stack_name}/docker-compose.yaml",
             f"{compose_base_dir}/{stack_name}/compose.yml",
-            f"{compose_base_dir}/{stack_name}/compose.yaml"
+            f"{compose_base_dir}/{stack_name}/compose.yaml",
         ]
 
         # Check each possible file path
@@ -518,7 +587,7 @@ class ComposeManager:
                     "Found compose file with extension check",
                     host_id=host_id,
                     stack_name=stack_name,
-                    file_path=file_path
+                    file_path=file_path,
                 )
                 return file_path
 
@@ -528,7 +597,7 @@ class ComposeManager:
             "No existing compose file found, using default",
             host_id=host_id,
             stack_name=stack_name,
-            default_path=default_path
+            default_path=default_path,
         )
         return default_path
 

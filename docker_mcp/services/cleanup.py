@@ -13,6 +13,7 @@ from typing import Any
 import structlog
 
 from ..core.config_loader import DockerHost, DockerMCPConfig
+from ..utils import build_ssh_command, format_size, validate_host
 
 
 class CleanupService:
@@ -22,35 +23,19 @@ class CleanupService:
         self.config = config
         self.logger = structlog.get_logger()
 
-    def _build_ssh_cmd(self, host: DockerHost) -> list[str]:
-        """Build SSH command for a host."""
-        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
-        if host.identity_file:
-            ssh_cmd.extend(["-i", host.identity_file])
-        if host.port != 22:
-            ssh_cmd.extend(["-p", str(host.port)])
-        ssh_cmd.append(f"{host.user}@{host.hostname}")
-        return ssh_cmd
-
-    def _validate_host(self, host_id: str) -> tuple[bool, str]:
-        """Validate that a host exists in configuration."""
-        if host_id not in self.config.hosts:
-            return False, f"Host '{host_id}' not found"
-        return True, ""
-
     async def docker_cleanup(self, host_id: str, cleanup_type: str) -> dict[str, Any]:
         """Perform Docker cleanup operations on a host.
-        
+
         Args:
             host_id: Target Docker host identifier
             cleanup_type: Type of cleanup (check, safe, moderate, aggressive)
-            
+
         Returns:
             Cleanup results and statistics
         """
         try:
             # Validate host
-            is_valid, error_msg = self._validate_host(host_id)
+            is_valid, error_msg = validate_host(self.config, host_id)
             if not is_valid:
                 return {"success": False, "error": error_msg}
 
@@ -60,7 +45,7 @@ class CleanupService:
                 "Starting Docker cleanup",
                 host_id=host_id,
                 cleanup_type=cleanup_type,
-                hostname=host.hostname
+                hostname=host.hostname,
             )
 
             if cleanup_type == "check":
@@ -72,46 +57,38 @@ class CleanupService:
             elif cleanup_type == "aggressive":
                 return await self._aggressive_cleanup(host, host_id)
             else:
-                return {
-                    "success": False,
-                    "error": f"Invalid cleanup_type: {cleanup_type}"
-                }
+                return {"success": False, "error": f"Invalid cleanup_type: {cleanup_type}"}
 
         except Exception as e:
             self.logger.error(
-                "Docker cleanup failed",
-                host_id=host_id,
-                cleanup_type=cleanup_type,
-                error=str(e)
+                "Docker cleanup failed", host_id=host_id, cleanup_type=cleanup_type, error=str(e)
             )
             return {"success": False, "error": str(e)}
 
-    async def docker_disk_usage(self, host_id: str, include_details: bool = False) -> dict[str, Any]:
+    async def docker_disk_usage(
+        self, host_id: str, include_details: bool = False
+    ) -> dict[str, Any]:
         """Check Docker disk usage on a host.
-        
+
         Args:
             host_id: Target Docker host identifier
             include_details: Include detailed top consumers (default: False for smaller response)
-            
+
         Returns:
             Disk usage information and statistics
         """
         try:
             # Validate host
-            is_valid, error_msg = self._validate_host(host_id)
+            is_valid, error_msg = validate_host(self.config, host_id)
             if not is_valid:
                 return {"success": False, "error": error_msg}
 
             host = self.config.hosts[host_id]
 
-            self.logger.info(
-                "Checking Docker disk usage",
-                host_id=host_id,
-                hostname=host.hostname
-            )
+            self.logger.info("Checking Docker disk usage", host_id=host_id, hostname=host.hostname)
 
             # Get disk usage summary
-            summary_cmd = self._build_ssh_cmd(host) + ["docker", "system", "df"]
+            summary_cmd = build_ssh_command(host) + ["docker", "system", "df"]
             summary_result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(  # nosec B603
@@ -122,11 +99,11 @@ class CleanupService:
             if summary_result.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"Failed to get disk usage: {summary_result.stderr}"
+                    "error": f"Failed to get disk usage: {summary_result.stderr}",
                 }
 
             # Get detailed usage
-            detailed_cmd = self._build_ssh_cmd(host) + ["docker", "system", "df", "-v"]
+            detailed_cmd = build_ssh_command(host) + ["docker", "system", "df", "-v"]
             detailed_result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(  # nosec B603
@@ -136,7 +113,11 @@ class CleanupService:
 
             # Parse results
             summary = self._parse_disk_usage_summary(summary_result.stdout)
-            detailed = self._parse_disk_usage_detailed(detailed_result.stdout) if detailed_result.returncode == 0 else {}
+            detailed = (
+                self._parse_disk_usage_detailed(detailed_result.stdout)
+                if detailed_result.returncode == 0
+                else {}
+            )
 
             # Generate cleanup recommendations
             cleanup_potential = self._analyze_cleanup_potential(summary_result.stdout)
@@ -148,7 +129,7 @@ class CleanupService:
                 "host_id": host_id,
                 "summary": summary,
                 "cleanup_potential": cleanup_potential,
-                "recommendations": recommendations
+                "recommendations": recommendations,
             }
 
             # Only include detailed information if requested (reduces token count)
@@ -158,11 +139,7 @@ class CleanupService:
             return response
 
         except Exception as e:
-            self.logger.error(
-                "Docker disk usage check failed",
-                host_id=host_id,
-                error=str(e)
-            )
+            self.logger.error("Docker disk usage check failed", host_id=host_id, error=str(e))
             return {"success": False, "error": str(e)}
 
     async def _check_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -174,7 +151,7 @@ class CleanupService:
         if not disk_usage_data.get("success", False):
             return {
                 "success": False,
-                "error": f"Failed to analyze disk usage: {disk_usage_data.get('error', 'Unknown error')}"
+                "error": f"Failed to analyze disk usage: {disk_usage_data.get('error', 'Unknown error')}",
             }
 
         summary = disk_usage_data.get("summary", {})
@@ -197,7 +174,7 @@ class CleanupService:
             "total_reclaimable": summary.get("totals", {}).get("total_reclaimable", "0B"),
             "reclaimable_percentage": summary.get("totals", {}).get("reclaimable_percentage", 0),
             "recommendations": disk_usage_data.get("recommendations", []),
-            "message": "📊 Cleanup Analysis Complete - No actual cleanup was performed"
+            "message": "📊 Cleanup Analysis Complete - No actual cleanup was performed",
         }
 
     async def _safe_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -205,23 +182,17 @@ class CleanupService:
         results = []
 
         # Clean stopped containers
-        container_cmd = self._build_ssh_cmd(host) + [
-            "docker", "container", "prune", "-f"
-        ]
+        container_cmd = build_ssh_command(host) + ["docker", "container", "prune", "-f"]
         container_result = await self._run_cleanup_command(container_cmd, "containers")
         results.append(container_result)
 
         # Clean unused networks
-        network_cmd = self._build_ssh_cmd(host) + [
-            "docker", "network", "prune", "-f"
-        ]
+        network_cmd = build_ssh_command(host) + ["docker", "network", "prune", "-f"]
         network_result = await self._run_cleanup_command(network_cmd, "networks")
         results.append(network_result)
 
         # Clean build cache
-        builder_cmd = self._build_ssh_cmd(host) + [
-            "docker", "builder", "prune", "-f"
-        ]
+        builder_cmd = build_ssh_command(host) + ["docker", "builder", "prune", "-f"]
         builder_result = await self._run_cleanup_command(builder_cmd, "build cache")
         results.append(builder_result)
 
@@ -230,7 +201,7 @@ class CleanupService:
             "host_id": host_id,
             "cleanup_type": "safe",
             "results": results,
-            "message": "Safe cleanup completed (containers, networks, build cache)"
+            "message": "Safe cleanup completed (containers, networks, build cache)",
         }
 
     async def _moderate_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -239,14 +210,14 @@ class CleanupService:
         safe_result = await self._safe_cleanup(host, host_id)
 
         # Then clean unused images
-        images_cmd = self._build_ssh_cmd(host) + [
-            "docker", "image", "prune", "-a", "-f"
-        ]
+        images_cmd = build_ssh_command(host) + ["docker", "image", "prune", "-a", "-f"]
         images_result = await self._run_cleanup_command(images_cmd, "unused images")
 
         safe_result["results"].append(images_result)
         safe_result["cleanup_type"] = "moderate"
-        safe_result["message"] = "Moderate cleanup completed (containers, networks, build cache, unused images)"
+        safe_result["message"] = (
+            "Moderate cleanup completed (containers, networks, build cache, unused images)"
+        )
 
         return safe_result
 
@@ -256,14 +227,14 @@ class CleanupService:
         moderate_result = await self._moderate_cleanup(host, host_id)
 
         # Then clean unused volumes (DANGEROUS)
-        volumes_cmd = self._build_ssh_cmd(host) + [
-            "docker", "volume", "prune", "-f"
-        ]
+        volumes_cmd = build_ssh_command(host) + ["docker", "volume", "prune", "-f"]
         volumes_result = await self._run_cleanup_command(volumes_cmd, "unused volumes")
 
         moderate_result["results"].append(volumes_result)
         moderate_result["cleanup_type"] = "aggressive"
-        moderate_result["message"] = "⚠️  AGGRESSIVE cleanup completed (containers, networks, build cache, unused images, volumes)"
+        moderate_result["message"] = (
+            "⚠️  AGGRESSIVE cleanup completed (containers, networks, build cache, unused images, volumes)"
+        )
 
         return moderate_result
 
@@ -281,7 +252,7 @@ class CleanupService:
                 "resource_type": resource_type,
                 "success": False,
                 "error": result.stderr,
-                "space_reclaimed": "0B"
+                "space_reclaimed": "0B",
             }
 
         # Parse space reclaimed from output
@@ -291,40 +262,86 @@ class CleanupService:
             "resource_type": resource_type,
             "success": True,
             "space_reclaimed": space_reclaimed,
-            "output": result.stdout.strip()
+            "output": result.stdout.strip(),
         }
 
     def _parse_disk_usage_summary(self, output: str) -> dict[str, Any]:
         """Parse docker system df output for summary with calculations."""
-        lines = output.strip().split('\n')
+        lines = output.strip().split("\n")
         if len(lines) < 2:
             return {
-                "images": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
-                "containers": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
-                "volumes": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
-                "build_cache": {"size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
+                "images": {
+                    "count": 0,
+                    "size": "0B",
+                    "size_bytes": 0,
+                    "reclaimable": "0B",
+                    "reclaimable_bytes": 0,
+                },
+                "containers": {
+                    "count": 0,
+                    "size": "0B",
+                    "size_bytes": 0,
+                    "reclaimable": "0B",
+                    "reclaimable_bytes": 0,
+                },
+                "volumes": {
+                    "count": 0,
+                    "size": "0B",
+                    "size_bytes": 0,
+                    "reclaimable": "0B",
+                    "reclaimable_bytes": 0,
+                },
+                "build_cache": {
+                    "size": "0B",
+                    "size_bytes": 0,
+                    "reclaimable": "0B",
+                    "reclaimable_bytes": 0,
+                },
                 "totals": {
                     "total_size": "0B",
                     "total_size_bytes": 0,
                     "total_reclaimable": "0B",
                     "total_reclaimable_bytes": 0,
-                    "reclaimable_percentage": 0
-                }
+                    "reclaimable_percentage": 0,
+                },
             }
 
         # Initialize summary with enhanced structure
         summary = {
-            "images": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
-            "containers": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
-            "volumes": {"count": 0, "size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
-            "build_cache": {"size": "0B", "size_bytes": 0, "reclaimable": "0B", "reclaimable_bytes": 0},
+            "images": {
+                "count": 0,
+                "size": "0B",
+                "size_bytes": 0,
+                "reclaimable": "0B",
+                "reclaimable_bytes": 0,
+            },
+            "containers": {
+                "count": 0,
+                "size": "0B",
+                "size_bytes": 0,
+                "reclaimable": "0B",
+                "reclaimable_bytes": 0,
+            },
+            "volumes": {
+                "count": 0,
+                "size": "0B",
+                "size_bytes": 0,
+                "reclaimable": "0B",
+                "reclaimable_bytes": 0,
+            },
+            "build_cache": {
+                "size": "0B",
+                "size_bytes": 0,
+                "reclaimable": "0B",
+                "reclaimable_bytes": 0,
+            },
             "totals": {
                 "total_size": "0B",
                 "total_size_bytes": 0,
                 "total_reclaimable": "0B",
                 "total_reclaimable_bytes": 0,
-                "reclaimable_percentage": 0
-            }
+                "reclaimable_percentage": 0,
+            },
         }
 
         for line in lines[1:]:
@@ -346,7 +363,7 @@ class CleanupService:
                         "size": size_str,
                         "size_bytes": size_bytes,
                         "reclaimable": reclaimable_str,
-                        "reclaimable_bytes": reclaimable_bytes
+                        "reclaimable_bytes": reclaimable_bytes,
                     }
 
             elif "Containers" in line:
@@ -366,13 +383,15 @@ class CleanupService:
                         "size": size_str,
                         "size_bytes": size_bytes,
                         "reclaimable": reclaimable_str,
-                        "reclaimable_bytes": reclaimable_bytes
+                        "reclaimable_bytes": reclaimable_bytes,
                     }
 
             elif "Local Volumes" in line:
                 parts = line.split()
                 if len(parts) >= 5:
-                    total_count = int(parts[2]) if parts[2].isdigit() else 0  # "Local" "Volumes" COUNT
+                    total_count = (
+                        int(parts[2]) if parts[2].isdigit() else 0
+                    )  # "Local" "Volumes" COUNT
                     active_count = int(parts[3]) if parts[3].isdigit() else 0
                     size_str = parts[4]
                     reclaimable_str = parts[5] if len(parts) > 5 else "0B"
@@ -386,7 +405,7 @@ class CleanupService:
                         "size": size_str,
                         "size_bytes": size_bytes,
                         "reclaimable": reclaimable_str,
-                        "reclaimable_bytes": reclaimable_bytes
+                        "reclaimable_bytes": reclaimable_bytes,
                     }
 
             elif "Build Cache" in line:
@@ -395,7 +414,9 @@ class CleanupService:
                     # Format: Build Cache TOTAL ACTIVE SIZE RECLAIMABLE
                     # parts[0]="Build", parts[1]="Cache", parts[2]=TOTAL, parts[3]=ACTIVE, parts[4]=SIZE, parts[5]=RECLAIMABLE
                     size_str = parts[4]  # SIZE column (was incorrectly using parts[2])
-                    reclaimable_str = parts[5] if len(parts) > 5 else parts[4]  # RECLAIMABLE or fallback to SIZE
+                    reclaimable_str = (
+                        parts[5] if len(parts) > 5 else parts[4]
+                    )  # RECLAIMABLE or fallback to SIZE
 
                     size_bytes = self._parse_docker_size(size_str)
                     reclaimable_bytes = self._parse_docker_size(reclaimable_str)
@@ -404,35 +425,36 @@ class CleanupService:
                         "size": size_str,
                         "size_bytes": size_bytes,
                         "reclaimable": reclaimable_str,
-                        "reclaimable_bytes": reclaimable_bytes
+                        "reclaimable_bytes": reclaimable_bytes,
                     }
 
         # Calculate totals
         total_size_bytes = (
-            summary["images"]["size_bytes"] +
-            summary["containers"]["size_bytes"] +
-            summary["volumes"]["size_bytes"] +
-            summary["build_cache"]["size_bytes"]
+            summary["images"]["size_bytes"]
+            + summary["containers"]["size_bytes"]
+            + summary["volumes"]["size_bytes"]
+            + summary["build_cache"]["size_bytes"]
         )
 
         total_reclaimable_bytes = (
-            summary["images"]["reclaimable_bytes"] +
-            summary["containers"]["reclaimable_bytes"] +
-            summary["volumes"]["reclaimable_bytes"] +
-            summary["build_cache"].get("reclaimable_bytes", summary["build_cache"]["size_bytes"])  # Use reclaimable if available
+            summary["images"]["reclaimable_bytes"]
+            + summary["containers"]["reclaimable_bytes"]
+            + summary["volumes"]["reclaimable_bytes"]
+            + summary["build_cache"].get(
+                "reclaimable_bytes", summary["build_cache"]["size_bytes"]
+            )  # Use reclaimable if available
         )
 
         reclaimable_percentage = (
-            int((total_reclaimable_bytes / total_size_bytes) * 100)
-            if total_size_bytes > 0 else 0
+            int((total_reclaimable_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
         )
 
         summary["totals"] = {
-            "total_size": self._format_size(total_size_bytes),
+            "total_size": format_size(total_size_bytes),
             "total_size_bytes": total_size_bytes,
-            "total_reclaimable": self._format_size(total_reclaimable_bytes),
+            "total_reclaimable": format_size(total_reclaimable_bytes),
             "total_reclaimable_bytes": total_reclaimable_bytes,
-            "reclaimable_percentage": reclaimable_percentage
+            "reclaimable_percentage": reclaimable_percentage,
         }
 
         return summary
@@ -446,15 +468,15 @@ class CleanupService:
                 "running": 0,
                 "stopped": 0,
                 "total_size": "0B",
-                "total_size_bytes": 0
+                "total_size_bytes": 0,
             },
-            "cleanup_candidates": []
+            "cleanup_candidates": [],
         }
 
         if not output:
             return result
 
-        lines = output.split('\n')
+        lines = output.split("\n")
         current_section = None
 
         images = []
@@ -481,7 +503,9 @@ class CleanupService:
                 continue
 
             # Skip header lines
-            if current_section is None or line.startswith(("REPOSITORY", "CONTAINER", "VOLUME", "CACHE")):
+            if current_section is None or line.startswith(
+                ("REPOSITORY", "CONTAINER", "VOLUME", "CACHE")
+            ):
                 continue
 
             # Parse data lines
@@ -498,11 +522,13 @@ class CleanupService:
                         size_str = parts[4]
                         size_bytes = self._parse_docker_size(size_str)
 
-                        images.append({
-                            "name": f"{repo}:{tag}" if tag != "<none>" else repo,
-                            "size": size_str,
-                            "size_bytes": size_bytes
-                        })
+                        images.append(
+                            {
+                                "name": f"{repo}:{tag}" if tag != "<none>" else repo,
+                                "size": size_str,
+                                "size_bytes": size_bytes,
+                            }
+                        )
 
                 elif current_section == "volumes":
                     # Format: VOLUME_NAME LINKS SIZE
@@ -511,11 +537,7 @@ class CleanupService:
                         size_str = parts[2]
                         size_bytes = self._parse_docker_size(size_str)
 
-                        volumes.append({
-                            "name": name,
-                            "size": size_str,
-                            "size_bytes": size_bytes
-                        })
+                        volumes.append({"name": name, "size": size_str, "size_bytes": size_bytes})
 
                 elif current_section == "containers":
                     # Format: CONTAINER_ID IMAGE COMMAND LOCAL_VOLUMES SIZE CREATED STATUS NAMES
@@ -551,11 +573,9 @@ class CleanupService:
                         else:
                             result["container_stats"]["stopped"] += 1
                             # Stopped containers are cleanup candidates
-                            result["cleanup_candidates"].append({
-                                "type": "container",
-                                "name": container_name,
-                                "size": size_str
-                            })
+                            result["cleanup_candidates"].append(
+                                {"type": "container", "name": container_name, "size": size_str}
+                            )
 
                         result["container_stats"]["total_size_bytes"] += size_bytes
 
@@ -569,7 +589,9 @@ class CleanupService:
 
         result["top_images"] = images[:5]  # Top 5 largest images
         result["top_volumes"] = volumes[:5]  # Top 5 largest volumes
-        result["container_stats"]["total_size"] = self._format_size(result["container_stats"]["total_size_bytes"])
+        result["container_stats"]["total_size"] = format_size(
+            result["container_stats"]["total_size_bytes"]
+        )
 
         return result
 
@@ -580,7 +602,7 @@ class CleanupService:
             "stopped_containers": "Unknown",
             "unused_networks": "Unknown",
             "build_cache": "Unknown",
-            "unused_images": "Unknown"
+            "unused_images": "Unknown",
         }
 
         # Basic parsing - could be enhanced with more detailed analysis
@@ -594,11 +616,7 @@ class CleanupService:
     def _parse_cleanup_output(self, output: str) -> str:
         """Parse cleanup command output to extract space reclaimed."""
         # Look for patterns like "Total reclaimed space: 1.2GB"
-        patterns = [
-            r"Total reclaimed space:\s+(\S+)",
-            r"freed\s+(\S+)",
-            r"reclaimed:\s+(\S+)"
-        ]
+        patterns = [r"Total reclaimed space:\s+(\S+)", r"freed\s+(\S+)", r"reclaimed:\s+(\S+)"]
 
         for pattern in patterns:
             match = re.search(pattern, output, re.IGNORECASE)
@@ -606,24 +624,6 @@ class CleanupService:
                 return match.group(1)
 
         return "Unknown"
-
-    def _format_size(self, size_bytes: int) -> str:
-        """Convert bytes to human-readable size format."""
-        if size_bytes == 0:
-            return "0B"
-
-        units = ["B", "KB", "MB", "GB", "TB"]
-        unit_index = 0
-        size = float(size_bytes)
-
-        while size >= 1024 and unit_index < len(units) - 1:
-            size /= 1024
-            unit_index += 1
-
-        if unit_index == 0:
-            return f"{int(size)}B"
-        else:
-            return f"{size:.1f}{units[unit_index]}"
 
     def _parse_docker_size(self, size_str: str) -> int:
         """Convert Docker size string (e.g., '1.2GB', '980.2MB (2%)') to bytes."""
@@ -634,10 +634,10 @@ class CleanupService:
         size_str = size_str.strip().upper()
 
         # Strip percentage information if present (e.g., "980.2MB (2%)" -> "980.2MB")
-        size_str = re.sub(r'\s*\([^)]*\)\s*$', '', size_str)
+        size_str = re.sub(r"\s*\([^)]*\)\s*$", "", size_str)
 
         # Extract number and unit
-        match = re.match(r'^(\d+(?:\.\d+)?)\s*([A-Z]*B?)$', size_str)
+        match = re.match(r"^(\d+(?:\.\d+)?)\s*([A-Z]*B?)$", size_str)
         if not match:
             return 0
 
@@ -645,13 +645,7 @@ class CleanupService:
         unit = match.group(2) or "B"
 
         # Convert to bytes
-        multipliers = {
-            "B": 1,
-            "KB": 1024,
-            "MB": 1024 ** 2,
-            "GB": 1024 ** 3,
-            "TB": 1024 ** 4
-        }
+        multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
 
         return int(value * multipliers.get(unit, 1))
 
@@ -662,21 +656,15 @@ class CleanupService:
         # Check for reclaimable space in each category
         if summary.get("containers", {}).get("reclaimable_bytes", 0) > 100 * 1024 * 1024:  # >100MB
             reclaimable = summary["containers"]["reclaimable"]
-            recommendations.append(
-                f"Remove stopped containers to reclaim {reclaimable}"
-            )
+            recommendations.append(f"Remove stopped containers to reclaim {reclaimable}")
 
         if summary.get("images", {}).get("reclaimable_bytes", 0) > 500 * 1024 * 1024:  # >500MB
             reclaimable = summary["images"]["reclaimable"]
-            recommendations.append(
-                f"Remove unused images to reclaim {reclaimable}"
-            )
+            recommendations.append(f"Remove unused images to reclaim {reclaimable}")
 
         if summary.get("build_cache", {}).get("size_bytes", 0) > 1024 * 1024 * 1024:  # >1GB
             size = summary["build_cache"]["size"]
-            recommendations.append(
-                f"Clear build cache to reclaim {size}"
-            )
+            recommendations.append(f"Clear build cache to reclaim {size}")
 
         if summary.get("volumes", {}).get("reclaimable_bytes", 0) > 1024 * 1024 * 1024:  # >1GB
             reclaimable = summary["volumes"]["reclaimable"]
@@ -693,12 +681,14 @@ class CleanupService:
 
         # Add specific cleanup commands if there are recommendations
         if recommendations:
-            recommendations.extend([
-                "",  # Separator line
-                "🔧 Recommended Actions:",
-                "• Run 'docker_hosts cleanup safe' to clean containers, networks, and build cache",
-                "• Run 'docker_hosts cleanup moderate' to also remove unused images"
-            ])
+            recommendations.extend(
+                [
+                    "",  # Separator line
+                    "🔧 Recommended Actions:",
+                    "• Run 'docker_hosts cleanup safe' to clean containers, networks, and build cache",
+                    "• Run 'docker_hosts cleanup moderate' to also remove unused images",
+                ]
+            )
 
             # Only suggest aggressive cleanup if there are volumes to clean
             if summary.get("volumes", {}).get("reclaimable_bytes", 0) > 0:
@@ -732,36 +722,40 @@ class CleanupService:
 
         # Calculate percentages
         safe_percentage = int((safe_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
-        moderate_percentage = int((moderate_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
-        aggressive_percentage = int((aggressive_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
+        moderate_percentage = (
+            int((moderate_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
+        )
+        aggressive_percentage = (
+            int((aggressive_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
+        )
 
         return {
             "safe": {
-                "size": self._format_size(safe_bytes),
+                "size": format_size(safe_bytes),
                 "size_bytes": safe_bytes,
                 "percentage": safe_percentage,
                 "description": "Stopped containers, networks, build cache",
                 "components": {
-                    "containers": self._format_size(containers_bytes),
-                    "build_cache": self._format_size(build_cache_bytes),
-                    "networks": "No size data (count-based cleanup)"
-                }
+                    "containers": format_size(containers_bytes),
+                    "build_cache": format_size(build_cache_bytes),
+                    "networks": "No size data (count-based cleanup)",
+                },
             },
             "moderate": {
-                "size": self._format_size(moderate_bytes),
+                "size": format_size(moderate_bytes),
                 "size_bytes": moderate_bytes,
                 "percentage": moderate_percentage,
                 "description": "Safe cleanup + unused images",
-                "additional_space": self._format_size(images_bytes)
+                "additional_space": format_size(images_bytes),
             },
             "aggressive": {
-                "size": self._format_size(aggressive_bytes),
+                "size": format_size(aggressive_bytes),
                 "size_bytes": aggressive_bytes,
                 "percentage": aggressive_percentage,
                 "description": "Moderate cleanup + unused volumes ⚠️  DATA LOSS RISK",
-                "additional_space": self._format_size(volumes_bytes),
-                "warning": "⚠️  Volume cleanup may permanently delete application data!"
-            }
+                "additional_space": format_size(volumes_bytes),
+                "warning": "⚠️  Volume cleanup may permanently delete application data!",
+            },
         }
 
     async def _get_cleanup_details(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -769,61 +763,74 @@ class CleanupService:
         details = {
             "stopped_containers": {"count": 0, "names": []},
             "unused_networks": {"count": 0, "names": []},
-            "dangling_images": {"count": 0, "size": "0B"}
+            "dangling_images": {"count": 0, "size": "0B"},
         }
 
         try:
             # Get stopped containers
-            containers_cmd = self._build_ssh_cmd(host) + [
-                "docker", "ps", "-a", "--filter", "status=exited", "--format", "{{.Names}}"
+            containers_cmd = build_ssh_command(host) + [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                "status=exited",
+                "--format",
+                "{{.Names}}",
             ]
             containers_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(containers_cmd, check=False, capture_output=True, text=True)  # nosec B603
+                lambda: subprocess.run(containers_cmd, check=False, capture_output=True, text=True),  # nosec B603
             )
 
             if containers_result.returncode == 0 and containers_result.stdout.strip():
-                stopped_containers = containers_result.stdout.strip().split('\n')
+                stopped_containers = containers_result.stdout.strip().split("\n")
                 details["stopped_containers"] = {
                     "count": len(stopped_containers),
-                    "names": stopped_containers[:5]  # Show first 5
+                    "names": stopped_containers[:5],  # Show first 5
                 }
 
             # Get unused networks (custom networks with no containers)
-            networks_cmd = self._build_ssh_cmd(host) + [
-                "docker", "network", "ls", "--filter", "dangling=true", "--format", "{{.Name}}"
+            networks_cmd = build_ssh_command(host) + [
+                "docker",
+                "network",
+                "ls",
+                "--filter",
+                "dangling=true",
+                "--format",
+                "{{.Name}}",
             ]
             networks_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(networks_cmd, check=False, capture_output=True, text=True)  # nosec B603
+                lambda: subprocess.run(networks_cmd, check=False, capture_output=True, text=True),  # nosec B603
             )
 
             if networks_result.returncode == 0 and networks_result.stdout.strip():
-                unused_networks = networks_result.stdout.strip().split('\n')
+                unused_networks = networks_result.stdout.strip().split("\n")
                 details["unused_networks"] = {
                     "count": len(unused_networks),
-                    "names": unused_networks[:5]  # Show first 5
+                    "names": unused_networks[:5],  # Show first 5
                 }
 
             # Get dangling images
-            images_cmd = self._build_ssh_cmd(host) + [
-                "docker", "images", "-f", "dangling=true", "--format", "{{.Repository}}:{{.Tag}}"
+            images_cmd = build_ssh_command(host) + [
+                "docker",
+                "images",
+                "-f",
+                "dangling=true",
+                "--format",
+                "{{.Repository}}:{{.Tag}}",
             ]
             images_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(images_cmd, check=False, capture_output=True, text=True)  # nosec B603
+                lambda: subprocess.run(images_cmd, check=False, capture_output=True, text=True),  # nosec B603
             )
 
             if images_result.returncode == 0 and images_result.stdout.strip():
-                dangling_images = images_result.stdout.strip().split('\n')
+                dangling_images = images_result.stdout.strip().split("\n")
                 details["dangling_images"]["count"] = len(dangling_images)
 
         except Exception as e:
-            self.logger.warning(
-                "Failed to get some cleanup details",
-                host_id=host_id,
-                error=str(e)
-            )
+            self.logger.warning("Failed to get some cleanup details", host_id=host_id, error=str(e))
 
         return details
 
@@ -833,33 +840,35 @@ class CleanupService:
             "containers": {
                 "stopped": cleanup_details["stopped_containers"]["count"],
                 "reclaimable_space": summary.get("containers", {}).get("reclaimable", "0B"),
-                "example_names": cleanup_details["stopped_containers"]["names"]
+                "example_names": cleanup_details["stopped_containers"]["names"],
             },
             "images": {
-                "unused": summary.get("images", {}).get("count", 0) - summary.get("images", {}).get("active", 0),
+                "unused": summary.get("images", {}).get("count", 0)
+                - summary.get("images", {}).get("active", 0),
                 "dangling": cleanup_details["dangling_images"]["count"],
-                "reclaimable_space": summary.get("images", {}).get("reclaimable", "0B")
+                "reclaimable_space": summary.get("images", {}).get("reclaimable", "0B"),
             },
             "networks": {
                 "unused": cleanup_details["unused_networks"]["count"],
-                "example_names": cleanup_details["unused_networks"]["names"]
+                "example_names": cleanup_details["unused_networks"]["names"],
             },
             "build_cache": {
                 "size": summary.get("build_cache", {}).get("size", "0B"),
                 "reclaimable_space": summary.get("build_cache", {}).get("reclaimable", "0B"),
-                "fully_reclaimable": True
+                "fully_reclaimable": True,
             },
             "volumes": {
-                "unused": summary.get("volumes", {}).get("count", 0) - summary.get("volumes", {}).get("active", 0),
+                "unused": summary.get("volumes", {}).get("count", 0)
+                - summary.get("volumes", {}).get("active", 0),
                 "reclaimable_space": summary.get("volumes", {}).get("reclaimable", "0B"),
-                "warning": "⚠️  Volume cleanup may delete data!"
-            }
+                "warning": "⚠️  Volume cleanup may delete data!",
+            },
         }
 
         return formatted
 
     # Schedule Management Methods (consolidated from ScheduleService)
-    
+
     async def handle_schedule_action(
         self,
         schedule_action: str,
@@ -870,7 +879,7 @@ class CleanupService:
         schedule_id: str | None = None,
     ) -> dict[str, Any]:
         """Handle schedule-related actions.
-        
+
         Args:
             schedule_action: Action to perform (add, remove, list, enable, disable)
             host_id: Target Docker host identifier
@@ -878,13 +887,15 @@ class CleanupService:
             schedule_frequency: Cleanup frequency (daily, weekly, monthly, custom)
             schedule_time: Time to run cleanup (e.g., '02:00')
             schedule_id: Schedule identifier for management
-            
+
         Returns:
             Action result
         """
         try:
             if schedule_action == "add":
-                return await self._add_schedule(host_id, cleanup_type, schedule_frequency, schedule_time)
+                return await self._add_schedule(
+                    host_id, cleanup_type, schedule_frequency, schedule_time
+                )
             elif schedule_action == "remove":
                 return await self._remove_schedule(schedule_id)
             elif schedule_action == "list":
@@ -917,18 +928,26 @@ class CleanupService:
             return {"success": False, "error": "host_id is required"}
         if not cleanup_type or cleanup_type not in ["safe", "moderate"]:
             return {"success": False, "error": "cleanup_type must be 'safe' or 'moderate'"}
-        if not schedule_frequency or schedule_frequency not in ["daily", "weekly", "monthly", "custom"]:
-            return {"success": False, "error": "schedule_frequency must be daily, weekly, monthly, or custom"}
+        if not schedule_frequency or schedule_frequency not in [
+            "daily",
+            "weekly",
+            "monthly",
+            "custom",
+        ]:
+            return {
+                "success": False,
+                "error": "schedule_frequency must be daily, weekly, monthly, or custom",
+            }
         if not schedule_time or not self._validate_time_format(schedule_time):
             return {"success": False, "error": "schedule_time must be in HH:MM format (24-hour)"}
 
-        is_valid, error_msg = self._validate_host(host_id)
+        is_valid, error_msg = validate_host(self.config, host_id)
         if not is_valid:
             return {"success": False, "error": error_msg}
 
         # Generate schedule ID
         schedule_id = f"{host_id}_{cleanup_type}_{schedule_frequency}"
-        
+
         # Check if schedule already exists
         if schedule_id in self.config.cleanup_schedules:
             return {
@@ -941,7 +960,7 @@ class CleanupService:
 
         # Create schedule configuration
         from ..core.config_loader import CleanupSchedule
-        
+
         schedule_config = CleanupSchedule(
             host_id=host_id,
             cleanup_type=cleanup_type,
@@ -992,7 +1011,7 @@ class CleanupService:
 
         # Remove from configuration
         removed_schedule = self.config.cleanup_schedules.pop(schedule_id)
-        
+
         self.logger.info("Cleanup schedule removed", schedule_id=schedule_id)
 
         return {
@@ -1059,7 +1078,7 @@ class CleanupService:
             parts = time_str.split(":")
             if len(parts) != 2:
                 return False
-            
+
             hour, minute = int(parts[0]), int(parts[1])
             return 0 <= hour <= 23 and 0 <= minute <= 59
         except (ValueError, AttributeError):
@@ -1068,7 +1087,7 @@ class CleanupService:
     def _generate_cron_expression(self, frequency: str, time: str) -> str:
         """Generate cron expression from frequency and time."""
         hour, minute = time.split(":")
-        
+
         if frequency == "daily":
             return f"{minute} {hour} * * *"
         elif frequency == "weekly":
@@ -1089,25 +1108,25 @@ class CleanupService:
                 result = await asyncio.create_subprocess_shell(
                     f"(crontab -l 2>/dev/null; echo '{cron_entry}') | crontab -",
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, stderr = await result.communicate()
-                
+
             elif action == "remove":
                 # Remove cron entry
                 result = await asyncio.create_subprocess_shell(
                     f"crontab -l 2>/dev/null | grep -v 'docker-mcp-{schedule_id}' | crontab -",
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, stderr = await result.communicate()
-                
+
             else:  # enable/disable
                 comment_char = "" if action == "enable" else "#"
                 result = await asyncio.create_subprocess_shell(
                     f"crontab -l 2>/dev/null | sed 's/^#*\\(.*docker-mcp-{schedule_id}\\)/{comment_char}\\1/' | crontab -",
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, stderr = await result.communicate()
 
@@ -1124,14 +1143,16 @@ class CleanupService:
         """Generate the command to run for scheduled cleanup."""
         host_id = schedule_config["host_id"]
         cleanup_type = schedule_config["cleanup_type"]
-        
+
         # This would typically call the Docker MCP tool
         return f"docker-mcp cleanup --host {host_id} --type {cleanup_type}"
 
     def _format_schedule_display(self, schedule_config: dict) -> dict[str, Any]:
         """Format schedule configuration for display."""
-        cron_expr = self._generate_cron_expression(schedule_config["frequency"], schedule_config["time"])
-        
+        cron_expr = self._generate_cron_expression(
+            schedule_config["frequency"], schedule_config["time"]
+        )
+
         return {
             "host_id": schedule_config["host_id"],
             "cleanup_type": schedule_config["cleanup_type"],

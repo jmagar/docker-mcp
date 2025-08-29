@@ -4,9 +4,10 @@ This module provides Docker host information, container listings, and compose st
 information using the docker:// URI scheme.
 """
 
-import json
+import asyncio
 from typing import Any
 
+import docker
 import structlog
 from fastmcp.resources.resource import FunctionResource
 
@@ -15,7 +16,7 @@ logger = structlog.get_logger()
 
 class DockerInfoResource(FunctionResource):
     """MCP Resource for Docker host information.
-    
+
     URI Pattern: docker://{host_id}/info
     Provides comprehensive Docker host information including system info,
     version details, and configuration.
@@ -23,7 +24,7 @@ class DockerInfoResource(FunctionResource):
 
     def __init__(self, context_manager, host_service):
         """Initialize the Docker info resource.
-        
+
         Args:
             context_manager: DockerContextManager for Docker command execution
             host_service: HostService for host operations
@@ -43,40 +44,24 @@ class DockerInfoResource(FunctionResource):
 
     async def _get_docker_info(self, host_id: str, **kwargs) -> dict[str, Any]:
         """Get Docker host information.
-        
+
         Args:
             host_id: Docker host identifier
             **kwargs: Additional parameters (currently unused)
-            
+
         Returns:
             Docker host information as a dictionary
         """
         try:
             logger.info("Fetching Docker info", host_id=host_id)
 
-            # Get Docker system info and version
-            info_result = await self.context_manager.execute_docker_command(host_id, "info --format json")
-            version_result = await self.context_manager.execute_docker_command(host_id, "version --format json")
+            # Get Docker client and retrieve info/version using Docker SDK
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
-            # Parse results
-            docker_info = {}
-            docker_version = {}
-
-            if isinstance(info_result, dict) and "output" in info_result:
-                try:
-                    docker_info = json.loads(info_result["output"])
-                except json.JSONDecodeError:
-                    docker_info = {"error": "Failed to parse info output"}
-            elif isinstance(info_result, dict):
-                docker_info = info_result
-
-            if isinstance(version_result, dict) and "output" in version_result:
-                try:
-                    docker_version = json.loads(version_result["output"])
-                except json.JSONDecodeError:
-                    docker_version = {"error": "Failed to parse version output"}
-            elif isinstance(version_result, dict):
-                docker_version = version_result
+            # Get Docker system info and version using SDK
+            docker_info = await loop.run_in_executor(None, client.info)
+            docker_version = await loop.run_in_executor(None, client.version)
 
             # Get host configuration from our host service
             host_config = {}
@@ -109,6 +94,14 @@ class DockerInfoResource(FunctionResource):
 
             return result
 
+        except docker.errors.APIError as e:
+            logger.error("Docker API error getting info", host_id=host_id, error=str(e))
+            return {
+                "success": False,
+                "error": f"Docker API error: {str(e)}",
+                "host_id": host_id,
+                "resource_uri": f"docker://{host_id}/info",
+            }
         except Exception as e:
             logger.error("Failed to get Docker info", host_id=host_id, error=str(e))
             return {
@@ -122,7 +115,7 @@ class DockerInfoResource(FunctionResource):
 
 class DockerContainersResource(FunctionResource):
     """MCP Resource for Docker container listings.
-    
+
     URI Pattern: docker://{host_id}/containers
     Parameters supported:
     - all_containers: Include stopped containers (default: False)
@@ -132,7 +125,7 @@ class DockerContainersResource(FunctionResource):
 
     def __init__(self, container_service):
         """Initialize the Docker containers resource.
-        
+
         Args:
             container_service: ContainerService for container operations
         """
@@ -150,11 +143,11 @@ class DockerContainersResource(FunctionResource):
 
     async def _get_containers(self, host_id: str, **kwargs) -> dict[str, Any]:
         """Get Docker containers for a host.
-        
+
         Args:
             host_id: Docker host identifier
             **kwargs: Additional parameters for filtering and pagination
-            
+
         Returns:
             Container listing data as a dictionary
         """
@@ -174,14 +167,11 @@ class DockerContainersResource(FunctionResource):
 
             # Use the container service to get containers
             result = await self.container_service.list_containers(
-                host_id=host_id,
-                all_containers=all_containers,
-                limit=limit,
-                offset=offset
+                host_id=host_id, all_containers=all_containers, limit=limit, offset=offset
             )
 
             # Convert ToolResult to dict if needed
-            if hasattr(result, 'structured_content'):
+            if hasattr(result, "structured_content"):
                 containers_data = result.structured_content
             else:
                 containers_data = result
@@ -217,14 +207,14 @@ class DockerContainersResource(FunctionResource):
 
 class DockerComposeResource(FunctionResource):
     """MCP Resource for Docker Compose stack information.
-    
+
     URI Pattern: docker://{host_id}/compose
     Provides information about Docker Compose stacks and projects on a host.
     """
 
     def __init__(self, stack_service):
         """Initialize the Docker Compose resource.
-        
+
         Args:
             stack_service: StackService for stack operations
         """
@@ -242,11 +232,11 @@ class DockerComposeResource(FunctionResource):
 
     async def _get_compose_info(self, host_id: str, **kwargs) -> dict[str, Any]:
         """Get Docker Compose information for a host.
-        
+
         Args:
             host_id: Docker host identifier
             **kwargs: Additional parameters (currently unused)
-            
+
         Returns:
             Compose stack information as a dictionary
         """
@@ -257,7 +247,7 @@ class DockerComposeResource(FunctionResource):
             result = await self.stack_service.list_stacks(host_id)
 
             # Convert ToolResult to dict if needed
-            if hasattr(result, 'structured_content'):
+            if hasattr(result, "structured_content"):
                 compose_data = result.structured_content
             else:
                 compose_data = result

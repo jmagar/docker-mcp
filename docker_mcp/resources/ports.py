@@ -14,7 +14,7 @@ logger = structlog.get_logger()
 
 class PortMappingResource(FunctionResource):
     """MCP Resource for port mapping data.
-    
+
     URI Pattern: ports://{host_id}
     Parameters supported:
     - include_stopped: Include stopped containers (default: False)
@@ -29,7 +29,7 @@ class PortMappingResource(FunctionResource):
 
     def __init__(self, container_service, server_instance):
         """Initialize the port mapping resource.
-        
+
         Args:
             container_service: ContainerService instance for port operations
             server_instance: Server instance for enhanced port functionality
@@ -50,11 +50,11 @@ class PortMappingResource(FunctionResource):
 
     async def _get_port_data(self, host_id: str, **kwargs) -> dict[str, Any]:
         """Get port mapping data for a host.
-        
+
         Args:
             host_id: Docker host identifier
             **kwargs: Additional parameters for filtering and enhancement
-            
+
         Returns:
             Port mapping data as a dictionary
         """
@@ -82,14 +82,15 @@ class PortMappingResource(FunctionResource):
                 host_id=host_id,
                 include_stopped=include_stopped,
             )
-            
+
             # Convert ToolResult to dict if needed
-            if hasattr(result, 'content'):
+            if hasattr(result, "content"):
                 # Handle ToolResult format
                 if result.content and len(result.content) > 0:
-                    if hasattr(result.content[0], 'text'):
+                    if hasattr(result.content[0], "text"):
                         # Extract the actual data from the ToolResult
                         import json
+
                         try:
                             result = json.loads(result.content[0].text)
                         except (json.JSONDecodeError, AttributeError):
@@ -98,9 +99,7 @@ class PortMappingResource(FunctionResource):
                         result = {"success": False, "error": "No content in response"}
                 else:
                     result = {"success": False, "error": "Empty response"}
-            
-            # TODO: Implement additional filtering parameters in future versions
-            # Currently only basic host_id and include_stopped are supported
+
             if filter_project or filter_range or filter_protocol or scan_available or suggest_next:
                 if isinstance(result, dict) and result.get("success"):
                     result["warning"] = "Advanced filtering parameters not yet implemented"
@@ -144,7 +143,7 @@ class PortMappingResource(FunctionResource):
 
     async def read(self) -> str | bytes:
         """Read the resource content as JSON string.
-        
+
         This method is called when the resource is accessed by MCP clients.
         Since this is a FunctionResource, the actual data loading is deferred
         until this method is called.

@@ -3,7 +3,7 @@
 This module provides comprehensive middleware for request/response processing:
 - LoggingMiddleware: Structured logging with dual output (console + files)
 - ErrorHandlingMiddleware: Comprehensive error tracking and recovery
-- TimingMiddleware: Performance monitoring and timing statistics  
+- TimingMiddleware: Performance monitoring and timing statistics
 - RateLimitingMiddleware: Token bucket rate limiting with burst capacity
 
 All middleware follows FastMCP patterns and integrates with the dual logging system.
@@ -18,5 +18,5 @@ __all__ = [
     "LoggingMiddleware",
     "ErrorHandlingMiddleware",
     "TimingMiddleware",
-    "RateLimitingMiddleware"
+    "RateLimitingMiddleware",
 ]

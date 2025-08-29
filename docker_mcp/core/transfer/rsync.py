@@ -16,6 +16,7 @@ logger = structlog.get_logger()
 
 class RsyncError(DockerMCPError):
     """Rsync transfer operation failed."""
+
     pass
 
 
@@ -32,10 +33,10 @@ class RsyncTransfer(BaseTransfer):
 
     async def validate_requirements(self, host: DockerHost) -> tuple[bool, str]:
         """Validate that rsync is available on the host.
-        
+
         Args:
             host: Host configuration to validate
-            
+
         Returns:
             Tuple of (is_valid: bool, error_message: str)
         """
@@ -67,10 +68,10 @@ class RsyncTransfer(BaseTransfer):
         compress: bool = True,
         delete: bool = False,
         dry_run: bool = False,
-        **kwargs
+        **kwargs,
     ) -> dict[str, Any]:
         """Transfer files between hosts using rsync.
-        
+
         Args:
             source_host: Source host configuration
             target_host: Target host configuration
@@ -80,7 +81,7 @@ class RsyncTransfer(BaseTransfer):
             delete: Delete files on target not in source
             dry_run: Perform dry run only
             **kwargs: Additional rsync options (ignored)
-            
+
         Returns:
             Transfer result with statistics
         """
@@ -145,10 +146,10 @@ class RsyncTransfer(BaseTransfer):
 
     def _parse_stats(self, output: str) -> dict[str, Any]:
         """Parse rsync output for transfer statistics.
-        
+
         Args:
             output: Rsync command output
-            
+
         Returns:
             Dictionary with transfer statistics
         """
@@ -161,7 +162,10 @@ class RsyncTransfer(BaseTransfer):
 
         # Parse rsync summary statistics
         for line in output.split("\n"):
-            if "Number of files transferred:" in line or "Number of regular files transferred:" in line:
+            if (
+                "Number of files transferred:" in line
+                or "Number of regular files transferred:" in line
+            ):
                 match = re.search(r"(\d+)", line)
                 if match:
                     stats["files_transferred"] = int(match.group(1))

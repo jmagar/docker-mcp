@@ -13,7 +13,7 @@ except ImportError:
 
 class LoggingMiddleware(Middleware):
     """FastMCP middleware for comprehensive request/response logging.
-    
+
     Logs all MCP messages to both console and middleware.log file with:
     - Request details with sanitized parameters
     - Response status and timing
@@ -23,7 +23,7 @@ class LoggingMiddleware(Middleware):
 
     def __init__(self, include_payloads: bool = True, max_payload_length: int = 1000):
         """Initialize logging middleware.
-        
+
         Args:
             include_payloads: Whether to include request/response payloads in logs
             max_payload_length: Maximum length for payload strings before truncation
@@ -41,11 +41,11 @@ class LoggingMiddleware(Middleware):
             "method": context.method,
             "source": context.source,
             "message_type": context.type,
-            "timestamp": context.timestamp
+            "timestamp": context.timestamp,
         }
 
         # Add sanitized payload if enabled
-        if self.include_payloads and hasattr(context.message, '__dict__'):
+        if self.include_payloads and hasattr(context.message, "__dict__"):
             log_data["params"] = self._sanitize_message(context.message)
 
         self.logger.info("MCP request started", **log_data)
@@ -60,7 +60,7 @@ class LoggingMiddleware(Middleware):
                 "MCP request completed",
                 method=context.method,
                 success=True,
-                duration_ms=duration_ms
+                duration_ms=duration_ms,
             )
 
             return result
@@ -75,27 +75,27 @@ class LoggingMiddleware(Middleware):
                 duration_ms=duration_ms,
                 error=str(e),
                 error_type=type(e).__name__,
-                exc_info=True  # Include stack trace
+                exc_info=True,  # Include stack trace
             )
             raise
 
     def _sanitize_message(self, message: Any) -> dict[str, Any]:
         """Sanitize message data for safe logging.
-        
+
         Args:
             message: The MCP message object to sanitize
-            
+
         Returns:
             Dictionary with sanitized message data
         """
-        if not hasattr(message, '__dict__'):
-            return {"message": str(message)[:self.max_payload_length]}
+        if not hasattr(message, "__dict__"):
+            return {"message": str(message)[: self.max_payload_length]}
 
         sanitized = {}
 
         for key, value in message.__dict__.items():
             # Skip private attributes
-            if key.startswith('_'):
+            if key.startswith("_"):
                 continue
 
             # Redact sensitive information
@@ -104,14 +104,14 @@ class LoggingMiddleware(Middleware):
             elif isinstance(value, str):
                 # Truncate long strings
                 if len(value) > self.max_payload_length:
-                    sanitized[key] = value[:self.max_payload_length] + "... [TRUNCATED]"
+                    sanitized[key] = value[: self.max_payload_length] + "... [TRUNCATED]"
                 else:
                     sanitized[key] = value
             elif isinstance(value, (dict, list)):
                 # Convert complex objects to string and truncate if needed
                 str_value = str(value)
                 if len(str_value) > self.max_payload_length:
-                    sanitized[key] = str_value[:self.max_payload_length] + "... [TRUNCATED]"
+                    sanitized[key] = str_value[: self.max_payload_length] + "... [TRUNCATED]"
                 else:
                     sanitized[key] = value
             else:
@@ -121,20 +121,35 @@ class LoggingMiddleware(Middleware):
 
     def _is_sensitive_field(self, field_name: str) -> bool:
         """Check if field contains sensitive data that should be redacted.
-        
+
         Args:
             field_name: Name of the field to check
-            
+
         Returns:
             True if field contains sensitive data
         """
         sensitive_keywords = [
-            "password", "passwd", "pwd",
-            "token", "access_token", "refresh_token", "api_token",
-            "key", "api_key", "private_key", "secret_key", "ssh_key",
-            "identity_file", "cert", "certificate",
-            "secret", "client_secret", "auth_secret",
-            "credential", "auth", "authorization"
+            "password",
+            "passwd",
+            "pwd",
+            "token",
+            "access_token",
+            "refresh_token",
+            "api_token",
+            "key",
+            "api_key",
+            "private_key",
+            "secret_key",
+            "ssh_key",
+            "identity_file",
+            "cert",
+            "certificate",
+            "secret",
+            "client_secret",
+            "auth_secret",
+            "credential",
+            "auth",
+            "authorization",
         ]
 
         field_lower = field_name.lower()

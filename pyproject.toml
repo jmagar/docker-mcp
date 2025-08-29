@@ -15,6 +15,7 @@ dependencies = [
     "structlog>=25.4.0",
     "httpx>=0.28.1",
     "asyncio-mqtt>=0.16.2",
+    "paramiko>=4.0.0",
     "python-dotenv>=1.1.1",
     "watchfiles>=0.24.0",
     "mcp[cli]>=1.13.0",

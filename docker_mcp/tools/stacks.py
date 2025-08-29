@@ -3,17 +3,21 @@
 import asyncio
 import json
 import subprocess
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import docker
 import structlog
 
+from ..constants import DOCKER_COMPOSE_PROJECT, DOCKER_COMPOSE_SERVICE
 from ..core.compose_manager import ComposeManager
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
 from ..models.container import StackInfo
+from ..utils import build_ssh_command
 
 logger = structlog.get_logger()
 
@@ -99,29 +103,54 @@ class StackTools:
             List of stacks
         """
         try:
-            # Get list of compose projects
-            cmd = "compose ls --format json"
-            result = await self.context_manager.execute_docker_command(host_id, cmd)
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
+            # Get all containers and group by compose project using Docker SDK
+            containers = await loop.run_in_executor(None, lambda: client.containers.list(all=True))
+
+            # Group containers by compose project
+            projects = defaultdict(list)
+            for container in containers:
+                labels = container.labels or {}
+                project_name = labels.get(DOCKER_COMPOSE_PROJECT)
+                if project_name:
+                    service_name = labels.get(DOCKER_COMPOSE_SERVICE, "")
+                    projects[project_name].append(
+                        {
+                            "container": container,
+                            "service": service_name,
+                            "status": container.status,
+                            "created": container.attrs.get("Created", ""),
+                        }
+                    )
+
+            # Convert to StackInfo objects
             stacks = []
-            if isinstance(result, dict) and "output" in result:
-                try:
-                    compose_data = json.loads(result["output"])
-                    if isinstance(compose_data, list):
-                        for stack_data in compose_data:
-                            stack = StackInfo(
-                                name=stack_data.get("Name", ""),
-                                host_id=host_id,
-                                services=stack_data.get("Service", "").split(",")
-                                if stack_data.get("Service")
-                                else [],
-                                status=stack_data.get("Status", ""),
-                                created=stack_data.get("CreatedAt", ""),
-                                updated=stack_data.get("UpdatedAt", ""),
-                            )
-                            stacks.append(stack.model_dump())
-                except json.JSONDecodeError:
-                    logger.warning("Failed to parse compose ls output", host_id=host_id)
+            for project_name, project_containers in projects.items():
+                # Determine overall project status
+                statuses = [c["status"] for c in project_containers]
+                if all(s == "running" for s in statuses):
+                    project_status = "running"
+                elif any(s == "running" for s in statuses):
+                    project_status = "partial"
+                else:
+                    project_status = "stopped"
+
+                # Get unique services and timestamps
+                services = list(set(c["service"] for c in project_containers if c["service"]))
+                created_times = [c["created"] for c in project_containers if c["created"]]
+                created = min(created_times) if created_times else ""
+
+                stack = StackInfo(
+                    name=project_name,
+                    host_id=host_id,
+                    services=services,
+                    status=project_status,
+                    created=created,
+                    updated=created,  # Docker SDK doesn't provide separate updated time
+                )
+                stacks.append(stack.model_dump())
 
             logger.info("Listed stacks", host_id=host_id, count=len(stacks))
             return {
@@ -131,6 +160,14 @@ class StackTools:
                 "timestamp": datetime.now().isoformat(),
             }
 
+        except docker.errors.APIError as e:
+            logger.error("Docker API error listing stacks", host_id=host_id, error=str(e))
+            return {
+                "success": False,
+                "error": f"Docker API error: {str(e)}",
+                "host_id": host_id,
+                "timestamp": datetime.now().isoformat(),
+            }
         except (DockerCommandError, DockerContextError) as e:
             logger.error("Failed to list stacks", host_id=host_id, error=str(e))
             return {
@@ -334,7 +371,7 @@ class StackTools:
             raise DockerCommandError(f"Host {host_id} not found in configuration")
 
         # Build SSH command
-        ssh_cmd = self._build_ssh_command(host_config)
+        ssh_cmd = build_ssh_command(host_config)
 
         # Build remote command
         remote_cmd = self._build_remote_command(project_directory, compose_cmd, environment)
@@ -382,27 +419,6 @@ class StackTools:
             else context_name
         )
 
-    def _build_ssh_command(self, host_config) -> list[str]:
-        """Build base SSH command with options."""
-        ssh_cmd = ["ssh"]
-
-        # Add port if not default
-        if host_config.port != 22:
-            ssh_cmd.extend(["-p", str(host_config.port)])
-
-        # Add identity file if specified
-        if host_config.identity_file:
-            ssh_cmd.extend(["-i", host_config.identity_file])
-
-        # Add common SSH options
-        ssh_cmd.extend([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-        ])
-
-        return ssh_cmd
-
     def _build_remote_command(
         self, project_directory: str, compose_cmd: list[str], environment: dict[str, str] | None
     ) -> str:
@@ -424,8 +440,8 @@ class StackTools:
     ) -> dict[str, Any]:
         """Unified stack lifecycle management.
 
-        Note: Uses SSH execution instead of Docker context because Docker contexts 
-        cannot access compose files on remote hosts. This is a fundamental Docker 
+        Note: Uses SSH execution instead of Docker context because Docker contexts
+        cannot access compose files on remote hosts. This is a fundamental Docker
         limitation, not a bug in our code.
         See: https://github.com/docker/compose/issues/9075
 
@@ -452,13 +468,20 @@ class StackTools:
             # Always use SSH execution for consistency with deploy_stack
             # This ensures we can access compose files on remote hosts and maintains
             # consistent behavior across all stack operations
-            return await self._execute_stack_via_ssh(host_id, stack_name, action, options, compose_info)
+            return await self._execute_stack_via_ssh(
+                host_id, stack_name, action, options, compose_info
+            )
 
         except (DockerCommandError, DockerContextError) as e:
             return self._build_error_response(host_id, stack_name, action, str(e))
 
     async def _execute_stack_via_ssh(
-        self, host_id: str, stack_name: str, action: str, options: dict[str, Any], compose_info: dict[str, Any]
+        self,
+        host_id: str,
+        stack_name: str,
+        action: str,
+        options: dict[str, Any],
+        compose_info: dict[str, Any],
     ) -> dict[str, Any]:
         """Execute stack command via SSH for all stack operations."""
         try:
@@ -502,7 +525,9 @@ class StackTools:
                 if options.get("pull", True):
                     compose_args.extend(["--pull", "always"])
             else:
-                return self._build_error_response(host_id, stack_name, action, f"Action '{action}' not supported")
+                return self._build_error_response(
+                    host_id, stack_name, action, f"Action '{action}' not supported"
+                )
 
             # Add service filter if specified
             if options.get("services"):
@@ -525,13 +550,17 @@ class StackTools:
                 # Default to a standard location or fail gracefully
                 if action == "up":
                     return self._build_error_response(
-                        host_id, stack_name, action,
-                        f"No compose file found for stack '{stack_name}'. Use deploy_stack for new deployments."
+                        host_id,
+                        stack_name,
+                        action,
+                        f"No compose file found for stack '{stack_name}'. Use deploy_stack for new deployments.",
                     )
                 # For other actions on project-only stacks, we can't proceed without a compose file
                 return self._build_error_response(
-                    host_id, stack_name, action,
-                    f"Cannot {action} stack '{stack_name}': no compose file found. Stack may not exist or was not deployed via this tool."
+                    host_id,
+                    stack_name,
+                    action,
+                    f"Cannot {action} stack '{stack_name}': no compose file found. Stack may not exist or was not deployed via this tool.",
                 )
 
             # Execute via SSH using the same method as deploy_stack
@@ -548,7 +577,7 @@ class StackTools:
                 f"Stack {action} completed via SSH",
                 host_id=host_id,
                 stack_name=stack_name,
-                action=action
+                action=action,
             )
 
             return {
@@ -573,7 +602,7 @@ class StackTools:
             services = []
             # SSH result is just the raw output string from docker compose ps --format json
             # Each line should be a JSON object representing a service
-            for line in result.strip().split('\n'):
+            for line in result.strip().split("\n"):
                 if line.strip():
                     try:
                         service_data = json.loads(line)
@@ -584,7 +613,9 @@ class StackTools:
         except Exception:
             return {"services": []}
 
-    def _validate_stack_inputs(self, host_id: str, stack_name: str, action: str) -> dict[str, Any] | None:
+    def _validate_stack_inputs(
+        self, host_id: str, stack_name: str, action: str
+    ) -> dict[str, Any] | None:
         """Validate stack management inputs."""
         valid_actions = ["up", "down", "restart", "build", "pull", "logs", "ps"]
         if action not in valid_actions:
@@ -611,7 +642,7 @@ class StackTools:
         """Get the docker-compose.yml content for a specific stack."""
         try:
             compose_info = await self._get_compose_file_info(host_id, stack_name)
-            
+
             if not compose_info["exists"]:
                 return {
                     "success": False,
@@ -620,40 +651,45 @@ class StackTools:
                     "stack_name": stack_name,
                     "timestamp": datetime.now().isoformat(),
                 }
-            
+
             # Get the compose file path
             compose_file_path = compose_info["path"]
-            
+
             # Read the file content via SSH
             host = self.config.hosts[host_id]
             ssh_cmd = [
                 "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "LogLevel=ERROR",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
             ]
-            
+
             # Add key file if specified
             if host.key_file:
                 ssh_cmd.extend(["-i", host.key_file])
-            
+
             # Add port if not default
             if host.port != 22:
                 ssh_cmd.extend(["-p", str(host.port)])
-            
+
             # SSH connection and cat command
             ssh_cmd.append(f"{host.user}@{host.hostname}")
             ssh_cmd.append(f"cat {compose_file_path}")
-            
+
             result = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: subprocess.run(  # nosec B603
+                None,
+                lambda: subprocess.run(  # nosec B603
                     ssh_cmd,
+                    check=False,
                     capture_output=True,
                     text=True,
                     timeout=30,
-                )
+                ),
             )
-            
+
             if result.returncode == 0:
                 return {
                     "success": True,
@@ -671,7 +707,7 @@ class StackTools:
                     "stack_name": stack_name,
                     "timestamp": datetime.now().isoformat(),
                 }
-                
+
         except Exception as e:
             return {
                 "success": False,
@@ -686,17 +722,19 @@ class StackTools:
         compose_file_exists = await self.compose_manager.compose_file_exists(host_id, stack_name)
 
         if compose_file_exists:
-            compose_file_path = await self.compose_manager.get_compose_file_path(host_id, stack_name)
+            compose_file_path = await self.compose_manager.get_compose_file_path(
+                host_id, stack_name
+            )
             return {
                 "exists": True,
                 "path": compose_file_path,
-                "base_cmd": f"compose --project-name {stack_name} -f {compose_file_path}"
+                "base_cmd": f"compose --project-name {stack_name} -f {compose_file_path}",
             }
         else:
             return {
                 "exists": False,
                 "path": None,
-                "base_cmd": f"compose --project-name {stack_name}"
+                "base_cmd": f"compose --project-name {stack_name}",
             }
 
     async def _build_stack_command(
@@ -812,7 +850,13 @@ class StackTools:
         return None
 
     def _build_success_response(
-        self, host_id: str, stack_name: str, action: str, options: dict[str, Any], result: Any, output_data: dict[str, Any] | None
+        self,
+        host_id: str,
+        stack_name: str,
+        action: str,
+        options: dict[str, Any],
+        result: Any,
+        output_data: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Build success response."""
         return {
@@ -827,7 +871,9 @@ class StackTools:
             "timestamp": datetime.now().isoformat(),
         }
 
-    def _build_error_response(self, host_id: str, stack_name: str, action: str, error: str) -> dict[str, Any]:
+    def _build_error_response(
+        self, host_id: str, stack_name: str, action: str, error: str
+    ) -> dict[str, Any]:
         """Build error response."""
         logger.error(
             f"Failed to {action} stack",

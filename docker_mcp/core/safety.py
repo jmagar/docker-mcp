@@ -14,6 +14,7 @@ logger = structlog.get_logger()
 
 class SafetyError(DockerMCPError):
     """Safety validation failed."""
+
     pass
 
 
@@ -54,10 +55,10 @@ class MigrationSafety:
 
     def validate_deletion_path(self, file_path: str) -> tuple[bool, str]:
         """Validate that a path is safe to delete.
-        
+
         Args:
             file_path: Path to validate for deletion
-            
+
         Returns:
             Tuple of (is_safe: bool, reason: str)
         """
@@ -84,12 +85,12 @@ class MigrationSafety:
             # For files outside safe areas, require more validation
             if not is_in_safe_area:
                 # Allow specific file extensions in any directory
-                if file_path.endswith(('.tar.gz', '.tar', '.zip', '.tmp', '.temp', '.migration')):
+                if file_path.endswith((".tar.gz", ".tar", ".zip", ".tmp", ".temp", ".migration")):
                     return True, f"File type allowed: {file_path}"
 
                 # Allow specific filenames
                 filename = Path(file_path).name
-                if filename in ('docker-compose.yml', 'docker-compose.yaml'):
+                if filename in ("docker-compose.yml", "docker-compose.yaml"):
                     return True, f"Docker compose file allowed: {file_path}"
 
                 return False, f"Path '{resolved_path}' is not in safe deletion area"
@@ -101,7 +102,7 @@ class MigrationSafety:
 
     def add_to_deletion_manifest(self, file_path: str, operation: str, reason: str) -> None:
         """Add a deletion operation to the manifest for audit trail.
-        
+
         Args:
             file_path: Path to be deleted
             operation: Type of operation (rm, rm -f, rm -rf, etc.)
@@ -112,7 +113,7 @@ class MigrationSafety:
             "operation": operation,
             "reason": reason,
             "timestamp": asyncio.get_event_loop().time(),
-            "validated": False
+            "validated": False,
         }
 
         # Validate the path
@@ -127,7 +128,7 @@ class MigrationSafety:
             path=file_path,
             operation=operation,
             safe=is_safe,
-            reason=validation_reason
+            reason=validation_reason,
         )
 
     def get_deletion_manifest(self) -> list[dict[str, Any]]:
@@ -138,14 +139,16 @@ class MigrationSafety:
         """Clear the deletion manifest."""
         self.deletion_manifest.clear()
 
-    async def safe_delete_file(self, ssh_cmd: list[str], file_path: str, reason: str = "Migration cleanup") -> tuple[bool, str]:
+    async def safe_delete_file(
+        self, ssh_cmd: list[str], file_path: str, reason: str = "Migration cleanup"
+    ) -> tuple[bool, str]:
         """Safely delete a file with validation and audit trail.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             file_path: Path to file to delete
             reason: Reason for deletion
-            
+
         Returns:
             Tuple of (success: bool, message: str)
         """
@@ -156,7 +159,9 @@ class MigrationSafety:
         is_safe, validation_reason = self.validate_deletion_path(file_path)
         if not is_safe:
             error_msg = f"SAFETY BLOCK: {validation_reason}"
-            self.logger.error("File deletion blocked by safety check", path=file_path, reason=validation_reason)
+            self.logger.error(
+                "File deletion blocked by safety check", path=file_path, reason=validation_reason
+            )
             raise SafetyError(error_msg)
 
         # Proceed with deletion
@@ -185,10 +190,10 @@ class MigrationSafety:
 
     def validate_zfs_snapshot_deletion(self, snapshot_name: str) -> tuple[bool, str]:
         """Validate ZFS snapshot deletion to prevent accidental deletion of production snapshots.
-        
+
         Args:
             snapshot_name: Full ZFS snapshot name (dataset@snapshot)
-            
+
         Returns:
             Tuple of (is_safe: bool, reason: str)
         """
@@ -208,19 +213,21 @@ class MigrationSafety:
 
         return True, f"ZFS snapshot deletion validated: {snapshot_name}"
 
-    async def safe_cleanup_archive(self, ssh_cmd: list[str], archive_path: str, reason: str = "Migration cleanup") -> tuple[bool, str]:
+    async def safe_cleanup_archive(
+        self, ssh_cmd: list[str], archive_path: str, reason: str = "Migration cleanup"
+    ) -> tuple[bool, str]:
         """Safely cleanup archive files with validation.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             archive_path: Path to archive file
             reason: Reason for cleanup
-            
+
         Returns:
             Tuple of (success: bool, message: str)
         """
         # Validate archive path
-        if not archive_path.endswith(('.tar.gz', '.tar', '.zip')):
+        if not archive_path.endswith((".tar.gz", ".tar", ".zip")):
             return False, f"Not an archive file: {archive_path}"
 
         # Use safe delete
@@ -236,8 +243,10 @@ class MigrationSafety:
             "total_deletion_attempts": total_deletions,
             "validated_deletions": validated_deletions,
             "blocked_deletions": blocked_deletions,
-            "safety_rate": validated_deletions / total_deletions * 100 if total_deletions > 0 else 100,
+            "safety_rate": validated_deletions / total_deletions * 100
+            if total_deletions > 0
+            else 100,
             "manifest": self.deletion_manifest,
             "safe_paths": self.SAFE_DELETE_PATHS,
-            "forbidden_paths": self.FORBIDDEN_PATHS
+            "forbidden_paths": self.FORBIDDEN_PATHS,
         }

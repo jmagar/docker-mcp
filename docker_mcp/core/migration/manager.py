@@ -8,6 +8,8 @@ from typing import Any
 
 import structlog
 
+from ...constants import DOCKER_COMPOSE_PROJECT
+from ...utils import build_ssh_command
 from ..config_loader import DockerHost
 from ..exceptions import DockerMCPError
 from ..transfer import ArchiveUtils, RsyncTransfer, ZFSTransfer
@@ -19,6 +21,7 @@ logger = structlog.get_logger()
 
 class MigrationError(DockerMCPError):
     """Migration operation failed."""
+
     pass
 
 
@@ -38,23 +41,24 @@ class MigrationManager:
         self.zfs_transfer = ZFSTransfer()
 
     async def choose_transfer_method(
-        self,
-        source_host: DockerHost,
-        target_host: DockerHost
+        self, source_host: DockerHost, target_host: DockerHost
     ) -> tuple[str, Any]:
         """Choose the optimal transfer method based on host capabilities.
-        
+
         Args:
             source_host: Source host configuration
             target_host: Target host configuration
-            
+
         Returns:
             Tuple of (transfer_type: str, transfer_instance)
         """
         # Check if both hosts have ZFS capability configured
-        if (source_host.zfs_capable and target_host.zfs_capable and
-            source_host.zfs_dataset and target_host.zfs_dataset):
-
+        if (
+            source_host.zfs_capable
+            and target_host.zfs_capable
+            and source_host.zfs_dataset
+            and target_host.zfs_dataset
+        ):
             # Validate ZFS is actually available
             source_valid, _ = await self.zfs_transfer.validate_requirements(source_host)
             target_valid, _ = await self.zfs_transfer.validate_requirements(target_host)
@@ -74,18 +78,18 @@ class MigrationManager:
         force_stop: bool = False,
     ) -> tuple[bool, list[str]]:
         """Verify all containers in a stack are stopped.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             stack_name: Stack name to check
             force_stop: Force stop running containers
-            
+
         Returns:
             Tuple of (all_stopped, list_of_running_containers)
         """
         # Check for running containers
         check_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}'"
+            f"docker ps --filter 'label={DOCKER_COMPOSE_PROJECT}={shlex.quote(stack_name)}' --format '{{{{.Names}}}}'"
         ]
 
         result = await asyncio.get_event_loop().run_in_executor(
@@ -142,12 +146,12 @@ class MigrationManager:
         stack_name: str,
     ) -> str:
         """Prepare target directories for migration.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             appdata_path: Base appdata path on target host
             stack_name: Stack name for directory organization
-            
+
         Returns:
             Path to stack-specific appdata directory
         """
@@ -180,10 +184,10 @@ class MigrationManager:
         source_paths: list[str],
         target_path: str,
         stack_name: str,
-        dry_run: bool = False
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         """Transfer data between hosts using the optimal method.
-        
+
         Args:
             source_host: Source host configuration
             target_host: Target host configuration
@@ -191,7 +195,7 @@ class MigrationManager:
             target_path: Target path on destination
             stack_name: Stack name for organization
             dry_run: Whether this is a dry run
-            
+
         Returns:
             Transfer result dictionary
         """
@@ -199,7 +203,9 @@ class MigrationManager:
             return {"success": True, "message": "No data to transfer", "transfer_type": "none"}
 
         # Choose transfer method
-        transfer_type, transfer_instance = await self.choose_transfer_method(source_host, target_host)
+        transfer_type, transfer_instance = await self.choose_transfer_method(
+            source_host, target_host
+        )
 
         if transfer_type == "zfs":
             # ZFS transfer works on datasets, not individual paths
@@ -215,10 +221,14 @@ class MigrationManager:
         else:
             # Rsync transfer - need to create archive first
             if dry_run:
-                return {"success": True, "message": "Dry run - would transfer via rsync", "transfer_type": "rsync"}
+                return {
+                    "success": True,
+                    "message": "Dry run - would transfer via rsync",
+                    "transfer_type": "rsync",
+                }
 
             # Create archive on source
-            ssh_cmd_source = self._build_ssh_cmd(source_host)
+            ssh_cmd_source = build_ssh_command(source_host)
             archive_path = await self.archive_utils.create_archive(
                 ssh_cmd_source, source_paths, f"{stack_name}_migration"
             )
@@ -231,45 +241,35 @@ class MigrationManager:
                 source_host=source_host,
                 target_host=target_host,
                 source_path=archive_path,
-                target_path=target_archive_path
+                target_path=target_archive_path,
             )
 
             if transfer_result["success"]:
                 # Extract on target
-                ssh_cmd_target = self._build_ssh_cmd(target_host)
+                ssh_cmd_target = build_ssh_command(target_host)
                 extracted = await self.archive_utils.extract_archive(
-                    ssh_cmd_target,
-                    target_archive_path,
-                    target_path
+                    ssh_cmd_target, target_archive_path, target_path
                 )
 
                 if extracted:
                     # Cleanup archive on target
-                    await self.archive_utils.cleanup_archive(
-                        ssh_cmd_target, target_archive_path
-                    )
+                    await self.archive_utils.cleanup_archive(ssh_cmd_target, target_archive_path)
 
             # Cleanup archive on source
             await self.archive_utils.cleanup_archive(ssh_cmd_source, archive_path)
 
             return transfer_result
 
-    def _build_ssh_cmd(self, host: DockerHost) -> list[str]:
-        """Build SSH command for a host."""
-        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no"]
-        if host.identity_file:
-            ssh_cmd.extend(["-i", host.identity_file])
-        if host.port != 22:
-            ssh_cmd.extend(["-p", str(host.port)])
-        ssh_cmd.append(f"{host.user}@{host.hostname}")
-        return ssh_cmd
-
     # Delegate methods to focused components
-    async def parse_compose_volumes(self, compose_content: str, source_appdata_path: str = None) -> dict[str, Any]:
+    async def parse_compose_volumes(
+        self, compose_content: str, source_appdata_path: str = None
+    ) -> dict[str, Any]:
         """Delegate to VolumeParser."""
         return await self.volume_parser.parse_compose_volumes(compose_content, source_appdata_path)
 
-    async def get_volume_locations(self, ssh_cmd: list[str], named_volumes: list[str]) -> dict[str, str]:
+    async def get_volume_locations(
+        self, ssh_cmd: list[str], named_volumes: list[str]
+    ) -> dict[str, str]:
         """Delegate to VolumeParser."""
         return await self.volume_parser.get_volume_locations(ssh_cmd, named_volumes)
 
@@ -278,22 +278,21 @@ class MigrationManager:
         compose_content: str,
         old_paths: dict[str, str],
         new_base_path: str,
-        target_appdata_path: str = None
+        target_appdata_path: str = None,
     ) -> str:
         """Delegate to VolumeParser."""
         return self.volume_parser.update_compose_for_migration(
             compose_content, old_paths, new_base_path, target_appdata_path
         )
 
-    async def create_source_inventory(self, ssh_cmd: list[str], volume_paths: list[str]) -> dict[str, Any]:
+    async def create_source_inventory(
+        self, ssh_cmd: list[str], volume_paths: list[str]
+    ) -> dict[str, Any]:
         """Delegate to MigrationVerifier."""
         return await self.verifier.create_source_inventory(ssh_cmd, volume_paths)
 
     async def verify_migration_completeness(
-        self,
-        ssh_cmd: list[str],
-        source_inventory: dict[str, Any],
-        target_path: str
+        self, ssh_cmd: list[str], source_inventory: dict[str, Any], target_path: str
     ) -> dict[str, Any]:
         """Delegate to MigrationVerifier."""
         return await self.verifier.verify_migration_completeness(
@@ -305,7 +304,7 @@ class MigrationManager:
         ssh_cmd: list[str],
         stack_name: str,
         expected_appdata_path: str,
-        expected_volumes: list[str]
+        expected_volumes: list[str],
     ) -> dict[str, Any]:
         """Delegate to MigrationVerifier."""
         return await self.verifier.verify_container_integration(

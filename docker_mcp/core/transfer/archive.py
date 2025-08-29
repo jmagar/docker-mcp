@@ -15,6 +15,7 @@ logger = structlog.get_logger()
 
 class ArchiveError(DockerMCPError):
     """Archive operation failed."""
+
     pass
 
 
@@ -61,10 +62,10 @@ class ArchiveUtils:
 
     def _find_common_parent(self, paths: list[str]) -> tuple[str, list[str]]:
         """Find common parent directory and relative paths for archiving contents.
-        
+
         Args:
             paths: List of absolute paths
-            
+
         Returns:
             Tuple of (common_parent, relative_paths_for_contents)
         """
@@ -122,7 +123,9 @@ class ArchiveUtils:
             except Exception:
                 # Fallback to using root as parent
                 parent = "/"
-                relative_paths = [str(p)[1:] if str(p).startswith("/") else str(p) for p in path_objects]
+                relative_paths = [
+                    str(p)[1:] if str(p).startswith("/") else str(p) for p in path_objects
+                ]
 
         return parent, relative_paths
 
@@ -135,14 +138,14 @@ class ArchiveUtils:
         exclusions: list[str] | None = None,
     ) -> str:
         """Create tar.gz archive of volume data on remote host.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             volume_paths: List of paths to archive
             archive_name: Name for the archive file
             temp_dir: Temporary directory for archive creation
             exclusions: Additional exclusion patterns
-            
+
         Returns:
             Path to created archive on remote host
         """
@@ -168,6 +171,7 @@ class ArchiveUtils:
 
         # Build tar command with -C to change directory
         import shlex
+
         tar_cmd = ["tar", "czf", archive_file, "-C", common_parent] + exclude_flags + relative_paths
 
         # Execute tar command on remote host
@@ -196,16 +200,19 @@ class ArchiveUtils:
 
     async def verify_archive(self, ssh_cmd: list[str], archive_path: str) -> bool:
         """Verify archive integrity.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             archive_path: Path to archive file
-            
+
         Returns:
             True if archive is valid, False otherwise
         """
         import shlex
-        verify_cmd = ssh_cmd + [f"tar tzf {shlex.quote(archive_path)} > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
+
+        verify_cmd = ssh_cmd + [
+            f"tar tzf {shlex.quote(archive_path)} > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"
+        ]
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -223,17 +230,20 @@ class ArchiveUtils:
         extract_dir: str,
     ) -> bool:
         """Extract archive to specified directory.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             archive_path: Path to archive file
             extract_dir: Directory to extract to
-            
+
         Returns:
             True if extraction successful, False otherwise
         """
         import shlex
-        extract_cmd = ssh_cmd + [f"tar xzf {shlex.quote(archive_path)} -C {shlex.quote(extract_dir)}"]
+
+        extract_cmd = ssh_cmd + [
+            f"tar xzf {shlex.quote(archive_path)} -C {shlex.quote(extract_dir)}"
+        ]
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -243,15 +253,19 @@ class ArchiveUtils:
         )
 
         if result.returncode == 0:
-            self.logger.info("Archive extracted successfully", archive=archive_path, destination=extract_dir)
+            self.logger.info(
+                "Archive extracted successfully", archive=archive_path, destination=extract_dir
+            )
             return True
         else:
-            self.logger.error("Archive extraction failed", archive=archive_path, error=result.stderr)
+            self.logger.error(
+                "Archive extraction failed", archive=archive_path, error=result.stderr
+            )
             return False
 
     async def cleanup_archive(self, ssh_cmd: list[str], archive_path: str) -> None:
         """Remove archive file with safety validation.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             archive_path: Path to archive file to remove
@@ -262,7 +276,9 @@ class ArchiveUtils:
             )
 
             if success:
-                self.logger.debug("Archive cleaned up safely", archive=archive_path, message=message)
+                self.logger.debug(
+                    "Archive cleaned up safely", archive=archive_path, message=message
+                )
             else:
                 self.logger.warning("Archive cleanup failed", archive=archive_path, error=message)
 

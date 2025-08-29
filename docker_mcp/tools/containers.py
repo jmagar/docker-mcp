@@ -1,11 +1,13 @@
 """Container management MCP tools."""
 
-import json
+import asyncio
 from datetime import datetime
 from typing import Any
 
+import docker
 import structlog
 
+from ..constants import DOCKER_COMPOSE_CONFIG_FILES, DOCKER_COMPOSE_PROJECT
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
@@ -40,45 +42,44 @@ class ContainerTools:
             Dictionary with paginated container information including volumes, networks, and compose info
         """
         try:
-            # Build Docker command
-            cmd = "ps --format json --no-trunc"
-            if all_containers:
-                cmd += " --all"
+            # Get Docker client and list containers using Docker SDK
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
+            docker_containers = await loop.run_in_executor(
+                None, lambda: client.containers.list(all=all_containers)
+            )
 
-            result = await self.context_manager.execute_docker_command(host_id, cmd)
-
-            # Parse container data
+            # Convert Docker SDK container objects to our format
             containers = []
-            if isinstance(result, dict) and "output" in result:
-                # Parse JSON lines output
-                for line in result["output"].strip().split("\n"):
-                    if line.strip():
-                        try:
-                            container_data = json.loads(line)
+            for container in docker_containers:
+                try:
+                    # Get enhanced container info including inspect data
+                    container_id = container.id[:12]
+                    inspect_info = await self._get_container_inspect_info(host_id, container_id)
 
-                            # Get enhanced container info including inspect data
-                            container_id = container_data.get("ID", "")[:12]
-                            inspect_info = await self._get_container_inspect_info(
-                                host_id, container_id
-                            )
+                    # Extract ports from container attributes
+                    ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+                    ports_str = self._format_ports_from_dict(ports_dict)
 
-                            # Return enhanced container info
-                            container_summary = {
-                                "id": container_id,
-                                "name": container_data.get("Names", "").lstrip("/"),
-                                "image": container_data.get("Image", ""),
-                                "status": container_data.get("Status", ""),
-                                "state": container_data.get("State", ""),
-                                "ports": self._parse_ports_summary(container_data.get("Ports", "")),
-                                "host_id": host_id,
-                                "volumes": inspect_info.get("volumes", []),
-                                "networks": inspect_info.get("networks", []),
-                                "compose_project": inspect_info.get("compose_project", ""),
-                                "compose_file": inspect_info.get("compose_file", ""),
-                            }
-                            containers.append(container_summary)
-                        except json.JSONDecodeError:
-                            logger.warning("Failed to parse container JSON", line=line)
+                    # Return enhanced container info
+                    container_summary = {
+                        "id": container_id,
+                        "name": container.name,
+                        "image": container.attrs.get("Config", {}).get("Image", ""),
+                        "status": container.status,
+                        "state": container.attrs.get("State", {}).get("Status", ""),
+                        "ports": self._parse_ports_summary(ports_str),
+                        "host_id": host_id,
+                        "volumes": inspect_info.get("volumes", []),
+                        "networks": inspect_info.get("networks", []),
+                        "compose_project": inspect_info.get("compose_project", ""),
+                        "compose_file": inspect_info.get("compose_file", ""),
+                    }
+                    containers.append(container_summary)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to process container", container_id=container.id, error=str(e)
+                    )
 
             # Apply pagination
             total_count = len(containers)
@@ -120,32 +121,16 @@ class ContainerTools:
             Detailed container information
         """
         try:
-            cmd = f"inspect {container_id}"
-            result = await self.context_manager.execute_docker_command(host_id, cmd)
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
-            # The execute_docker_command should return parsed JSON for inspect commands
-            if isinstance(result, list) and len(result) > 0:
-                container_data = result[0]
-            elif isinstance(result, dict) and "output" in result:
-                try:
-                    inspect_data = json.loads(result["output"])
-                    if isinstance(inspect_data, list) and len(inspect_data) > 0:
-                        container_data = inspect_data[0]
-                    else:
-                        logger.error("Unexpected inspect data format", data=inspect_data)
-                        return {"error": "Unexpected container data format"}
-                except json.JSONDecodeError as e:
-                    logger.error(
-                        "Failed to parse container inspect JSON",
-                        host_id=host_id,
-                        container_id=container_id,
-                        error=str(e),
-                        raw_output=result.get("output", "")[:500],
-                    )
-                    return {"error": f"Failed to parse container data: {e}"}
-            else:
-                logger.error("No container data in result", result=result)
-                return {"error": "No container data received"}
+            # Use Docker SDK to get container
+            container = await loop.run_in_executor(
+                None, lambda: client.containers.get(container_id)
+            )
+
+            # Get container attributes (equivalent to inspect data)
+            container_data = container.attrs
 
             # Extract detailed information from inspect data
             mounts = container_data.get("Mounts", [])
@@ -164,8 +149,8 @@ class ContainerTools:
             networks = list(network_settings.get("Networks", {}).keys())
 
             # Extract compose information from labels
-            compose_project = labels.get("com.docker.compose.project", "")
-            compose_file = labels.get("com.docker.compose.project.config_files", "")
+            compose_project = labels.get(DOCKER_COMPOSE_PROJECT, "")
+            compose_file = labels.get(DOCKER_COMPOSE_CONFIG_FILES, "")
 
             container_info = {
                 "container_id": container_data.get("Id", ""),
@@ -189,6 +174,17 @@ class ContainerTools:
             logger.info("Retrieved container info", host_id=host_id, container_id=container_id)
             return container_info
 
+        except docker.errors.NotFound:
+            logger.error("Container not found", host_id=host_id, container_id=container_id)
+            return {"error": f"Container {container_id} not found"}
+        except docker.errors.APIError as e:
+            logger.error(
+                "Docker API error getting container info",
+                host_id=host_id,
+                container_id=container_id,
+                error=str(e),
+            )
+            return {"error": f"Docker API error: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container info",
@@ -209,8 +205,14 @@ class ContainerTools:
             Operation result
         """
         try:
-            cmd = f"start {container_id}"
-            await self.context_manager.execute_docker_command(host_id, cmd)
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
+
+            # Get container and start it using Docker SDK
+            container = await loop.run_in_executor(
+                None, lambda: client.containers.get(container_id)
+            )
+            await loop.run_in_executor(None, container.start)
 
             logger.info("Container started", host_id=host_id, container_id=container_id)
             return {
@@ -221,6 +223,17 @@ class ContainerTools:
                 "timestamp": datetime.now().isoformat(),
             }
 
+        except docker.errors.NotFound:
+            logger.error("Container not found", host_id=host_id, container_id=container_id)
+            return {"success": False, "error": f"Container {container_id} not found"}
+        except docker.errors.APIError as e:
+            logger.error(
+                "Docker API error starting container",
+                host_id=host_id,
+                container_id=container_id,
+                error=str(e),
+            )
+            return {"success": False, "error": f"Failed to start container: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to start container",
@@ -251,8 +264,14 @@ class ContainerTools:
             Operation result
         """
         try:
-            cmd = f"stop --time {timeout} {container_id}"
-            await self.context_manager.execute_docker_command(host_id, cmd)
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
+
+            # Get container and stop it using Docker SDK
+            container = await loop.run_in_executor(
+                None, lambda: client.containers.get(container_id)
+            )
+            await loop.run_in_executor(None, lambda: container.stop(timeout=timeout))
 
             logger.info(
                 "Container stopped", host_id=host_id, container_id=container_id, timeout=timeout
@@ -266,6 +285,17 @@ class ContainerTools:
                 "timestamp": datetime.now().isoformat(),
             }
 
+        except docker.errors.NotFound:
+            logger.error("Container not found", host_id=host_id, container_id=container_id)
+            return {"success": False, "error": f"Container {container_id} not found"}
+        except docker.errors.APIError as e:
+            logger.error(
+                "Docker API error stopping container",
+                host_id=host_id,
+                container_id=container_id,
+                error=str(e),
+            )
+            return {"success": False, "error": f"Failed to stop container: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to stop container", host_id=host_id, container_id=container_id, error=str(e)
@@ -293,8 +323,14 @@ class ContainerTools:
             Operation result
         """
         try:
-            cmd = f"restart --time {timeout} {container_id}"
-            await self.context_manager.execute_docker_command(host_id, cmd)
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
+
+            # Get container and restart it using Docker SDK
+            container = await loop.run_in_executor(
+                None, lambda: client.containers.get(container_id)
+            )
+            await loop.run_in_executor(None, lambda: container.restart(timeout=timeout))
 
             logger.info(
                 "Container restarted", host_id=host_id, container_id=container_id, timeout=timeout
@@ -308,6 +344,17 @@ class ContainerTools:
                 "timestamp": datetime.now().isoformat(),
             }
 
+        except docker.errors.NotFound:
+            logger.error("Container not found", host_id=host_id, container_id=container_id)
+            return {"success": False, "error": f"Container {container_id} not found"}
+        except docker.errors.APIError as e:
+            logger.error(
+                "Docker API error restarting container",
+                host_id=host_id,
+                container_id=container_id,
+                error=str(e),
+            )
+            return {"success": False, "error": f"Failed to restart container: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to restart container",
@@ -335,44 +382,85 @@ class ContainerTools:
             Container resource statistics
         """
         try:
-            cmd = f"stats --no-stream --format json {container_id}"
-            result = await self.context_manager.execute_docker_command(host_id, cmd)
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
-            if isinstance(result, dict) and "output" in result:
-                try:
-                    stats_data = json.loads(result["output"])
+            # Get container and retrieve stats using Docker SDK
+            container = await loop.run_in_executor(
+                None, lambda: client.containers.get(container_id)
+            )
 
-                    # Parse stats data
-                    stats = ContainerStats(
-                        container_id=container_id,
-                        host_id=host_id,
-                        cpu_percentage=self._parse_percentage(stats_data.get("CPUPerc", "0%")),
-                        memory_usage=self._parse_memory(stats_data.get("MemUsage", "0B / 0B"))[0],
-                        memory_limit=self._parse_memory(stats_data.get("MemUsage", "0B / 0B"))[1],
-                        memory_percentage=self._parse_percentage(stats_data.get("MemPerc", "0%")),
-                        network_rx=self._parse_network(stats_data.get("NetIO", "0B / 0B"))[0],
-                        network_tx=self._parse_network(stats_data.get("NetIO", "0B / 0B"))[1],
-                        block_read=self._parse_block_io(stats_data.get("BlockIO", "0B / 0B"))[0],
-                        block_write=self._parse_block_io(stats_data.get("BlockIO", "0B / 0B"))[1],
-                        pids=int(stats_data.get("PIDs", 0)),
-                    )
+            # Get stats (stream=False for single stats snapshot)
+            stats_generator = await loop.run_in_executor(
+                None, lambda: container.stats(stream=False)
+            )
 
-                    logger.debug(
-                        "Retrieved container stats", host_id=host_id, container_id=container_id
-                    )
-                    return stats.model_dump()
+            # Extract stats from the generator - it returns one item when stream=False
+            stats_raw = next(iter(stats_generator))
 
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning(
-                        "Failed to parse stats data",
-                        host_id=host_id,
-                        container_id=container_id,
-                        error=str(e),
-                    )
-                    return {"error": f"Failed to parse stats data: {e}"}
+            # Parse stats data from Docker SDK format (different from CLI format)
+            cpu_stats = stats_raw.get("cpu_stats", {})
+            memory_stats = stats_raw.get("memory_stats", {})
+            networks = stats_raw.get("networks", {})
+            blkio_stats = stats_raw.get("blkio_stats", {})
+            pids_stats = stats_raw.get("pids_stats", {})
 
-            return {"error": "No stats data received"}
+            # Calculate CPU percentage from Docker SDK data
+            cpu_percent = self._calculate_cpu_percentage(
+                cpu_stats, stats_raw.get("precpu_stats", {})
+            )
 
+            # Memory stats
+            memory_usage = memory_stats.get("usage", 0)
+            memory_limit = memory_stats.get("limit", 0)
+            memory_percent = (memory_usage / memory_limit * 100) if memory_limit > 0 else 0
+
+            # Network stats (sum all interfaces)
+            net_rx = sum(net.get("rx_bytes", 0) for net in networks.values())
+            net_tx = sum(net.get("tx_bytes", 0) for net in networks.values())
+
+            # Block I/O stats
+            blk_read = sum(
+                stat.get("value", 0)
+                for stat in blkio_stats.get("io_service_bytes_recursive", [])
+                if stat.get("op") == "read"
+            )
+            blk_write = sum(
+                stat.get("value", 0)
+                for stat in blkio_stats.get("io_service_bytes_recursive", [])
+                if stat.get("op") == "write"
+            )
+
+            stats = ContainerStats(
+                container_id=container_id,
+                host_id=host_id,
+                cpu_percentage=cpu_percent,
+                memory_usage=memory_usage,
+                memory_limit=memory_limit,
+                memory_percentage=memory_percent,
+                network_rx=net_rx,
+                network_tx=net_tx,
+                block_read=blk_read,
+                block_write=blk_write,
+                pids=pids_stats.get("current", 0),
+            )
+
+            logger.debug("Retrieved container stats", host_id=host_id, container_id=container_id)
+            return stats.model_dump()
+
+        except docker.errors.NotFound:
+            logger.error(
+                "Container not found for stats", host_id=host_id, container_id=container_id
+            )
+            return {"error": f"Container {container_id} not found"}
+        except docker.errors.APIError as e:
+            logger.error(
+                "Docker API error getting container stats",
+                host_id=host_id,
+                container_id=container_id,
+                error=str(e),
+            )
+            return {"error": f"Failed to get stats: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container stats",
@@ -381,7 +469,6 @@ class ContainerTools:
                 error=str(e),
             )
             return {"error": str(e)}
-
 
     def _parse_ports_summary(self, ports_str: str) -> list[str]:
         """Parse Docker ports string into simplified format."""
@@ -395,6 +482,22 @@ class ContainerTools:
                 ports.append(f"{host_part.strip()}→{container_part.strip()}")
 
         return ports
+
+    def _format_ports_from_dict(self, ports_dict: dict[str, Any]) -> str:
+        """Convert Docker SDK ports dictionary to string format for _parse_ports_summary."""
+        if not ports_dict:
+            return ""
+
+        port_strings = []
+        for container_port, host_bindings in ports_dict.items():
+            if host_bindings:  # Only include ports that are actually bound
+                for binding in host_bindings:
+                    host_ip = binding.get("HostIp", "0.0.0.0")
+                    host_port = binding.get("HostPort", "")
+                    if host_port:
+                        port_strings.append(f"{host_ip}:{host_port}->{container_port}")
+
+        return ", ".join(port_strings)
 
     def _parse_labels(self, labels_data: Any) -> dict[str, str]:
         """Parse Docker labels that can be a dict or comma-separated string."""
@@ -412,12 +515,21 @@ class ContainerTools:
         else:
             return {}
 
-    def _parse_percentage(self, perc_str: str) -> float | None:
-        """Parse percentage string like '50.5%'."""
-        try:
-            return float(perc_str.rstrip("%"))
-        except (ValueError, AttributeError):
-            return None
+    def _calculate_cpu_percentage(self, cpu_stats: dict, precpu_stats: dict) -> float:
+        """Calculate CPU percentage from Docker SDK stats data."""
+        cpu_delta = cpu_stats.get("cpu_usage", {}).get("total_usage", 0) - precpu_stats.get(
+            "cpu_usage", {}
+        ).get("total_usage", 0)
+
+        system_delta = cpu_stats.get("system_cpu_usage", 0) - precpu_stats.get(
+            "system_cpu_usage", 0
+        )
+
+        online_cpus = cpu_stats.get("online_cpus", 1)
+
+        if system_delta > 0 and cpu_delta >= 0:
+            return (cpu_delta / system_delta) * online_cpus * 100.0
+        return 0.0
 
     def _parse_memory(self, mem_str: str) -> tuple[int | None, int | None]:
         """Parse memory string like '1.5GB / 4GB'."""
@@ -462,24 +574,16 @@ class ContainerTools:
     async def _get_container_inspect_info(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Get basic container inspect info for enhanced listings."""
         try:
-            cmd = f"inspect {container_id}"
-            result = await self.context_manager.execute_docker_command(host_id, cmd)
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
-            container_data = None
-            if isinstance(result, list) and len(result) > 0:
-                container_data = result[0]
-            elif isinstance(result, dict) and "output" in result:
-                try:
-                    inspect_data = json.loads(result["output"])
-                    if isinstance(inspect_data, list) and len(inspect_data) > 0:
-                        container_data = inspect_data[0]
-                except json.JSONDecodeError:
-                    return {
-                        "volumes": [],
-                        "networks": [],
-                        "compose_project": "",
-                        "compose_file": "",
-                    }
+            # Use Docker SDK to get container
+            container = await loop.run_in_executor(
+                None, lambda: client.containers.get(container_id)
+            )
+
+            # Return container attributes which contain all inspect data
+            container_data = container.attrs
 
             if not container_data:
                 return {"volumes": [], "networks": [], "compose_project": "", "compose_file": ""}
@@ -501,8 +605,8 @@ class ContainerTools:
             networks = list(network_settings.get("Networks", {}).keys())
 
             # Extract compose information
-            compose_project = labels.get("com.docker.compose.project", "")
-            compose_file = labels.get("com.docker.compose.project.config_files", "")
+            compose_project = labels.get(DOCKER_COMPOSE_PROJECT, "")
+            compose_file = labels.get(DOCKER_COMPOSE_CONFIG_FILES, "")
 
             return {
                 "volumes": volumes,
@@ -594,26 +698,40 @@ class ContainerTools:
             Operation result
         """
         try:
-            # Build Docker pull command
-            cmd = f"pull {image_name}"
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
-            result = await self.context_manager.execute_docker_command(host_id, cmd)
+            # Pull image using Docker SDK
+            image = await loop.run_in_executor(None, lambda: client.images.pull(image_name))
 
             logger.info(
                 "Image pull completed",
                 host_id=host_id,
                 image_name=image_name,
+                image_id=image.id[:12],
             )
 
             return {
                 "success": True,
                 "message": f"Successfully pulled image {image_name}",
                 "image_name": image_name,
+                "image_id": image.id[:12],
                 "host_id": host_id,
-                "output": result.get("output", ""),
+                "image_tags": image.tags,
                 "timestamp": datetime.now().isoformat(),
             }
 
+        except docker.errors.ImageNotFound:
+            logger.error("Image not found", host_id=host_id, image_name=image_name)
+            return {"success": False, "error": f"Image {image_name} not found"}
+        except docker.errors.APIError as e:
+            logger.error(
+                "Docker API error pulling image",
+                host_id=host_id,
+                image_name=image_name,
+                error=str(e),
+            )
+            return {"success": False, "error": f"Failed to pull image: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to pull image",
@@ -630,7 +748,9 @@ class ContainerTools:
                 "timestamp": datetime.now().isoformat(),
             }
 
-    def _build_container_command(self, action: str, container_id: str, force: bool, timeout: int) -> str:
+    def _build_container_command(
+        self, action: str, container_id: str, force: bool, timeout: int
+    ) -> str:
         """Build Docker command based on action."""
         if action == "start":
             return f"start {container_id}"
@@ -692,7 +812,7 @@ class ContainerTools:
                 "conflicts": [conflict.model_dump() for conflict in conflicts],
                 "summary": summary,
                 "timestamp": datetime.now().isoformat(),
-                "cached": cache_hit,
+                "cached": False,
             }
 
         except (DockerCommandError, DockerContextError) as e:
@@ -702,99 +822,45 @@ class ContainerTools:
             logger.error("Unexpected error listing host ports", host_id=host_id, error=str(e))
             raise DockerCommandError(f"Failed to list ports: {e}") from e
 
-    async def _get_containers_for_port_analysis(self, host_id: str, include_stopped: bool) -> list[dict[str, Any]]:
+    async def _get_containers_for_port_analysis(
+        self, host_id: str, include_stopped: bool
+    ) -> list[dict[str, Any]]:
         """Get container data for port analysis."""
-        cmd = "ps --format json --no-trunc"
-        if include_stopped:
-            cmd += " --all"
+        # Get Docker client and list containers using Docker SDK
+        client = await self.context_manager.get_client(host_id)
+        loop = asyncio.get_event_loop()
+        docker_containers = await loop.run_in_executor(
+            None, lambda: client.containers.list(all=include_stopped)
+        )
 
-        result = await self.context_manager.execute_docker_command(host_id, cmd)
-        containers = []
+        # Return Docker SDK container objects directly for more efficient port extraction
+        return docker_containers
 
-        if isinstance(result, dict) and "output" in result:
-            for line in result["output"].strip().split("\n"):
-                if line.strip():
-                    try:
-                        container_data = json.loads(line)
-                        containers.append(container_data)
-                    except json.JSONDecodeError:
-                        logger.warning("Failed to parse container JSON", line=line)
-
-        return containers
-
-    async def _collect_port_mappings(self, host_id: str, containers: list[dict[str, Any]]) -> list[PortMapping]:
+    async def _collect_port_mappings(self, host_id: str, containers) -> list[PortMapping]:
         """Collect port mappings from all containers."""
         port_mappings = []
 
-        for container_data in containers:
-            container_id = container_data.get("ID", "")[:12]
-            container_name = container_data.get("Names", "").lstrip("/")
-            image = container_data.get("Image", "")
+        for container in containers:
+            container_id = container.id[:12]
+            container_name = container.name
+            image = container.attrs.get("Config", {}).get("Image", "")
 
-            # Get port mappings for this container
-            container_mappings = await self._get_container_port_mappings(
-                host_id, container_id, container_name, image
+            # Extract port mappings directly from Docker SDK container object
+            container_mappings = self._extract_port_mappings_from_container(
+                container, container_id, container_name, image
             )
             port_mappings.extend(container_mappings)
 
         return port_mappings
 
-    async def _get_container_port_mappings(
-        self, host_id: str, container_id: str, container_name: str, image: str
+    def _extract_port_mappings_from_container(
+        self, container, container_id: str, container_name: str, image: str
     ) -> list[PortMapping]:
-        """Get port mappings for a single container."""
-        try:
-            # Get detailed inspect data for ports
-            inspect_info = await self._get_container_inspect_info(host_id, container_id)
-
-            # Get ports from inspect data
-            inspect_cmd = f"inspect {container_id}"
-            inspect_result = await self.context_manager.execute_docker_command(host_id, inspect_cmd)
-
-            container_inspect_data = self._parse_inspect_result(inspect_result)
-            if not container_inspect_data:
-                return []
-
-            return self._extract_port_mappings_from_inspect(
-                container_inspect_data, container_id, container_name, image, inspect_info
-            )
-
-        except Exception as e:
-            logger.debug(
-                "Failed to get ports for container",
-                host_id=host_id,
-                container_id=container_id,
-                error=str(e),
-            )
-            return []
-
-    def _parse_inspect_result(self, inspect_result: Any) -> dict[str, Any] | None:
-        """Parse docker inspect result to get container data."""
-        if isinstance(inspect_result, list) and len(inspect_result) > 0:
-            return inspect_result[0]
-        elif isinstance(inspect_result, dict) and "output" in inspect_result:
-            try:
-                inspect_parsed = json.loads(inspect_result["output"])
-                if isinstance(inspect_parsed, list) and len(inspect_parsed) > 0:
-                    return inspect_parsed[0]
-            except json.JSONDecodeError:
-                pass
-        return None
-
-    def _extract_port_mappings_from_inspect(
-        self,
-        container_inspect_data: dict[str, Any],
-        container_id: str,
-        container_name: str,
-        image: str,
-        inspect_info: dict[str, Any],
-    ) -> list[PortMapping]:
-        """Extract port mappings from container inspect data."""
+        """Extract port mappings directly from Docker SDK container object."""
         port_mappings = []
 
-        # Parse NetworkSettings.Ports for structured port data
-        network_settings = container_inspect_data.get("NetworkSettings", {})
-        ports_data = network_settings.get("Ports", {})
+        # Get port mappings from container.ports (Docker SDK provides this directly)
+        ports_data = container.ports
 
         if not ports_data:
             return port_mappings
@@ -808,15 +874,21 @@ class ContainerTools:
                     # Parse protocol from container_port (e.g., "80/tcp")
                     container_port_clean, protocol = self._parse_container_port(container_port)
 
+                    # Get compose project from container labels
+                    labels = container.labels or {}
+                    compose_project = labels.get(DOCKER_COMPOSE_PROJECT, "")
+
                     port_mapping = PortMapping(
                         host_ip=host_ip,
                         host_port=host_port,
                         container_port=container_port_clean,
-                        protocol=protocol,
+                        protocol=protocol.upper(),
                         container_id=container_id,
                         container_name=container_name,
                         image=image,
-                        compose_project=inspect_info.get("compose_project", "") or None,
+                        compose_project=compose_project,
+                        is_conflict=False,
+                        conflict_with=[],
                     )
                     port_mappings.append(port_mapping)
 
@@ -863,12 +935,14 @@ class ContainerTools:
                 m.container_name for m in mappings if m.container_id != mapping.container_id
             ]
             container_names.append(mapping.container_name)
-            container_details.append({
-                "container_id": mapping.container_id,
-                "container_name": mapping.container_name,
-                "image": mapping.image,
-                "compose_project": mapping.compose_project,
-            })
+            container_details.append(
+                {
+                    "container_id": mapping.container_id,
+                    "container_name": mapping.container_name,
+                    "image": mapping.image,
+                    "compose_project": mapping.compose_project,
+                }
+            )
 
         return PortConflict(
             host_port=host_port,

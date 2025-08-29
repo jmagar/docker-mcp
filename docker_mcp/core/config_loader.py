@@ -45,7 +45,9 @@ class CleanupSchedule(BaseModel):
 class ServerConfig(BaseModel):
     """Server configuration."""
 
-    host: str = Field(default="127.0.0.1", alias="FASTMCP_HOST")  # Use 0.0.0.0 for container deployment
+    host: str = Field(
+        default="127.0.0.1", alias="FASTMCP_HOST"
+    )  # Use 0.0.0.0 for container deployment
     port: int = Field(default=8000, alias="FASTMCP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     max_connections: int = 10
@@ -83,6 +85,7 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
 
     # Load project config (from env var or default)
     from ..server import get_config_dir  # Import at use to avoid circular imports
+
     default_config_file = os.getenv("DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml"))
     project_config_path = Path(config_path or default_config_file)
     _load_config_file(config, project_config_path)
@@ -125,8 +128,7 @@ def _apply_cleanup_schedules(config: DockerMCPConfig, yaml_config: dict[str, Any
     if not schedules:
         return
     config.cleanup_schedules = {
-        schedule_id: CleanupSchedule(**sched_data)
-        for schedule_id, sched_data in schedules.items()
+        schedule_id: CleanupSchedule(**sched_data) for schedule_id, sched_data in schedules.items()
     }
 
 
@@ -273,9 +275,7 @@ def _write_cleanup_schedules_section(f, schedules: dict[str, Any]) -> None:
         f.write("  {}\n")
         return
     # Use safe_dump for nested mapping serialization
-    dumped = yaml.safe_dump(
-        schedules, default_flow_style=False, sort_keys=False, indent=2
-    )
+    dumped = yaml.safe_dump(schedules, default_flow_style=False, sort_keys=False, indent=2)
     # Indent by two spaces under the section key
     indented = "".join(f"  {line}" for line in dumped.splitlines(True))
     f.write(indented)

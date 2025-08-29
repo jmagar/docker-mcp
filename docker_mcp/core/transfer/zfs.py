@@ -18,6 +18,7 @@ logger = structlog.get_logger()
 
 class ZFSError(DockerMCPError):
     """ZFS transfer operation failed."""
+
     pass
 
 
@@ -35,10 +36,10 @@ class ZFSTransfer(BaseTransfer):
 
     async def validate_requirements(self, host: DockerHost) -> tuple[bool, str]:
         """Validate that ZFS is available and functional on the host.
-        
+
         Args:
             host: Host configuration to validate
-            
+
         Returns:
             Tuple of (is_valid: bool, error_message: str)
         """
@@ -68,7 +69,10 @@ class ZFSTransfer(BaseTransfer):
             )
 
             if "FAILED" in result.stdout:
-                return False, f"ZFS not functional on host {host.hostname} (no pools or permissions issue)"
+                return (
+                    False,
+                    f"ZFS not functional on host {host.hostname} (no pools or permissions issue)",
+                )
 
             return True, ""
 
@@ -76,16 +80,14 @@ class ZFSTransfer(BaseTransfer):
             return False, f"Failed to check ZFS availability: {str(e)}"
 
     async def detect_zfs_capability(
-        self,
-        host: DockerHost,
-        appdata_path: str | None = None
+        self, host: DockerHost, appdata_path: str | None = None
     ) -> tuple[bool, str | None]:
         """Detect if host has ZFS and if appdata_path is on ZFS.
-        
+
         Args:
             host: Host configuration
             appdata_path: Path to check for ZFS dataset
-            
+
         Returns:
             Tuple of (zfs_capable: bool, dataset_name: str | None)
         """
@@ -103,11 +105,11 @@ class ZFSTransfer(BaseTransfer):
 
     async def get_dataset_for_path(self, host: DockerHost, path: str) -> str | None:
         """Get ZFS dataset name for a given path.
-        
+
         Args:
             host: Host configuration
             path: Filesystem path
-            
+
         Returns:
             ZFS dataset name or None if not on ZFS
         """
@@ -145,7 +147,9 @@ class ZFSTransfer(BaseTransfer):
                 return result.stdout.strip()
 
             # Fallback: try to find dataset by mountpoint
-            mount_cmd = ssh_cmd + [f"zfs list -H -o name,mountpoint | grep '{path}' | head -1 | cut -f1"]
+            mount_cmd = ssh_cmd + [
+                f"zfs list -H -o name,mountpoint | grep '{path}' | head -1 | cut -f1"
+            ]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(  # nosec B603
@@ -162,15 +166,17 @@ class ZFSTransfer(BaseTransfer):
             self.logger.warning("Failed to detect ZFS dataset", path=path, error=str(e))
             return None
 
-    async def create_snapshot(self, host: DockerHost, dataset: str, snapshot_name: str, recursive: bool = False) -> str:
+    async def create_snapshot(
+        self, host: DockerHost, dataset: str, snapshot_name: str, recursive: bool = False
+    ) -> str:
         """Create a ZFS snapshot with optional recursion.
-        
+
         Args:
             host: Host configuration
             dataset: ZFS dataset name
             snapshot_name: Snapshot name
             recursive: Whether to recursively snapshot child datasets (DANGEROUS!)
-            
+
         Returns:
             Full snapshot name (dataset@snapshot)
         """
@@ -183,16 +189,12 @@ class ZFSTransfer(BaseTransfer):
             self.logger.warning(
                 "Creating RECURSIVE snapshot - will include all child datasets",
                 snapshot=full_snapshot,
-                dataset=dataset
+                dataset=dataset,
             )
         quoted_snapshot = shlex.quote(f"{dataset}@{snapshot_name}")
         snap_cmd = ssh_cmd + [f"zfs snapshot {snap_flags} {quoted_snapshot}".strip()]
 
-        self.logger.info(
-            "Creating ZFS snapshot",
-            snapshot=full_snapshot,
-            recursive=recursive
-        )
+        self.logger.info("Creating ZFS snapshot", snapshot=full_snapshot, recursive=recursive)
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -206,9 +208,11 @@ class ZFSTransfer(BaseTransfer):
 
         return full_snapshot
 
-    async def cleanup_snapshot(self, host: DockerHost, full_snapshot: str, recursive: bool = False) -> None:
+    async def cleanup_snapshot(
+        self, host: DockerHost, full_snapshot: str, recursive: bool = False
+    ) -> None:
         """Remove a ZFS snapshot with safety validation.
-        
+
         Args:
             host: Host configuration
             full_snapshot: Full snapshot name (dataset@snapshot)
@@ -220,7 +224,7 @@ class ZFSTransfer(BaseTransfer):
             self.logger.error(
                 "ZFS snapshot deletion blocked by safety check",
                 snapshot=full_snapshot,
-                reason=validation_reason
+                reason=validation_reason,
             )
             raise ZFSError(f"SAFETY BLOCK: {validation_reason}")
 
@@ -230,7 +234,7 @@ class ZFSTransfer(BaseTransfer):
         if recursive:
             self.logger.warning(
                 "Using RECURSIVE ZFS destroy - this will delete child snapshots!",
-                snapshot=full_snapshot
+                snapshot=full_snapshot,
             )
             destroy_cmd = ssh_cmd + [f"zfs destroy -r {full_snapshot}"]
         else:
@@ -238,10 +242,7 @@ class ZFSTransfer(BaseTransfer):
             destroy_cmd = ssh_cmd + [f"zfs destroy {full_snapshot}"]
 
         self.logger.info(
-            "Cleaning up ZFS snapshot",
-            snapshot=full_snapshot,
-            recursive=recursive,
-            validated=True
+            "Cleaning up ZFS snapshot", snapshot=full_snapshot, recursive=recursive, validated=True
         )
 
         result = await asyncio.get_event_loop().run_in_executor(
@@ -254,7 +255,9 @@ class ZFSTransfer(BaseTransfer):
         if result.returncode == 0:
             self.logger.info("ZFS snapshot cleaned up successfully", snapshot=full_snapshot)
         else:
-            self.logger.warning("Failed to cleanup snapshot", snapshot=full_snapshot, error=result.stderr)
+            self.logger.warning(
+                "Failed to cleanup snapshot", snapshot=full_snapshot, error=result.stderr
+            )
 
     async def transfer(
         self,
@@ -264,10 +267,10 @@ class ZFSTransfer(BaseTransfer):
         target_path: str,
         source_dataset: str | None = None,
         target_dataset: str | None = None,
-        **kwargs
+        **kwargs,
     ) -> dict[str, Any]:
         """Transfer data using ZFS send/receive.
-        
+
         Args:
             source_host: Source host configuration
             target_host: Target host configuration
@@ -276,7 +279,7 @@ class ZFSTransfer(BaseTransfer):
             source_dataset: Source ZFS dataset (auto-detected if not provided)
             target_dataset: Target ZFS dataset (auto-detected if not provided)
             **kwargs: Additional options (ignored)
-            
+
         Returns:
             Transfer result with statistics
         """
@@ -333,10 +336,10 @@ class ZFSTransfer(BaseTransfer):
         source_host: DockerHost,
         target_host: DockerHost,
         full_snapshot: str,
-        target_dataset: str
+        target_dataset: str,
     ) -> None:
         """Perform ZFS send/receive operation.
-        
+
         Args:
             source_host: Source host configuration
             target_host: Target host configuration
@@ -348,16 +351,16 @@ class ZFSTransfer(BaseTransfer):
 
         # Build the ZFS send command - be careful with -R flag
         # Use -R (recursive) only if specifically requested, default to single snapshot
-        send_flags = "-R" if getattr(self, '_use_recursive_send', False) else ""
+        send_flags = "-R" if getattr(self, "_use_recursive_send", False) else ""
         send_cmd = " ".join(source_ssh_cmd) + f" 'zfs send {send_flags} {full_snapshot}'"
 
         # Build the ZFS receive command - make -F flag conditional for safety
         # -F forces receive and can destroy existing data, use with caution
-        recv_flags = "-F" if getattr(self, '_force_receive', True) else ""
+        recv_flags = "-F" if getattr(self, "_force_receive", True) else ""
         if recv_flags:
             self.logger.warning(
                 "Using FORCE receive flag - this will destroy existing data on target dataset",
-                target_dataset=target_dataset
+                target_dataset=target_dataset,
             )
         recv_cmd = " ".join(target_ssh_cmd) + f" 'zfs recv {recv_flags} {target_dataset}'"
 
@@ -393,16 +396,16 @@ class ZFSTransfer(BaseTransfer):
         source_host: DockerHost,
         target_host: DockerHost,
         source_snapshot: str,
-        target_dataset: str
+        target_dataset: str,
     ) -> None:
         """Verify ZFS transfer completed successfully by comparing dataset properties.
-        
+
         Args:
             source_host: Source host configuration
             target_host: Target host configuration
             source_snapshot: Source snapshot name (dataset@snapshot)
             target_dataset: Target dataset name
-            
+
         Raises:
             ZFSError: If verification fails
         """
@@ -412,14 +415,16 @@ class ZFSTransfer(BaseTransfer):
         self.logger.info(
             "Verifying ZFS transfer integrity",
             source_snapshot=source_snapshot,
-            target_dataset=target_dataset
+            target_dataset=target_dataset,
         )
 
         # 1. Verify target dataset exists
-        target_exists_cmd = target_ssh_cmd + [f"zfs list {target_dataset} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"]
+        target_exists_cmd = target_ssh_cmd + [
+            f"zfs list {target_dataset} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
+        ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(target_exists_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda: subprocess.run(target_exists_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if "NOT_FOUND" in result.stdout:
@@ -431,7 +436,7 @@ class ZFSTransfer(BaseTransfer):
         ]
         source_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(source_props_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda: subprocess.run(source_props_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if "FAILED" in source_result.stdout or source_result.returncode != 0:
@@ -443,7 +448,9 @@ class ZFSTransfer(BaseTransfer):
             ]
             target_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(target_props_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                lambda: subprocess.run(
+                    target_props_cmd, capture_output=True, text=True, check=False
+                ),  # nosec B603
             )
 
             if "FAILED" not in target_result.stdout and target_result.returncode == 0:
@@ -462,7 +469,7 @@ class ZFSTransfer(BaseTransfer):
                             "ZFS transfer size mismatch",
                             source_referenced=source_ref,
                             target_referenced=target_ref,
-                            difference_percent=f"{size_diff_percent:.1f}%"
+                            difference_percent=f"{size_diff_percent:.1f}%",
                         )
                         # Don't fail on size mismatch as compression might differ
                     else:
@@ -470,35 +477,39 @@ class ZFSTransfer(BaseTransfer):
                             "ZFS transfer size verification passed",
                             source_referenced=source_ref,
                             target_referenced=target_ref,
-                            difference_percent=f"{size_diff_percent:.1f}%"
+                            difference_percent=f"{size_diff_percent:.1f}%",
                         )
 
         # 4. Verify we can access the target dataset (basic functionality test)
-        access_test_cmd = target_ssh_cmd + [f"ls {target_dataset} >/dev/null 2>&1 || zfs get -H mountpoint {target_dataset} >/dev/null 2>&1"]
+        access_test_cmd = target_ssh_cmd + [
+            f"ls {target_dataset} >/dev/null 2>&1 || zfs get -H mountpoint {target_dataset} >/dev/null 2>&1"
+        ]
         access_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(access_test_cmd, capture_output=True, text=True, check=False)  # nosec B603
+            lambda: subprocess.run(access_test_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if access_result.returncode != 0:
-            self.logger.warning("Target dataset access test failed, but transfer may have succeeded")
+            self.logger.warning(
+                "Target dataset access test failed, but transfer may have succeeded"
+            )
 
         self.logger.info("ZFS transfer verification completed successfully")
 
     def _parse_zfs_properties(self, zfs_output: str) -> dict[str, int]:
         """Parse ZFS properties output into a dictionary.
-        
+
         Args:
             zfs_output: Output from zfs get command
-            
+
         Returns:
             Dictionary of property names to values (in bytes)
         """
         properties = {}
 
-        for line in zfs_output.strip().split('\n'):
-            if line and '\t' in line:
-                parts = line.split('\t')
+        for line in zfs_output.strip().split("\n"):
+            if line and "\t" in line:
+                parts = line.split("\t")
                 if len(parts) >= 3:
                     # parts[1] is property name, parts[2] is value
                     prop_name = parts[1]
