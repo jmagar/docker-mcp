@@ -51,7 +51,7 @@ class ZFSTransfer(BaseTransfer):
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     check_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -63,7 +63,7 @@ class ZFSTransfer(BaseTransfer):
             list_cmd = ssh_cmd + ["zfs list > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     list_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -121,7 +121,7 @@ class ZFSTransfer(BaseTransfer):
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     df_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -138,7 +138,7 @@ class ZFSTransfer(BaseTransfer):
             zfs_cmd = ssh_cmd + [f"zfs list -H -o name {path} 2>/dev/null | head -1"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     zfs_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -152,7 +152,7 @@ class ZFSTransfer(BaseTransfer):
             ]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     mount_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -198,7 +198,7 @@ class ZFSTransfer(BaseTransfer):
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 snap_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -247,7 +247,7 @@ class ZFSTransfer(BaseTransfer):
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 destroy_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -378,7 +378,7 @@ class ZFSTransfer(BaseTransfer):
         # Execute the combined command
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 ["bash", "-c", full_cmd], check=False, capture_output=True, text=True
             ),
         )
@@ -424,7 +424,7 @@ class ZFSTransfer(BaseTransfer):
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(target_exists_cmd, capture_output=True, text=True, check=False),  # nosec B603
+            lambda: subprocess.run(target_exists_cmd, capture_output=True, text=True, check=False),  # noqa: S603
         )
 
         if "NOT_FOUND" in result.stdout:
@@ -436,7 +436,7 @@ class ZFSTransfer(BaseTransfer):
         ]
         source_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(source_props_cmd, capture_output=True, text=True, check=False),  # nosec B603
+            lambda: subprocess.run(source_props_cmd, capture_output=True, text=True, check=False),  # noqa: S603
         )
 
         if "FAILED" in source_result.stdout or source_result.returncode != 0:
@@ -450,7 +450,7 @@ class ZFSTransfer(BaseTransfer):
                 None,
                 lambda: subprocess.run(
                     target_props_cmd, capture_output=True, text=True, check=False
-                ),  # nosec B603
+                ),  # noqa: S603
             )
 
             if "FAILED" not in target_result.stdout and target_result.returncode == 0:
@@ -486,7 +486,7 @@ class ZFSTransfer(BaseTransfer):
         ]
         access_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(access_test_cmd, capture_output=True, text=True, check=False),  # nosec B603
+            lambda: subprocess.run(access_test_cmd, capture_output=True, text=True, check=False),  # noqa: S603
         )
 
         if access_result.returncode != 0:

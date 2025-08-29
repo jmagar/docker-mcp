@@ -612,7 +612,7 @@ class DockerCacheManager:
     async def get_stack_members(self, project_name: str) -> list[ContainerCache]:
         """Get all containers in a compose stack across all hosts"""
         members = []
-        for host_id, containers in self.containers_cache.items():
+        for _host_id, containers in self.containers_cache.items():
             for container in containers.values():
                 if container.compose_project == project_name:
                     members.append(container)
@@ -623,7 +623,7 @@ class DockerCacheManager:
     ) -> list[ContainerCache]:
         """Find containers by label across all hosts"""
         results = []
-        for host_id, containers in self.containers_cache.items():
+        for _host_id, containers in self.containers_cache.items():
             for container in containers.values():
                 if label_key in container.labels:
                     if label_value is None or container.labels[label_key] == label_value:
@@ -633,7 +633,7 @@ class DockerCacheManager:
     async def get_by_network(self, network_name: str) -> list[ContainerCache]:
         """Get all containers on a specific network"""
         results = []
-        for host_id, containers in self.containers_cache.items():
+        for _host_id, containers in self.containers_cache.items():
             for container in containers.values():
                 for network in container.networks:
                     if network["name"] == network_name:
@@ -646,7 +646,7 @@ class DockerCacheManager:
         query_lower = query.lower()
         results = []
 
-        for host_id, containers in self.containers_cache.items():
+        for _host_id, containers in self.containers_cache.items():
             for container in containers.values():
                 if (
                     query_lower in container.name.lower()
@@ -660,7 +660,7 @@ class DockerCacheManager:
     async def get_resource_usage(self, top_n: int = 10) -> dict[str, list[ContainerCache]]:
         """Get top resource consumers"""
         all_containers = []
-        for host_id, containers in self.containers_cache.items():
+        for _host_id, containers in self.containers_cache.items():
             all_containers.extend(containers.values())
 
         # Sort by CPU and memory
@@ -672,7 +672,7 @@ class DockerCacheManager:
     async def get_containers_by_status(self, status: str) -> list[ContainerCache]:
         """Get all containers with a specific status across all hosts"""
         results = []
-        for host_id, containers in self.containers_cache.items():
+        for _host_id, containers in self.containers_cache.items():
             for container in containers.values():
                 if container.status.lower() == status.lower():
                     results.append(container)
@@ -681,7 +681,7 @@ class DockerCacheManager:
     async def find_containers_with_mounts(self, mount_path: str) -> list[ContainerCache]:
         """Find containers that have volumes mounted from a specific path"""
         results = []
-        for host_id, containers in self.containers_cache.items():
+        for _host_id, containers in self.containers_cache.items():
             for container in containers.values():
                 # Check bind mounts
                 for mount in container.bind_mounts:
@@ -697,7 +697,7 @@ class DockerCacheManager:
         starting = []
         no_health = []
 
-        for host_id, containers in self.containers_cache.items():
+        for _host_id, containers in self.containers_cache.items():
             for container in containers.values():
                 health_status = container.health_status
                 if health_status == "healthy":

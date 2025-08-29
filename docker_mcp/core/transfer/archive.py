@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -134,7 +135,7 @@ class ArchiveUtils:
         ssh_cmd: list[str],
         volume_paths: list[str],
         archive_name: str,
-        temp_dir: str = "/tmp",
+        temp_dir: str | None = None,
         exclusions: list[str] | None = None,
     ) -> str:
         """Create tar.gz archive of volume data on remote host.
@@ -188,7 +189,7 @@ class ArchiveUtils:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 full_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -216,7 +217,7 @@ class ArchiveUtils:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 verify_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -247,7 +248,7 @@ class ArchiveUtils:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 extract_cmd, check=False, capture_output=True, text=True
             ),
         )

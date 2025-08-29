@@ -4,6 +4,7 @@ import asyncio
 import os
 import shlex
 import subprocess
+import tempfile
 from typing import Any
 
 import structlog
@@ -94,7 +95,7 @@ class MigrationManager:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 check_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -126,7 +127,7 @@ class MigrationManager:
                 stop_cmd = ssh_cmd + [f"docker kill {shlex.quote(container)}"]
                 await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda cmd=stop_cmd: subprocess.run(  # nosec B603
+                    lambda cmd=stop_cmd: subprocess.run(  # noqa: S603
                         cmd, check=False, capture_output=True, text=True
                     ),
                 )
@@ -162,7 +163,7 @@ class MigrationManager:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=full_cmd: subprocess.run(  # nosec B603
+            lambda cmd=full_cmd: subprocess.run(  # noqa: S603
                 cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -235,7 +236,8 @@ class MigrationManager:
 
             # Transfer archive to target with random suffix for security
             temp_suffix = os.urandom(8).hex()[:8]
-            target_archive_path = f"/tmp/{stack_name}_migration_{temp_suffix}.tar.gz"
+            temp_dir = tempfile.mkdtemp(prefix="docker_mcp_migration_")
+            target_archive_path = f"{temp_dir}/{stack_name}_migration_{temp_suffix}.tar.gz"
 
             transfer_result = await transfer_instance.transfer(
                 source_host=source_host,

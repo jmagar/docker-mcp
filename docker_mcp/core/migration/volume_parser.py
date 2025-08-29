@@ -260,7 +260,7 @@ class VolumeParser:
 
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=full_cmd: subprocess.run(  # nosec B603
+                lambda cmd=full_cmd: subprocess.run(  # noqa: S603
                     cmd, check=False, capture_output=True, text=True
                 ),
             )

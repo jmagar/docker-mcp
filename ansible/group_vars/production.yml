@@ -1,0 +1,36 @@
+# Production Environment Settings
+
+# Stricter thresholds for production
+cleanup_thresholds:
+  disk_usage_warning: 70
+  disk_usage_critical: 85
+  container_age_days: 30
+  image_age_days: 60
+  volume_age_days: 180
+
+health_check:
+  disk_warning_threshold: 70
+  disk_critical_threshold: 85
+  memory_warning_threshold: 80
+  memory_critical_threshold: 90
+  container_restart_threshold: 3
+  check_interval_minutes: 5
+
+# More conservative migration settings
+migration:
+  verify_data_integrity: true
+  create_backup_before_migration: true
+  migration_timeout_minutes: 120
+  require_manual_approval: true
+  
+# Extended backup retention for production
+backup:
+  default_retention_days: 30
+  backup_compression: true
+  verify_backups: true
+  offsite_backup: true
+  
+# Production-specific paths
+default_compose_path: "/srv/docker/compose"
+default_appdata_path: "/srv/docker/data"
+default_backup_path: "/srv/docker/backups"

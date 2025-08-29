@@ -58,7 +58,7 @@ class MigrationVerifier:
                 None,
                 lambda cmd=file_count_cmd: subprocess.run(
                     cmd, capture_output=True, text=True, check=False
-                ),  # nosec B603
+                ),  # noqa: S603
             )
             path_inventory["file_count"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
@@ -70,7 +70,7 @@ class MigrationVerifier:
                 None,
                 lambda cmd=dir_count_cmd: subprocess.run(
                     cmd, capture_output=True, text=True, check=False
-                ),  # nosec B603
+                ),  # noqa: S603
             )
             path_inventory["dir_count"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
@@ -82,7 +82,7 @@ class MigrationVerifier:
                 None,
                 lambda cmd=size_cmd: subprocess.run(
                     cmd, capture_output=True, text=True, check=False
-                ),  # nosec B603
+                ),  # noqa: S603
             )
             path_inventory["total_size"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
@@ -96,7 +96,7 @@ class MigrationVerifier:
                 None,
                 lambda cmd=file_list_cmd: subprocess.run(
                     cmd, capture_output=True, text=True, check=False
-                ),  # nosec B603
+                ),  # noqa: S603
             )
             path_inventory["file_list"] = (
                 result.stdout.strip().split("\n") if result.returncode == 0 else []
@@ -111,7 +111,7 @@ class MigrationVerifier:
                 None,
                 lambda cmd=critical_cmd: subprocess.run(
                     cmd, capture_output=True, text=True, check=False
-                ),  # nosec B603
+                ),  # noqa: S603
             )
 
             critical_files = {}
@@ -185,7 +185,7 @@ class MigrationVerifier:
             None,
             lambda cmd=file_count_cmd: subprocess.run(
                 cmd, capture_output=True, text=True, check=False
-            ),  # nosec B603
+            ),  # noqa: S603
         )
         target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["files_found"] = target_files
@@ -196,7 +196,7 @@ class MigrationVerifier:
             None,
             lambda cmd=dir_count_cmd: subprocess.run(
                 cmd, capture_output=True, text=True, check=False
-            ),  # nosec B603
+            ),  # noqa: S603
         )
         target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["dirs_found"] = target_dirs
@@ -205,7 +205,7 @@ class MigrationVerifier:
         size_cmd = ssh_cmd + [f"du -sb {shlex.quote(target_path)} 2>/dev/null | cut -f1"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+            lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
         )
         target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["size_found"] = target_size
@@ -218,7 +218,7 @@ class MigrationVerifier:
             None,
             lambda cmd=file_list_cmd: subprocess.run(
                 cmd, capture_output=True, text=True, check=False
-            ),  # nosec B603
+            ),  # noqa: S603
         )
         target_file_list = (
             result.stdout.strip().split("\n")
@@ -264,7 +264,7 @@ class MigrationVerifier:
                 None,
                 lambda cmd=checksum_cmd: subprocess.run(
                     cmd, capture_output=True, text=True, check=False
-                ),  # nosec B603
+                ),  # noqa: S603
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -339,7 +339,7 @@ class MigrationVerifier:
             None,
             lambda cmd=inspect_cmd: subprocess.run(
                 cmd, capture_output=True, text=True, check=False
-            ),  # nosec B603
+            ),  # noqa: S603
         )
 
         if result.returncode != 0 or "NOT_FOUND" in result.stdout:
@@ -369,7 +369,7 @@ class MigrationVerifier:
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=test_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+            lambda cmd=test_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
         )
         return result.returncode == 0
 
@@ -380,7 +380,7 @@ class MigrationVerifier:
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=logs_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+            lambda cmd=logs_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
         )
 
         if result.stdout.strip():

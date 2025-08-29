@@ -389,7 +389,7 @@ class StackTools:
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     ssh_cmd,
                     check=False,
                     text=True,
@@ -681,7 +681,7 @@ class StackTools:
 
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     ssh_cmd,
                     check=False,
                     capture_output=True,

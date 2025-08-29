@@ -91,7 +91,7 @@ class CleanupService:
             summary_cmd = build_ssh_command(host) + ["docker", "system", "df"]
             summary_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     summary_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -106,7 +106,7 @@ class CleanupService:
             detailed_cmd = build_ssh_command(host) + ["docker", "system", "df", "-v"]
             detailed_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     detailed_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -242,7 +242,7 @@ class CleanupService:
         """Run a cleanup command and parse results."""
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -481,7 +481,6 @@ class CleanupService:
 
         images = []
         volumes = []
-        containers = []
 
         for line in lines:
             line = line.strip()
@@ -543,7 +542,7 @@ class CleanupService:
                     # Format: CONTAINER_ID IMAGE COMMAND LOCAL_VOLUMES SIZE CREATED STATUS NAMES
                     # Note: CREATED and STATUS can be multiple words, so we need to identify STATUS by keywords
                     if len(parts) >= 7:
-                        container_id = parts[0]
+                        parts[0]
                         size_str = parts[4]  # Fixed: SIZE is at index 4
                         size_bytes = self._parse_docker_size(size_str)
                         container_name = parts[-1]  # NAMES is always the last column
@@ -779,7 +778,7 @@ class CleanupService:
             ]
             containers_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(containers_cmd, check=False, capture_output=True, text=True),  # nosec B603
+                lambda: subprocess.run(containers_cmd, check=False, capture_output=True, text=True),  # noqa: S603
             )
 
             if containers_result.returncode == 0 and containers_result.stdout.strip():
@@ -801,7 +800,7 @@ class CleanupService:
             ]
             networks_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(networks_cmd, check=False, capture_output=True, text=True),  # nosec B603
+                lambda: subprocess.run(networks_cmd, check=False, capture_output=True, text=True),  # noqa: S603
             )
 
             if networks_result.returncode == 0 and networks_result.stdout.strip():
@@ -822,7 +821,7 @@ class CleanupService:
             ]
             images_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(images_cmd, check=False, capture_output=True, text=True),  # nosec B603
+                lambda: subprocess.run(images_cmd, check=False, capture_output=True, text=True),  # noqa: S603
             )
 
             if images_result.returncode == 0 and images_result.stdout.strip():

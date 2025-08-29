@@ -9,6 +9,7 @@ import argparse
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -125,10 +126,10 @@ def get_data_dir() -> Path:
     fallback_candidates = [
         Path.home() / ".docker-mcp" / "data",  # Primary user directory
         Path.home() / ".local" / "share" / "docker-mcp",  # XDG-style fallback
-        Path("/tmp")
+        Path(tempfile.gettempdir())
         / "docker-mcp"
         / str(os.getuid() if hasattr(os, "getuid") else "user"),  # Temp with user isolation
-        Path("/tmp") / "docker-mcp",  # Final fallback
+        Path(tempfile.gettempdir()) / "docker-mcp",  # Final fallback
     ]
 
     for fallback_path in fallback_candidates:
@@ -1649,7 +1650,7 @@ def main() -> None:
         os.getenv("LOG_DIR"),  # Explicit environment override
         str(get_data_dir() / "logs"),  # Primary data directory
         str(Path.home() / ".local" / "share" / "docker-mcp" / "logs"),  # User fallback
-        "/tmp/docker-mcp-logs",  # System fallback
+        str(Path(tempfile.gettempdir()) / "docker-mcp-logs"),  # System fallback
     ]
 
     log_dir = None

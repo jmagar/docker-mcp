@@ -724,7 +724,7 @@ class HostService:
                 base_path_counts = Counter()
                 for mount_path in all_bind_mounts:
                     # Skip system paths and temporary mounts
-                    if mount_path.startswith(("/proc", "/sys", "/dev", "/tmp", "/var/run")):
+                    if mount_path.startswith(("/proc", "/sys", "/dev", "/tmp", "/var/run")):  # noqa: S108
                         continue
 
                     # Find potential base appdata paths
@@ -786,7 +786,7 @@ class HostService:
                     base_path_counts = {}
                     for mount_path in bind_mounts:
                         # Skip system paths and temporary mounts
-                        if mount_path.startswith(("/proc", "/sys", "/dev", "/tmp", "/var/run")):
+                        if mount_path.startswith(("/proc", "/sys", "/dev", "/tmp", "/var/run")):  # noqa: S108
                             continue
 
                         # Find potential base appdata paths

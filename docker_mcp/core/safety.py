@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +24,8 @@ class MigrationSafety:
 
     # Allowed paths for safe deletion operations
     SAFE_DELETE_PATHS = [
-        "/tmp",
-        "/var/tmp",
+        tempfile.gettempdir(),  # System temp directory
+        "/var/tmp",  # Standard UNIX temp directory  # noqa: S108
         "/opt/migration_temp",
         # Add more safe temporary directories as needed
     ]
@@ -170,7 +171,7 @@ class MigrationSafety:
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     delete_cmd, check=False, capture_output=True, text=True
                 ),
             )

@@ -107,7 +107,7 @@ class LoggingMiddleware(Middleware):
                     sanitized[key] = value[: self.max_payload_length] + "... [TRUNCATED]"
                 else:
                     sanitized[key] = value
-            elif isinstance(value, (dict, list)):
+            elif isinstance(value, dict | list):
                 # Convert complex objects to string and truncate if needed
                 str_value = str(value)
                 if len(str_value) > self.max_payload_length:

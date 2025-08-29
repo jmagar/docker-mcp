@@ -8,6 +8,7 @@ import asyncio
 import os
 import shlex
 import subprocess
+import tempfile
 from typing import Any
 
 import structlog
@@ -381,7 +382,7 @@ class StackService:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(read_cmd, capture_output=True, text=True, check=False),  # nosec B603
+                lambda: subprocess.run(read_cmd, capture_output=True, text=True, check=False),  # noqa: S603
             )
 
             if result.returncode != 0:
@@ -475,7 +476,7 @@ class StackService:
                 ]
                 size_result = await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False),  # nosec B603
+                    lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False),  # noqa: S603
                 )
                 if size_result.returncode == 0 and size_result.stdout.strip():
                     estimated_size = (
@@ -856,13 +857,13 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             source_ssh_cmd, capture_output=True, text=True, check=False, timeout=5
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
                     target_result = await loop.run_in_executor(
                         None,
                         lambda: subprocess.run(
                             target_ssh_cmd, capture_output=True, text=True, check=False, timeout=5
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
 
                     if source_result.returncode == 0 and target_result.returncode == 0:
@@ -933,7 +934,7 @@ class StackService:
                 ]
                 verify_result = await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(verify_cmd, capture_output=True, text=True, check=False),  # nosec B603
+                    lambda: subprocess.run(verify_cmd, capture_output=True, text=True, check=False),  # noqa: S603
                 )
 
                 if verify_result.stdout.strip():
@@ -961,7 +962,7 @@ class StackService:
                 sync_cmd = ssh_cmd_source + ["sync"]
                 await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(sync_cmd, capture_output=True, check=False),  # nosec B603
+                    lambda: subprocess.run(sync_cmd, capture_output=True, check=False),  # noqa: S603
                 )
                 migration_steps.append("✅ Filesystem sync completed")
 
@@ -973,7 +974,7 @@ class StackService:
                 ]
                 check_result = await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # nosec B603
+                    lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # noqa: S603
                 )
 
                 if check_result.stdout.strip():
@@ -1031,7 +1032,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             verify_archive_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
 
                     if "FAILED" in verify_archive.stdout:
@@ -1060,7 +1061,8 @@ class StackService:
                         )
                     else:
                         migration_steps.append("📦 (DRY RUN) Would create archive for migration")
-                    archive_path = f"/tmp/{stack_name}_migration_DRYRUN.tar.gz"  # Placeholder path
+                    temp_dir = tempfile.mkdtemp(prefix="docker_mcp_dryrun_")
+                    archive_path = f"{temp_dir}/{stack_name}_migration_DRYRUN.tar.gz"  # Placeholder path
 
             # Step 5: Prepare target directories (preserve subdirectory structure)
             migration_steps.append(f"📁 Preparing target directories on {target_host_id}...")
@@ -1086,7 +1088,7 @@ class StackService:
                     build_ssh_command(target_host) + [check_dir_cmd],
                     capture_output=True,
                     text=True,
-                    check=False,  # nosec B603
+                    check=False,  # noqa: S603
                 ),
             )
 
@@ -1102,7 +1104,7 @@ class StackService:
                             build_ssh_command(target_host) + [mkdir_cmd],
                             capture_output=True,
                             text=True,
-                            check=False,  # nosec B603
+                            check=False,  # noqa: S603
                         ),
                     )
                     if result.returncode != 0:
@@ -1163,7 +1165,7 @@ class StackService:
                             None,
                             lambda: subprocess.run(
                                 check_existing_cmd, capture_output=True, text=True, check=False
-                            ),  # nosec B603
+                            ),  # noqa: S603
                         )
                         has_existing_data = bool(check_result.stdout.strip())
 
@@ -1199,7 +1201,8 @@ class StackService:
             # Step 6: Transfer archive to target
             if all_paths and archive_path:
                 temp_suffix = os.urandom(8).hex()[:8]
-                target_archive_path = f"/tmp/{stack_name}_migration_{temp_suffix}.tar.gz"
+                temp_dir = tempfile.mkdtemp(prefix="docker_mcp_target_")
+                target_archive_path = f"{temp_dir}/{stack_name}_migration_{temp_suffix}.tar.gz"
 
                 if not dry_run:
                     migration_steps.append("🚀 Transferring data to target host...")
@@ -1224,7 +1227,7 @@ class StackService:
                             None,
                             lambda: subprocess.run(
                                 archive_size_cmd, capture_output=True, text=True, check=False
-                            ),  # nosec B603
+                            ),  # noqa: S603
                         )
                         archive_size = (
                             int(archive_size_result.stdout.strip())
@@ -1282,7 +1285,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             check_before_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
                     files_before = (
                         int(before_result.stdout.strip()) if before_result.returncode == 0 else 0
@@ -1296,7 +1299,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             check_before_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
                     files_before = (
                         int(before_result.stdout.strip()) if before_result.returncode == 0 else 0
@@ -1334,7 +1337,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             extract_to_staging_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
 
                     # Log Phase 1 extraction results
@@ -1389,7 +1392,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             check_staging_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
                     staging_files_count = (
                         int(staging_result.stdout.strip()) if staging_result.returncode == 0 else 0
@@ -1458,7 +1461,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             atomic_move_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
 
                     self.logger.info(
@@ -1502,7 +1505,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             check_after_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
                     files_after = (
                         int(after_result.stdout.strip()) if after_result.returncode == 0 else 0
@@ -1822,7 +1825,7 @@ class StackService:
                 remove_cmd = ssh_cmd_source + [
                     f"rm -f {shlex.quote(compose_file_path)}"
                 ]  # Changed from rm -rf to rm -f
-                await loop.run_in_executor(None, lambda: subprocess.run(remove_cmd, check=False))  # nosec B603
+                await loop.run_in_executor(None, lambda: subprocess.run(remove_cmd, check=False))  # noqa: S603
             elif (
                 remove_source
                 and dry_run
@@ -2016,7 +2019,7 @@ class StackService:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(df_cmd, capture_output=True, text=True, check=False),  # nosec B603
+                lambda: subprocess.run(df_cmd, capture_output=True, text=True, check=False),  # noqa: S603
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -2076,7 +2079,7 @@ class StackService:
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # nosec B603
+                    lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # noqa: S603
                 )
 
                 is_available = result.returncode == 0 and "AVAILABLE" in result.stdout
@@ -2121,7 +2124,7 @@ class StackService:
 
             # Parse services for port mappings
             services = compose_data.get("services", {})
-            for service_name, service_config in services.items():
+            for _service_name, service_config in services.items():
                 ports = service_config.get("ports", [])
                 for port_spec in ports:
                     if isinstance(port_spec, str):
@@ -2143,7 +2146,7 @@ class StackService:
                     elif isinstance(port_spec, dict):
                         # Long syntax: {target: 80, host_ip: "0.0.0.0", published: 8080}
                         published_port = port_spec.get("published")
-                        if published_port and isinstance(published_port, (int, str)):
+                        if published_port and isinstance(published_port, int | str):
                             try:
                                 port_num = int(published_port)
                                 if port_num not in exposed_ports:
@@ -2186,7 +2189,7 @@ class StackService:
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # nosec B603
+                    lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # noqa: S603
                 )
 
                 in_use = result.returncode == 0 and "IN_USE" in result.stdout
@@ -2303,7 +2306,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             check_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
 
                     exists = result.returncode == 0 and "EXISTS" in result.stdout
@@ -2337,7 +2340,7 @@ class StackService:
                         None,
                         lambda: subprocess.run(
                             check_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
 
                     exists = result.returncode == 0 and "EXISTS" in result.stdout
@@ -2391,7 +2394,7 @@ class StackService:
                     None,
                     lambda: subprocess.run(
                         source_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
-                    ),  # nosec B603
+                    ),  # noqa: S603
                 )
                 ssh_tests["source_ssh"] = {
                     "success": result.returncode == 0 and "SSH_OK" in result.stdout,
@@ -2408,7 +2411,7 @@ class StackService:
                     None,
                     lambda: subprocess.run(
                         target_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
-                    ),  # nosec B603
+                    ),  # noqa: S603
                 )
                 ssh_tests["target_ssh"] = {
                     "success": result.returncode == 0 and "SSH_OK" in result.stdout,
@@ -2436,7 +2439,7 @@ class StackService:
                             text=True,
                             check=False,
                             timeout=15,
-                        ),  # nosec B603
+                        ),  # noqa: S603
                     )
 
                     if result.returncode == 0 and "FILE_CREATED" in result.stdout:
@@ -2462,7 +2465,7 @@ class StackService:
                                 text=True,
                                 check=False,
                                 timeout=30,
-                            ),  # nosec B603
+                            ),  # noqa: S603
                         )
 
                         transfer_time = time.time() - start_time
@@ -2489,13 +2492,13 @@ class StackService:
                                 lambda: subprocess.run(
                                     cleanup_source, capture_output=True, check=False
                                 ),
-                            )  # nosec B603
+                            )  # noqa: S603
                             await loop.run_in_executor(
                                 None,
                                 lambda: subprocess.run(
                                     cleanup_target, capture_output=True, check=False
                                 ),
-                            )  # nosec B603
+                            )  # noqa: S603
                         else:
                             speed_test = {
                                 "success": False,
@@ -2614,7 +2617,7 @@ class StackService:
                     if "ports" in service_config:
                         ports = service_config["ports"]
                         if isinstance(ports, list):
-                            for i, port_spec in enumerate(ports):
+                            for _i, port_spec in enumerate(ports):
                                 if isinstance(port_spec, str):
                                     if ":" in port_spec:
                                         parts = port_spec.split(":")
@@ -2761,7 +2764,7 @@ class StackService:
 
         # Add overhead estimates (15-25% additional time for setup, verification, etc.)
         if estimates["estimates"]:
-            for estimate_key, estimate_data in estimates["estimates"].items():
+            for _estimate_key, estimate_data in estimates["estimates"].items():
                 base_time = estimate_data["time_seconds"]
                 with_overhead = base_time * 1.2  # 20% overhead
                 estimate_data["time_with_overhead"] = with_overhead

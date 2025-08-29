@@ -35,7 +35,7 @@ class DockerContextManager:
         cmd = [self._docker_bin] + args
         return await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 cmd,
                 check=False,
                 capture_output=True,

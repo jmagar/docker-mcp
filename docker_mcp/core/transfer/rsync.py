@@ -46,7 +46,7 @@ class RsyncTransfer(BaseTransfer):
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # nosec B603
+                lambda: subprocess.run(  # noqa: S603
                     check_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -122,7 +122,7 @@ class RsyncTransfer(BaseTransfer):
         # Execute rsync
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # nosec B603
+            lambda: subprocess.run(  # noqa: S603
                 rsync_cmd, check=False, capture_output=True, text=True
             ),
         )
