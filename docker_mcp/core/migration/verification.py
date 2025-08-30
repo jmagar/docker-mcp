@@ -56,9 +56,9 @@ class MigrationVerifier:
             file_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f 2>/dev/null | wc -l"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=file_count_cmd: subprocess.run(
+                lambda cmd=file_count_cmd: subprocess.run(  # noqa: S603
                     cmd, capture_output=True, text=True, check=False
-                ),  # noqa: S603
+                ),
             )
             path_inventory["file_count"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
@@ -68,9 +68,9 @@ class MigrationVerifier:
             dir_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type d 2>/dev/null | wc -l"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=dir_count_cmd: subprocess.run(
+                lambda cmd=dir_count_cmd: subprocess.run(  # noqa: S603
                     cmd, capture_output=True, text=True, check=False
-                ),  # noqa: S603
+                ),
             )
             path_inventory["dir_count"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
@@ -80,9 +80,9 @@ class MigrationVerifier:
             size_cmd = ssh_cmd + [f"du -sb {shlex.quote(path)} 2>/dev/null | cut -f1"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=size_cmd: subprocess.run(
+                lambda cmd=size_cmd: subprocess.run(  # noqa: S603
                     cmd, capture_output=True, text=True, check=False
-                ),  # noqa: S603
+                ),
             )
             path_inventory["total_size"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
@@ -94,9 +94,9 @@ class MigrationVerifier:
             ]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=file_list_cmd: subprocess.run(
+                lambda cmd=file_list_cmd: subprocess.run(  # noqa: S603
                     cmd, capture_output=True, text=True, check=False
-                ),  # noqa: S603
+                ),
             )
             path_inventory["file_list"] = (
                 result.stdout.strip().split("\n") if result.returncode == 0 else []
@@ -109,9 +109,9 @@ class MigrationVerifier:
             ]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=critical_cmd: subprocess.run(
+                lambda cmd=critical_cmd: subprocess.run(  # noqa: S603
                     cmd, capture_output=True, text=True, check=False
-                ),  # noqa: S603
+                ),
             )
 
             critical_files = {}
@@ -183,9 +183,9 @@ class MigrationVerifier:
         file_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=file_count_cmd: subprocess.run(
+            lambda cmd=file_count_cmd: subprocess.run(  # noqa: S603
                 cmd, capture_output=True, text=True, check=False
-            ),  # noqa: S603
+            ),
         )
         target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["files_found"] = target_files
@@ -194,9 +194,9 @@ class MigrationVerifier:
         dir_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type d 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=dir_count_cmd: subprocess.run(
+            lambda cmd=dir_count_cmd: subprocess.run(  # noqa: S603
                 cmd, capture_output=True, text=True, check=False
-            ),  # noqa: S603
+            ),
         )
         target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["dirs_found"] = target_dirs
@@ -216,9 +216,9 @@ class MigrationVerifier:
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=file_list_cmd: subprocess.run(
+            lambda cmd=file_list_cmd: subprocess.run(  # noqa: S603
                 cmd, capture_output=True, text=True, check=False
-            ),  # noqa: S603
+            ),
         )
         target_file_list = (
             result.stdout.strip().split("\n")
@@ -262,9 +262,9 @@ class MigrationVerifier:
 
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=checksum_cmd: subprocess.run(
+                lambda cmd=checksum_cmd: subprocess.run(  # noqa: S603
                     cmd, capture_output=True, text=True, check=False
-                ),  # noqa: S603
+                ),
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -337,9 +337,9 @@ class MigrationVerifier:
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=inspect_cmd: subprocess.run(
+            lambda cmd=inspect_cmd: subprocess.run(  # noqa: S603
                 cmd, capture_output=True, text=True, check=False
-            ),  # noqa: S603
+            ),
         )
 
         if result.returncode != 0 or "NOT_FOUND" in result.stdout:

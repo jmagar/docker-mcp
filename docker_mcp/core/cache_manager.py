@@ -452,21 +452,8 @@ class DockerCacheManager:
                 exc_info=True,
             )
 
-    async def _build_container_cache(self, host_id: str, container, stats: dict) -> ContainerCache:
-        """Build cache entry for a single container"""
-        # Parse container attributes (using logic from our previous Python script)
-        attrs = container.attrs
-        config = attrs["Config"]
-        host_config = attrs["HostConfig"]
-        network_settings = attrs["NetworkSettings"]
-        state = attrs["State"]
-
-        # Calculate uptime
-        uptime = None
-        if state["Status"] == "running" and state["StartedAt"] != "0001-01-01T00:00:00Z":
-            uptime = self._calculate_uptime(state["StartedAt"])
-
-        # Network info
+    def _parse_container_networks(self, network_settings: dict) -> list[dict]:
+        """Parse container network information."""
         networks = []
         for name, network_config in network_settings.get("Networks", {}).items():
             networks.append(
@@ -477,8 +464,10 @@ class DockerCacheManager:
                     "mac": network_config.get("MacAddress", ""),
                 }
             )
+        return networks
 
-        # Port mappings
+    def _parse_container_ports(self, network_settings: dict) -> list[str]:
+        """Parse container port mappings."""
         ports = []
         for container_port, host_bindings in network_settings.get("Ports", {}).items():
             if host_bindings:
@@ -486,18 +475,10 @@ class DockerCacheManager:
                     ports.append(f"{container_port}->{binding['HostIp']}:{binding['HostPort']}")
             else:
                 ports.append(container_port)
+        return ports
 
-        # Compose info
-        labels = container.labels
-        compose_project = labels.get(DOCKER_COMPOSE_PROJECT)
-        compose_service = labels.get(DOCKER_COMPOSE_SERVICE)
-
-        # Get stack containers (if compose project exists)
-        stack_containers = []
-        if compose_project:
-            stack_containers = await self._get_compose_stack_containers(container, compose_project)
-
-        # Enhanced mount info
+    def _parse_container_mounts(self, attrs: dict) -> tuple[list[str], list[dict], dict[str, str]]:
+        """Parse container mount information."""
         bind_mounts = []
         volumes = []
         volume_drivers = {}
@@ -518,23 +499,48 @@ class DockerCacheManager:
                 if mount.get("Driver"):
                     volume_drivers[mount.get("Name", "")] = mount.get("Driver")
 
-        # Enhanced compose info
-        compose_config_files = labels.get(DOCKER_COMPOSE_CONFIG_FILES)
-        compose_working_dir = labels.get(DOCKER_COMPOSE_WORKING_DIR)
+        return bind_mounts, volumes, volume_drivers
 
-        # Network aliases
+    def _parse_network_aliases(self, network_settings: dict) -> dict[str, list[str]]:
+        """Parse network aliases for container."""
         network_aliases = {}
         for name, network_config in network_settings.get("Networks", {}).items():
             aliases = network_config.get("Aliases", [])
             if aliases:
                 network_aliases[name] = aliases
+        return network_aliases
+
+    async def _build_container_cache(self, host_id: str, container, stats: dict) -> ContainerCache:
+        """Build cache entry for a single container"""
+        # Parse container attributes
+        attrs = container.attrs
+        config = attrs["Config"]
+        host_config = attrs["HostConfig"]
+        network_settings = attrs["NetworkSettings"]
+        state = attrs["State"]
+        labels = container.labels
+
+        # Calculate uptime
+        uptime = None
+        if state["Status"] == "running" and state["StartedAt"] != "0001-01-01T00:00:00Z":
+            uptime = self._calculate_uptime(state["StartedAt"])
+
+        # Parse structured data using helper methods
+        networks = self._parse_container_networks(network_settings)
+        ports = self._parse_container_ports(network_settings)
+        bind_mounts, volumes, volume_drivers = self._parse_container_mounts(attrs)
+        network_aliases = self._parse_network_aliases(network_settings)
+
+        # Compose info
+        compose_project = labels.get(DOCKER_COMPOSE_PROJECT)
+        compose_service = labels.get(DOCKER_COMPOSE_SERVICE)
+        stack_containers = []
+        if compose_project:
+            stack_containers = await self._get_compose_stack_containers(container, compose_project)
 
         # Command and entrypoint
         command = " ".join(config.get("Cmd", [])) if config.get("Cmd") else ""
         entrypoint = " ".join(config.get("Entrypoint", [])) if config.get("Entrypoint") else ""
-
-        # Restart policy
-        restart_policy = host_config.get("RestartPolicy", {}).get("Name", "no")
 
         return ContainerCache(
             host_id=host_id,
@@ -558,8 +564,8 @@ class DockerCacheManager:
             compose_project=compose_project,
             compose_service=compose_service,
             compose_stack_containers=stack_containers,
-            compose_config_files=compose_config_files,
-            compose_working_dir=compose_working_dir,
+            compose_config_files=labels.get(DOCKER_COMPOSE_CONFIG_FILES),
+            compose_working_dir=labels.get(DOCKER_COMPOSE_WORKING_DIR),
             # Enhanced Storage info
             bind_mounts=bind_mounts,
             volumes=volumes,
@@ -576,7 +582,7 @@ class DockerCacheManager:
             health_status=state.get("Health", {}).get("Status"),
             restart_count=attrs.get("RestartCount", 0),
             exit_code=state.get("ExitCode", 0),
-            restart_policy=restart_policy,
+            restart_policy=host_config.get("RestartPolicy", {}).get("Name", "no"),
             # Metadata
             cached_at=time.time(),
             last_updated=time.time(),
@@ -975,7 +981,7 @@ class DockerCacheManager:
             for cache_file in self.cache_dir.glob("*_cache.pkl.gz"):
                 try:
                     with gzip.open(cache_file, "rb") as f:
-                        cache_bundle = pickle.load(f)
+                        cache_bundle = pickle.load(f)  # noqa: S301 # Loading trusted cache file created by this application
 
                     # Check if cache is recent enough (within 1 hour)
                     cache_age = time.time() - cache_bundle["timestamp"]
@@ -1021,7 +1027,7 @@ async def get_cache_manager(
     config: DockerMCPConfig, context_manager: DockerContextManager
 ) -> DockerCacheManager:
     """Get the global cache manager instance"""
-    global _cache_manager
+    global _cache_manager  # noqa: PLW0603 # Singleton pattern for shared cache manager
     if _cache_manager is None:
         _cache_manager = DockerCacheManager(config, context_manager)
         # Start in background task

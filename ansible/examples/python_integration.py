@@ -30,7 +30,7 @@ class AnsiblePlaybookRunner:
         extra_vars: dict[str, Any] = None,
         limit: str = None,
         check_mode: bool = False,
-        verbose: int = 0
+        verbose: int = 0,
     ) -> dict[str, Any]:
         """Run an Ansible playbook and return structured results."""
 
@@ -40,41 +40,37 @@ class AnsiblePlaybookRunner:
 
         # Prepare ansible-runner configuration
         runner_config = {
-            'playbook': str(playbook_path),
-            'inventory': str(self.inventory_script),
-            'verbosity': verbose,
-            'quiet': verbose == 0,
+            "playbook": str(playbook_path),
+            "inventory": str(self.inventory_script),
+            "verbosity": verbose,
+            "quiet": verbose == 0,
         }
 
         if extra_vars:
-            runner_config['extravars'] = extra_vars
+            runner_config["extravars"] = extra_vars
 
         if limit:
-            runner_config['limit'] = limit
+            runner_config["limit"] = limit
 
         if check_mode:
-            runner_config['check'] = True
+            runner_config["check"] = True
 
         # Create temporary directory for ansible-runner
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
                 # Run playbook
                 result = await asyncio.to_thread(
-                    ansible_runner.run,
-                    private_data_dir=temp_dir,
-                    **runner_config
+                    ansible_runner.run, private_data_dir=temp_dir, **runner_config
                 )
 
                 # Process results
                 return self._process_ansible_result(result)
 
             except Exception as e:
-                logger.error("Ansible playbook execution failed", playbook=playbook_name, error=str(e))
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "playbook": playbook_name
-                }
+                logger.error(
+                    "Ansible playbook execution failed", playbook=playbook_name, error=str(e)
+                )
+                return {"success": False, "error": str(e), "playbook": playbook_name}
 
     def _process_ansible_result(self, result) -> dict[str, Any]:
         """Process ansible-runner result into standardized format."""
@@ -94,12 +90,12 @@ class AnsiblePlaybookRunner:
 
         # Extract host results
         host_results = {}
-        if hasattr(result, 'events'):
+        if hasattr(result, "events"):
             for event in result.events:
-                if event.get('event') == 'runner_on_ok':
-                    host = event.get('event_data', {}).get('host')
-                    task = event.get('event_data', {}).get('task')
-                    res = event.get('event_data', {}).get('res', {})
+                if event.get("event") == "runner_on_ok":
+                    host = event.get("event_data", {}).get("host")
+                    task = event.get("event_data", {}).get("task")
+                    res = event.get("event_data", {}).get("res", {})
 
                     if host not in host_results:
                         host_results[host] = {}
@@ -121,16 +117,11 @@ class AnsibleIntegratedCleanupService:
 
         try:
             # Map to Ansible playbook
-            extra_vars = {
-                "cleanup_level": cleanup_type,
-                "target_hosts": host_id
-            }
+            extra_vars = {"cleanup_level": cleanup_type, "target_hosts": host_id}
 
             # Run Ansible playbook
             result = await self.ansible_runner.run_playbook(
-                playbook_name="docker-cleanup",
-                extra_vars=extra_vars,
-                limit=host_id
+                playbook_name="docker-cleanup", extra_vars=extra_vars, limit=host_id
             )
 
             if result["success"]:
@@ -140,14 +131,16 @@ class AnsibleIntegratedCleanupService:
                 return {
                     "success": False,
                     "error": result.get("error", "Ansible playbook failed"),
-                    "host_id": host_id
+                    "host_id": host_id,
                 }
 
         except Exception as e:
             self.logger.error("Ansible cleanup failed", host_id=host_id, error=str(e))
             return {"success": False, "error": str(e), "host_id": host_id}
 
-    def _transform_cleanup_result(self, ansible_result: dict[str, Any], host_id: str, cleanup_type: str) -> dict[str, Any]:
+    def _transform_cleanup_result(
+        self, ansible_result: dict[str, Any], host_id: str, cleanup_type: str
+    ) -> dict[str, Any]:
         """Transform Ansible playbook result to Docker MCP format."""
 
         host_results = ansible_result.get("host_results", {}).get(host_id, {})
@@ -156,11 +149,13 @@ class AnsibleIntegratedCleanupService:
         cleanup_results = []
         for task_name, task_result in host_results.items():
             if "cleanup" in task_name.lower() and task_result.get("changed"):
-                cleanup_results.append({
-                    "resource_type": self._extract_resource_type(task_name),
-                    "success": True,
-                    "space_reclaimed": self._extract_space_reclaimed(task_result)
-                })
+                cleanup_results.append(
+                    {
+                        "resource_type": self._extract_resource_type(task_name),
+                        "success": True,
+                        "space_reclaimed": self._extract_space_reclaimed(task_result),
+                    }
+                )
 
         return {
             "success": True,
@@ -168,7 +163,7 @@ class AnsibleIntegratedCleanupService:
             "cleanup_type": cleanup_type,
             "results": cleanup_results,
             "message": f"Ansible-powered {cleanup_type} cleanup completed",
-            "ansible_stats": ansible_result.get("stats", {})
+            "ansible_stats": ansible_result.get("stats", {}),
         }
 
     def _extract_resource_type(self, task_name: str) -> str:
@@ -194,6 +189,7 @@ class AnsibleIntegratedCleanupService:
         if "Total reclaimed space:" in stdout:
             # Parse Docker's output format
             import re
+
             match = re.search(r"Total reclaimed space:\s+(\S+)", stdout)
             return match.group(1) if match else "Unknown"
         return "Unknown"
@@ -212,7 +208,7 @@ class AnsibleIntegratedMigrationService:
         target_host_id: str,
         stack_name: str,
         dry_run: bool = False,
-        skip_stop_source: bool = False
+        skip_stop_source: bool = False,
     ) -> dict[str, Any]:
         """Migrate stack using Ansible playbook."""
 
@@ -222,31 +218,37 @@ class AnsibleIntegratedMigrationService:
                 "target_host": target_host_id,
                 "stack": stack_name,
                 "dry_run_mode": dry_run,
-                "skip_stop": skip_stop_source
+                "skip_stop": skip_stop_source,
             }
 
             result = await self.ansible_runner.run_playbook(
-                playbook_name="migrate-stack",
-                extra_vars=extra_vars,
-                check_mode=dry_run
+                playbook_name="migrate-stack", extra_vars=extra_vars, check_mode=dry_run
             )
 
             if result["success"]:
-                return self._transform_migration_result(result, source_host_id, target_host_id, stack_name)
+                return self._transform_migration_result(
+                    result, source_host_id, target_host_id, stack_name
+                )
             else:
                 return {
                     "success": False,
                     "error": result.get("error", "Migration playbook failed"),
                     "source_host_id": source_host_id,
                     "target_host_id": target_host_id,
-                    "stack_name": stack_name
+                    "stack_name": stack_name,
                 }
 
         except Exception as e:
             self.logger.error("Ansible migration failed", stack=stack_name, error=str(e))
             return {"success": False, "error": str(e)}
 
-    def _transform_migration_result(self, ansible_result: dict[str, Any], source_host_id: str, target_host_id: str, stack_name: str) -> dict[str, Any]:
+    def _transform_migration_result(
+        self,
+        ansible_result: dict[str, Any],
+        source_host_id: str,
+        target_host_id: str,
+        stack_name: str,
+    ) -> dict[str, Any]:
         """Transform Ansible migration result to Docker MCP format."""
 
         return {
@@ -257,7 +259,7 @@ class AnsibleIntegratedMigrationService:
             "message": "Ansible-powered migration completed successfully",
             "transfer_method": self._determine_transfer_method(ansible_result),
             "ansible_stats": ansible_result.get("stats", {}),
-            "execution_time": self._calculate_execution_time(ansible_result)
+            "execution_time": self._calculate_execution_time(ansible_result),
         }
 
     def _determine_transfer_method(self, ansible_result: dict[str, Any]) -> str:

@@ -483,32 +483,32 @@ class CleanupService:
         volumes = []
 
         for line in lines:
-            line = line.strip()
-            if not line:
+            stripped_line = line.strip()
+            if not stripped_line:
                 continue
 
             # Detect sections
-            if line.startswith("REPOSITORY"):
+            if stripped_line.startswith("REPOSITORY"):
                 current_section = "images"
                 continue
-            elif line.startswith("CONTAINER ID"):
+            elif stripped_line.startswith("CONTAINER ID"):
                 current_section = "containers"
                 continue
-            elif line.startswith("VOLUME NAME"):
+            elif stripped_line.startswith("VOLUME NAME"):
                 current_section = "volumes"
                 continue
-            elif line.startswith("CACHE ID"):
+            elif stripped_line.startswith("CACHE ID"):
                 current_section = "cache"
                 continue
 
             # Skip header lines
-            if current_section is None or line.startswith(
+            if current_section is None or stripped_line.startswith(
                 ("REPOSITORY", "CONTAINER", "VOLUME", "CACHE")
             ):
                 continue
 
             # Parse data lines
-            parts = line.split()
+            parts = stripped_line.split()
             if len(parts) < 3:
                 continue
 

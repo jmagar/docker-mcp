@@ -326,10 +326,10 @@ class ZFSTransfer(BaseTransfer):
             # Attempt cleanup if something went wrong
             try:
                 await self.cleanup_snapshot(source_host, f"{source_dataset}@{snapshot_name}")
-            except:
-                pass  # Ignore cleanup failures
+            except Exception as cleanup_err:
+                self.logger.warning("Cleanup snapshot failed during error handling", error=str(cleanup_err))
 
-            raise ZFSError(f"ZFS transfer failed: {str(e)}")
+            raise ZFSError(f"ZFS transfer failed: {str(e)}") from e
 
     async def _send_receive(
         self,
@@ -379,7 +379,7 @@ class ZFSTransfer(BaseTransfer):
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: subprocess.run(  # noqa: S603
-                ["bash", "-c", full_cmd], check=False, capture_output=True, text=True
+                ["/bin/bash", "-c", full_cmd], check=False, capture_output=True, text=True
             ),
         )
 
@@ -448,9 +448,9 @@ class ZFSTransfer(BaseTransfer):
             ]
             target_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(
+                lambda: subprocess.run(  # noqa: S603
                     target_props_cmd, capture_output=True, text=True, check=False
-                ),  # noqa: S603
+                ),
             )
 
             if "FAILED" not in target_result.stdout and target_result.returncode == 0:

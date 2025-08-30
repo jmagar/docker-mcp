@@ -22,7 +22,7 @@ try:
     from .core.config_loader import DockerMCPConfig, load_config
     from .core.docker_context import DockerContextManager
     from .core.file_watcher import HotReloadManager
-    from .core.logging_config import get_server_logger, setup_logging
+    from .core.logging_config import get_server_logger
     from .middleware import (
         ErrorHandlingMiddleware,
         LoggingMiddleware,
@@ -516,249 +516,26 @@ class DockerMCPServer:
                 "action": str(action) if action else "unknown",
             }
 
-        try:
-            # Route to appropriate handler with validation
-            if action == HostAction.LIST:
-                return await self.host_service.list_docker_hosts()
-
-            elif action == HostAction.ADD:
-                # Validate required parameters for add action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for add action"}
-                if not ssh_host:
-                    return {"success": False, "error": "ssh_host is required for add action"}
-                if not ssh_user:
-                    return {"success": False, "error": "ssh_user is required for add action"}
-
-                # Validate port range
-                if not (1 <= ssh_port <= 65535):
-                    return {
-                        "success": False,
-                        "error": f"ssh_port must be between 1 and 65535, got {ssh_port}",
-                    }
-
-                # Add host with auto-discovery
-                result = await self.host_service.add_docker_host(
-                    host_id,
-                    ssh_host,
-                    ssh_user,
-                    ssh_port,
-                    ssh_key_path,
-                    description,
-                    tags,
-                    compose_path,
-                    enabled,
-                )
-
-                # Auto-run discovery if host was added successfully (always enabled)
-                if result.get("success"):
-                    discovery_result = await self.host_service.discover_host_capabilities(host_id)
-                    if discovery_result.get("success") and discovery_result.get("recommendations"):
-                        result["discovery"] = discovery_result
-                        result["message"] += " (Discovery completed - check recommendations)"
-
-                return result
-
-            elif action == HostAction.EDIT:
-                # Validate required parameters for edit action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for edit action"}
-
-                return await self.host_service.edit_docker_host(
-                    host_id,
-                    ssh_host,
-                    ssh_user,
-                    ssh_port,
-                    ssh_key_path,
-                    description,
-                    tags,
-                    compose_path,
-                    appdata_path,
-                    enabled,
-                )
-
-            elif action == HostAction.REMOVE:
-                # Validate required parameters for remove action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for remove action"}
-
-                return await self.host_service.remove_docker_host(host_id)
-
-            elif action == HostAction.TEST_CONNECTION:
-                # Validate required parameters for test_connection action
-                if not host_id:
-                    return {
-                        "success": False,
-                        "error": "host_id is required for test_connection action",
-                    }
-
-                return await self.host_service.test_connection(host_id)
-
-            elif action == HostAction.DISCOVER:
-                # If no host_id provided, discover all hosts
-                if not host_id:
-                    result = await self.host_service.discover_all_hosts()
-                    return self._format_discover_all_result(result)
-
-                # Otherwise discover specific host
-                result = await self.host_service.discover_host_capabilities(host_id)
-                return self._format_discover_result(result, host_id)
-
-            elif action == HostAction.PORTS:
-                # Validate required parameters for ports action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for ports action"}
-
-                # Handle sub-actions: "list" (default) or "check"
-                # For ports check, port parameter must be provided
-                if port > 0:
-                    # Check specific port availability
-                    return await self.container_service.check_port_availability(host_id, port)
-                else:
-                    # List all ports (simplified - always include stopped containers)
-                    result = await self.container_service.list_host_ports(host_id)
-                    # Convert ToolResult to dict for consistency
-                    if hasattr(result, "structured_content"):
-                        return result.structured_content or {
-                            "success": True,
-                            "data": "No structured content",
-                        }
-                    return result
-
-            elif action == HostAction.IMPORT_SSH:
-                result = await self.config_service.import_ssh_config(
-                    ssh_config_path, selected_hosts
-                )
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    import_result = result.structured_content or {
-                        "success": True,
-                        "data": str(result.content),
-                    }
-                else:
-                    import_result = result
-
-                # Auto-run discovery on imported hosts if import was successful
-                if import_result.get("success") and import_result.get("imported_hosts"):
-                    discovered_hosts = []
-                    for host_info in import_result["imported_hosts"]:
-                        host_id = host_info["host_id"]
-
-                        # Run test_connection and discover for each imported host
-                        try:
-                            test_result = await self.host_service.test_connection(host_id)
-                            discovery_result = await self.host_service.discover_host_capabilities(
-                                host_id
-                            )
-
-                            discovered_hosts.append(
-                                {
-                                    "host_id": host_id,
-                                    "connection_test": test_result.get("success", False),
-                                    "discovery": discovery_result.get("success", False),
-                                    "recommendations": discovery_result.get("recommendations", []),
-                                }
-                            )
-                        except Exception as e:
-                            self.logger.error(
-                                "Auto-discovery failed for imported host",
-                                host_id=host_id,
-                                error=str(e),
-                            )
-                            discovered_hosts.append(
-                                {
-                                    "host_id": host_id,
-                                    "connection_test": False,
-                                    "discovery": False,
-                                    "error": str(e),
-                                }
-                            )
-
-                    # Add discovery results to import result
-                    import_result["auto_discovery"] = {
-                        "completed": True,
-                        "results": discovered_hosts,
-                    }
-                    import_result["message"] = (
-                        import_result.get("message", "")
-                        + " (Auto-discovery completed for imported hosts)"
-                    )
-
-                return import_result
-
-            elif action == HostAction.CLEANUP:
-                # Handle cleanup sub-actions:
-                # - "cleanup check <host_id>" -> Check disk usage
-                # - "cleanup <cleanup_type> <host_id>" -> Execute cleanup
-                # - "cleanup schedule" with frequency/time -> Add schedule
-                # - "cleanup schedule" without frequency/time -> List or remove schedules
-
-                # Handle schedule operations when frequency is provided (add schedule)
-                if frequency and time:
-                    if not host_id or not cleanup_type:
-                        return {
-                            "success": False,
-                            "error": "host_id and cleanup_type required for scheduling",
-                        }
-                    if cleanup_type not in ["safe", "moderate"]:
-                        return {
-                            "success": False,
-                            "error": "Only 'safe' and 'moderate' cleanup types can be scheduled",
-                        }
-                    return await self.cleanup_service.add_schedule(
-                        host_id, cleanup_type, frequency, time
-                    )
-
-                # Handle schedule list when no host_id but no frequency (list all schedules)
-                elif not host_id and not frequency and not cleanup_type:
-                    return await self.cleanup_service.list_schedules()
-
-                # Handle schedule remove when host_id but no frequency/cleanup_type
-                elif host_id and not frequency and not cleanup_type:
-                    return await self.cleanup_service.remove_schedule(host_id)
-
-                # Handle cleanup operations
-                else:
-                    if not host_id:
-                        return {"success": False, "error": "host_id is required for cleanup action"}
-                    if not cleanup_type:
-                        return {
-                            "success": False,
-                            "error": "cleanup_type is required for cleanup action",
-                        }
-                    if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
-                        return {
-                            "success": False,
-                            "error": "cleanup_type must be one of: check, safe, moderate, aggressive",
-                        }
-
-                    if cleanup_type == "check":
-                        # Show disk usage for cleanup planning
-                        return await self.cleanup_service.docker_disk_usage(host_id)
-                    else:
-                        # Perform actual cleanup
-                        return await self.cleanup_service.docker_cleanup(host_id, cleanup_type)
-
-            else:
-                return {
-                    "success": False,
-                    "error": f"Unknown action: {action}",
-                    "valid_actions": [
-                        "list",
-                        "add",
-                        "edit",
-                        "remove",
-                        "test_connection",
-                        "discover",
-                        "ports",
-                        "import_ssh",
-                        "cleanup",
-                    ],
-                }
-
-        except Exception as e:
-            self.logger.error("docker_hosts tool error", action=action, error=str(e))
-            return {"success": False, "error": f"Tool execution failed: {str(e)}", "action": action}
+        # Delegate to service layer for business logic
+        return await self.host_service.handle_action(
+            action,
+            host_id=host_id,
+            ssh_host=ssh_host,
+            ssh_user=ssh_user,
+            ssh_port=ssh_port,
+            ssh_key_path=ssh_key_path,
+            description=description,
+            tags=tags,
+            compose_path=compose_path,
+            appdata_path=appdata_path,
+            enabled=enabled,
+            port=port,
+            cleanup_type=cleanup_type,
+            frequency=frequency,
+            time=time,
+            ssh_config_path=ssh_config_path,
+            selected_hosts=selected_hosts,
+        )
 
     async def docker_container(
         self,
@@ -834,123 +611,19 @@ class DockerMCPServer:
                 "action": str(action) if action else "unknown",
             }
 
-        try:
-            # Route to appropriate handler with validation
-            if action == ContainerAction.LIST:
-                # Validate required parameters for list action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for list action"}
-
-                # Validate pagination parameters
-                if limit < 1 or limit > 1000:
-                    return {"success": False, "error": "limit must be between 1 and 1000"}
-                if offset < 0:
-                    return {"success": False, "error": "offset must be >= 0"}
-
-                result = await self.list_containers(host_id, all_containers, limit, offset)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
-                return result
-
-            elif action == ContainerAction.INFO:
-                # Validate required parameters for info action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for info action"}
-                if not container_id:
-                    return {"success": False, "error": "container_id is required for info action"}
-
-                result = await self.get_container_info(host_id, container_id)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
-                return result
-
-            elif action in [
-                ContainerAction.START,
-                ContainerAction.STOP,
-                ContainerAction.RESTART,
-                ContainerAction.BUILD,
-                ContainerAction.REMOVE,
-            ]:
-                # Validate required parameters for container management actions
-                if not host_id:
-                    return {"success": False, "error": f"host_id is required for {action} action"}
-                if not container_id:
-                    return {
-                        "success": False,
-                        "error": f"container_id is required for {action} action",
-                    }
-
-                # Validate timeout parameter
-                if timeout < 1 or timeout > 300:
-                    return {"success": False, "error": "timeout must be between 1 and 300 seconds"}
-
-                result = await self.manage_container(
-                    host_id, container_id, action.value, force, timeout
-                )
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
-                return result
-
-            elif action == ContainerAction.LOGS:
-                # Validate required parameters for logs action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for logs action"}
-                if not container_id:
-                    return {"success": False, "error": "container_id is required for logs action"}
-
-                # Validate lines parameter
-                if lines < 1 or lines > 1000:
-                    return {"success": False, "error": "lines must be between 1 and 10000"}
-
-                return await self.get_container_logs(host_id, container_id, lines, follow)
-
-            elif action == "pull":
-                # Validate required parameters for pull action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for pull action"}
-                if not container_id:
-                    return {
-                        "success": False,
-                        "error": "container_id is required for pull action (image name)",
-                    }
-
-                # For pull, container_id is actually the image name
-                result = await self.pull_image(host_id, container_id)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
-                return result
-
-        except Exception as e:
-            self.logger.error(
-                "docker_container tool error",
-                action=action,
-                host_id=host_id,
-                container_id=container_id,
-                error=str(e),
-            )
-            return {
-                "success": False,
-                "error": f"Tool execution failed: {str(e)}",
-                "action": action,
-                "host_id": host_id,
-                "container_id": container_id,
-            }
+        # Delegate to service layer for business logic
+        return await self.container_service.handle_action(
+            action,
+            host_id=host_id,
+            container_id=container_id,
+            all_containers=all_containers,
+            limit=limit,
+            offset=offset,
+            follow=follow,
+            lines=lines,
+            force=force,
+            timeout=timeout,
+        )
 
     async def docker_compose(
         self,
@@ -1044,232 +717,24 @@ class DockerMCPServer:
                 "action": str(action) if action else "unknown",
             }
 
-        try:
-            # Route to appropriate handler with validation
-            if action == ComposeAction.LIST:
-                # Validate required parameters for list action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for list action"}
-
-                result = await self.list_stacks(host_id)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
-                return result
-
-            elif action == ComposeAction.VIEW:
-                # Validate required parameters for view action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for view action"}
-                if not stack_name:
-                    return {"success": False, "error": "stack_name is required for view action"}
-
-                result = await self.stack_service.get_stack_compose_file(host_id, stack_name)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
-                return result
-
-            elif action == ComposeAction.DEPLOY:
-                # Validate required parameters for deploy action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for deploy action"}
-                if not stack_name:
-                    return {"success": False, "error": "stack_name is required for deploy action"}
-                if not compose_content:
-                    return {
-                        "success": False,
-                        "error": "compose_content is required for deploy action",
-                    }
-
-                # Validate stack name format (DNS compliance - no underscores allowed)
-                if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", stack_name):
-                    return {
-                        "success": False,
-                        "error": "stack_name must be DNS-compliant: lowercase letters, numbers, and hyphens only (no underscores)",
-                    }
-
-                result = await self.deploy_stack(
-                    host_id, stack_name, compose_content, environment, pull_images, recreate
-                )
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
-                return result
-
-            elif action in ["up", "down", "restart", "build", "pull"]:
-                # Validate required parameters for stack management actions
-                if not host_id:
-                    return {"success": False, "error": f"host_id is required for {action} action"}
-                if not stack_name:
-                    return {
-                        "success": False,
-                        "error": f"stack_name is required for {action} action",
-                    }
-
-                result = await self.manage_stack(host_id, stack_name, action.value, options)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
-                return result
-
-            elif action == ComposeAction.LOGS:
-                # NEW CAPABILITY: Stack logs
-                # Validate required parameters for logs action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for logs action"}
-                if not stack_name:
-                    return {"success": False, "error": "stack_name is required for logs action"}
-
-                # Validate lines parameter
-                if lines < 1 or lines > 1000:
-                    return {"success": False, "error": "lines must be between 1 and 10000"}
-
-                # Implement stack logs using docker-compose logs command
-                try:
-                    if host_id not in self.config.hosts:
-                        return {"success": False, "error": f"Host {host_id} not found"}
-
-                    # Use stack service to execute docker-compose logs command
-                    logs_options = {"tail": str(lines), "follow": follow}
-
-                    result = await self.stack_service.manage_stack(
-                        host_id, stack_name, "logs", logs_options
-                    )
-
-                    # Format the result for logs
-                    if hasattr(result, "structured_content") and result.structured_content:
-                        logs_data = result.structured_content
-                        # Extract logs from the result
-                        if "output" in logs_data:
-                            logs_lines = (
-                                logs_data["output"].split("\n") if logs_data["output"] else []
-                            )
-                            return {
-                                "success": True,
-                                "host_id": host_id,
-                                "stack_name": stack_name,
-                                "logs": logs_lines,
-                                "lines_requested": lines,
-                                "lines_returned": len(logs_lines),
-                                "follow": follow,
-                            }
-                        else:
-                            return logs_data
-                    else:
-                        return {"success": False, "error": "Failed to retrieve stack logs"}
-
-                except Exception as e:
-                    self.logger.error(
-                        "docker_compose logs error",
-                        host_id=host_id,
-                        stack_name=stack_name,
-                        error=str(e),
-                    )
-                    return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
-
-            elif action == ComposeAction.MIGRATE:
-                # Validate required parameters for migrate action
-                if not host_id:
-                    return {
-                        "success": False,
-                        "error": "host_id (source) is required for migrate action",
-                    }
-                if not target_host_id:
-                    return {
-                        "success": False,
-                        "error": "target_host_id is required for migrate action",
-                    }
-                if not stack_name:
-                    return {"success": False, "error": "stack_name is required for migrate action"}
-
-                # Call the migration service
-                result = await self.stack_service.migrate_stack(
-                    source_host_id=host_id,
-                    target_host_id=target_host_id,
-                    stack_name=stack_name,
-                    skip_stop_source=skip_stop_source,
-                    start_target=start_target,
-                    remove_source=remove_source,
-                    dry_run=dry_run,
-                )
-
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "Migration completed",
-                    }
-                return result
-
-            elif action in [
-                ComposeAction.UP,
-                ComposeAction.DOWN,
-                ComposeAction.RESTART,
-                ComposeAction.BUILD,
-            ]:
-                # Validate required parameters for stack lifecycle actions
-                if not host_id:
-                    return {
-                        "success": False,
-                        "error": "host_id is required for stack lifecycle actions",
-                    }
-                if not stack_name:
-                    return {
-                        "success": False,
-                        "error": "stack_name is required for stack lifecycle actions",
-                    }
-
-                # Use the stack service to manage stack lifecycle
-                result = await self.stack_service.manage_stack(
-                    host_id=host_id,
-                    stack_name=stack_name,
-                    action=action.value,  # Convert enum to string value
-                    options=options,
-                )
-
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": f"Stack {action.value} completed",
-                    }
-                return result
-
-            else:
-                return {
-                    "success": False,
-                    "error": f"Unsupported action: {action.value}",
-                    "supported_actions": [a.value for a in ComposeAction],
-                }
-
-        except Exception as e:
-            self.logger.error(
-                "docker_compose tool error",
-                action=action,
-                host_id=host_id,
-                stack_name=stack_name,
-                error=str(e),
-            )
-            return {
-                "success": False,
-                "error": f"Tool execution failed: {str(e)}",
-                "action": action,
-                "host_id": host_id,
-                "stack_name": stack_name,
-            }
+        # Delegate to service layer for business logic
+        return await self.stack_service.handle_action(
+            action,
+            host_id=host_id,
+            stack_name=stack_name,
+            compose_content=compose_content,
+            environment=environment,
+            pull_images=pull_images,
+            recreate=recreate,
+            follow=follow,
+            lines=lines,
+            dry_run=dry_run,
+            options=options,
+            target_host_id=target_host_id,
+            remove_source=remove_source,
+            skip_stop_source=skip_stop_source,
+            start_target=start_target,
+        )
 
     async def add_docker_host(
         self,
@@ -1460,105 +925,6 @@ class DockerMCPServer:
         """Stop hot reload watcher."""
         await self.hot_reload_manager.stop_hot_reload()
 
-    def _format_discover_all_result(self, result: dict[str, Any]) -> dict[str, Any]:
-        """Format discover all hosts result for user-friendly display."""
-        if not result.get("success", False):
-            return result
-
-        # Generate summary text for user display
-        summary_lines = []
-        summary_lines.append(
-            f"🔍 Discovery Summary: {result.get('summary', 'No summary available')}"
-        )
-
-        if result.get("total_hosts", 0) > 0:
-            summary_lines.append(f"   Successful: {result.get('successful_discoveries', 0)}")
-            summary_lines.append(f"   Failed: {result.get('failed_discoveries', 0)}")
-            summary_lines.append("")
-
-        discoveries = result.get("discoveries", {})
-        for host_id, discovery in discoveries.items():
-            if discovery.get("success", False):
-                summary_lines.append(f"✅ {host_id}:")
-                recommendations = discovery.get("recommendations", [])
-                if recommendations:
-                    for rec in recommendations:
-                        if rec["type"] == "compose_path":
-                            summary_lines.append(f"   📂 Compose path: {rec['value']}")
-                        elif rec["type"] == "appdata_path":
-                            summary_lines.append(f"   💾 Appdata path: {rec['value']}")
-                        elif rec["type"] == "zfs_config":
-                            zfs_info = f"ZFS dataset: {rec.get('zfs_dataset', 'N/A')}"
-                            if rec.get("tag_added"):
-                                zfs_info += " (tag added)"
-                            summary_lines.append(f"   🗂️  {zfs_info}")
-                else:
-                    summary_lines.append("   No recommendations available")
-            else:
-                summary_lines.append(f"❌ {host_id}: {discovery.get('error', 'Discovery failed')}")
-            summary_lines.append("")
-
-        return {
-            "success": True,
-            "message": "\n".join(summary_lines),
-            **result,  # Include all original data
-        }
-
-    def _format_discover_result(self, result: dict[str, Any], host_id: str) -> dict[str, Any]:
-        """Format single host discovery result for user-friendly display."""
-        if not result.get("success", False):
-            return result
-
-        # Generate summary text for user display
-        summary_lines = []
-        summary_lines.append(f"🔍 Discovery Results for {host_id}:")
-        summary_lines.append("")
-
-        recommendations = result.get("recommendations", [])
-        if recommendations:
-            for rec in recommendations:
-                if rec["type"] == "compose_path":
-                    summary_lines.append(f"📂 Compose path: {rec['value']}")
-                    summary_lines.append(
-                        f"   Use: docker_hosts edit {host_id} --compose_path '{rec['value']}'"
-                    )
-                elif rec["type"] == "appdata_path":
-                    summary_lines.append(f"💾 Appdata path: {rec['value']}")
-                    summary_lines.append(
-                        f"   Use: docker_hosts edit {host_id} --appdata_path '{rec['value']}'"
-                    )
-                elif rec["type"] == "zfs_config":
-                    zfs_info = f"ZFS dataset: {rec.get('zfs_dataset', 'N/A')}"
-                    if rec.get("tag_added"):
-                        zfs_info += " (tag automatically added)"
-                    summary_lines.append(f"🗂️  {zfs_info}")
-                summary_lines.append("")
-        else:
-            summary_lines.append("No automatic recommendations available.")
-            summary_lines.append("")
-
-        # Add discovery details
-        compose_discovery = result.get("compose_discovery", {})
-        if compose_discovery.get("paths"):
-            summary_lines.append(f"Found compose paths: {', '.join(compose_discovery['paths'])}")
-
-        appdata_discovery = result.get("appdata_discovery", {})
-        if appdata_discovery.get("paths"):
-            summary_lines.append(f"Found appdata paths: {', '.join(appdata_discovery['paths'])}")
-
-        zfs_discovery = result.get("zfs_discovery", {})
-        if zfs_discovery.get("capable"):
-            summary_lines.append(
-                f"ZFS capable: Yes (pools: {', '.join(zfs_discovery.get('pools', []))})"
-            )
-        else:
-            summary_lines.append("ZFS capable: No")
-
-        return {
-            "success": True,
-            "message": "\n".join(summary_lines),
-            **result,  # Include all original data
-        }
 
     def run(self) -> None:
         """Run the FastMCP server."""
@@ -1666,7 +1032,7 @@ def main() -> None:
                 continue
 
     if not log_dir:
-        logger.warning("Unable to create log directory, using console-only logging")
+        print("Warning: Unable to create log directory, using console-only logging")
         log_dir = None
 
     # Parse log file size with validation

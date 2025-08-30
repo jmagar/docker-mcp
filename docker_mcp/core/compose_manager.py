@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -142,9 +143,9 @@ class ComposeManager:
         for container_port, host_bindings in ports_dict.items():
             if host_bindings:
                 for binding in host_bindings:
-                    host_ip = binding.get("HostIp", "0.0.0.0")
+                    host_ip = binding.get("HostIp", "0.0.0.0")  # noqa: S104 # Reading existing Docker port binding, not creating
                     host_port = binding.get("HostPort", "")
-                    if host_ip == "0.0.0.0":
+                    if host_ip == "0.0.0.0":  # noqa: S104 # Checking existing Docker binding value
                         formatted_ports.append(f"{host_port}:{container_port}")
                     else:
                         formatted_ports.append(f"{host_ip}:{host_port}:{container_port}")

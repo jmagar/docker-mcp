@@ -709,3 +709,179 @@ class ContainerService:
                 HOST_ID: host_id,
                 "port": port,
             }
+
+    async def handle_action(self, action, **params) -> dict[str, Any]:
+        """Unified action handler for all container operations.
+        
+        This method consolidates all dispatcher logic from server.py into the service layer.
+        """
+        try:
+            # Import dependencies for this handler
+            from ..models.enums import ContainerAction
+            
+            # Extract common parameters
+            host_id = params.get("host_id", "")
+            container_id = params.get("container_id", "")
+            all_containers = params.get("all_containers", False)
+            limit = params.get("limit", 20)
+            offset = params.get("offset", 0)
+            follow = params.get("follow", False)
+            lines = params.get("lines", 100)
+            force = params.get("force", False)
+            timeout = params.get("timeout", 10)
+
+            # Route to appropriate handler with validation
+            if action == ContainerAction.LIST:
+                # Validate required parameters for list action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for list action"}
+
+                # Validate pagination parameters
+                if limit < 1 or limit > 1000:
+                    return {"success": False, "error": "limit must be between 1 and 1000"}
+                if offset < 0:
+                    return {"success": False, "error": "offset must be >= 0"}
+
+                result = await self.list_containers(host_id, all_containers, limit, offset)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, "structured_content"):
+                    return result.structured_content or {
+                        "success": True,
+                        "data": "No structured content",
+                    }
+                return result
+
+            elif action == ContainerAction.INFO:
+                # Validate required parameters for info action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for info action"}
+                if not container_id:
+                    return {"success": False, "error": "container_id is required for info action"}
+
+                result = await self.get_container_info(host_id, container_id)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, "structured_content"):
+                    return result.structured_content or {
+                        "success": True,
+                        "data": "No structured content",
+                    }
+                return result
+
+            elif action in [
+                ContainerAction.START,
+                ContainerAction.STOP,
+                ContainerAction.RESTART,
+                ContainerAction.BUILD,
+                ContainerAction.REMOVE,
+            ]:
+                # Validate required parameters for container management actions
+                if not host_id:
+                    return {"success": False, "error": f"host_id is required for {action} action"}
+                if not container_id:
+                    return {
+                        "success": False,
+                        "error": f"container_id is required for {action} action",
+                    }
+
+                # Validate timeout parameter
+                if timeout < 1 or timeout > 300:
+                    return {"success": False, "error": "timeout must be between 1 and 300 seconds"}
+
+                result = await self.manage_container(
+                    host_id, container_id, action.value, force, timeout
+                )
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, "structured_content"):
+                    return result.structured_content or {
+                        "success": True,
+                        "data": "No structured content",
+                    }
+                return result
+
+            elif action == ContainerAction.LOGS:
+                # Validate required parameters for logs action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for logs action"}
+                if not container_id:
+                    return {"success": False, "error": "container_id is required for logs action"}
+
+                # Validate lines parameter
+                if lines < 1 or lines > 1000:
+                    return {"success": False, "error": "lines must be between 1 and 10000"}
+
+                # TODO: Move logs functionality to service layer
+                # For now, delegate to tools layer
+                try:
+                    from ..tools.logs import LogTools
+                    log_tools = LogTools(self.config, self.context_manager)
+                    logs_result = await log_tools.get_container_logs(
+                        host_id=host_id,
+                        container_id=container_id,
+                        lines=lines,
+                        since=None,
+                        timestamps=False,
+                    )
+
+                    # Extract logs array from ContainerLogs model for cleaner API
+                    if isinstance(logs_result, dict) and "logs" in logs_result:
+                        logs = logs_result["logs"]  # This is the list[str] of actual log lines
+                        truncated = logs_result.get("truncated", False)
+                    else:
+                        logs = []
+                        truncated = False
+
+                    return {
+                        "success": True,
+                        "host_id": host_id,
+                        "container_id": container_id,
+                        "logs": logs,  # Now this is list[str] of actual log lines
+                        "lines_requested": lines,
+                        "lines_returned": len(logs),
+                        "truncated": truncated,
+                        "follow": follow,
+                    }
+
+                except Exception as e:
+                    self.logger.error(
+                        "Failed to get container logs",
+                        host_id=host_id,
+                        container_id=container_id,
+                        error=str(e),
+                    )
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "host_id": host_id,
+                        "container_id": container_id,
+                    }
+
+            elif action == "pull":
+                # Validate required parameters for pull action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for pull action"}
+                if not container_id:
+                    return {
+                        "success": False,
+                        "error": "container_id is required for pull action (image name)",
+                    }
+
+                # For pull, container_id is actually the image name
+                result = await self.pull_image(host_id, container_id)
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, "structured_content"):
+                    return result.structured_content or {
+                        "success": True,
+                        "data": "No structured content",
+                    }
+                return result
+
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unknown action: {action}",
+                    "valid_actions": ["list", "info", "start", "stop", "restart", "build", "logs", "pull"],
+                }
+
+        except Exception as e:
+            self.logger.error("container service action error", action=action, error=str(e))
+            return {"success": False, "error": f"Service action failed: {str(e)}", "action": action}

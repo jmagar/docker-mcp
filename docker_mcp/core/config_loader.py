@@ -210,38 +210,27 @@ def _build_yaml_data(config: DockerMCPConfig) -> dict[str, Any]:
 
 def _build_host_data(host_config: DockerHost) -> dict[str, Any]:
     """Build host data dictionary with non-default values."""
+    # Start with required fields
     host_data = {"hostname": host_config.hostname, "user": host_config.user}
 
-    # Only include non-default values
-    if host_config.port != 22:
-        host_data["port"] = host_config.port
+    # Define conditional fields with their conditions
+    conditional_fields = [
+        ("port", host_config.port, host_config.port != 22),
+        ("identity_file", host_config.identity_file, bool(host_config.identity_file)),
+        ("description", host_config.description, bool(host_config.description)),
+        ("tags", host_config.tags, bool(host_config.tags)),
+        ("compose_path", host_config.compose_path, bool(host_config.compose_path)),
+        ("docker_context", host_config.docker_context, bool(host_config.docker_context)),
+        ("appdata_path", host_config.appdata_path, bool(host_config.appdata_path)),
+        ("zfs_capable", host_config.zfs_capable, host_config.zfs_capable),
+        ("zfs_dataset", host_config.zfs_dataset, bool(host_config.zfs_dataset)),
+        ("enabled", host_config.enabled, not host_config.enabled),
+    ]
 
-    if host_config.identity_file:
-        host_data["identity_file"] = host_config.identity_file
-
-    if host_config.description:
-        host_data["description"] = host_config.description
-
-    if host_config.tags:
-        host_data["tags"] = host_config.tags
-
-    if host_config.compose_path:
-        host_data["compose_path"] = host_config.compose_path
-
-    if host_config.docker_context:
-        host_data["docker_context"] = host_config.docker_context
-
-    if host_config.appdata_path:
-        host_data["appdata_path"] = host_config.appdata_path
-
-    if host_config.zfs_capable:
-        host_data["zfs_capable"] = host_config.zfs_capable
-
-    if host_config.zfs_dataset:
-        host_data["zfs_dataset"] = host_config.zfs_dataset
-
-    if not host_config.enabled:
-        host_data["enabled"] = host_config.enabled
+    # Add fields that meet their conditions
+    for field_name, field_value, condition in conditional_fields:
+        if condition:
+            host_data[field_name] = field_value
 
     return host_data
 

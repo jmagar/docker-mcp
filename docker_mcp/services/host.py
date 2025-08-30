@@ -896,6 +896,367 @@ class HostService:
         # Return first available path
         return paths[0] if paths else None
 
+    async def handle_action(self, action, **params) -> dict[str, Any]:
+        """Unified action handler for all host operations.
+        
+        This method consolidates all dispatcher logic from server.py into the service layer.
+        """
+        try:
+            # Import dependencies for this handler
+            from ..models.enums import HostAction
+            
+            # Route to appropriate handler with validation
+            if action == HostAction.LIST:
+                return await self.list_docker_hosts()
+
+            elif action == HostAction.ADD:
+                # Extract parameters
+                host_id = params.get("host_id", "")
+                ssh_host = params.get("ssh_host", "")
+                ssh_user = params.get("ssh_user", "")
+                ssh_port = params.get("ssh_port", 22)
+                ssh_key_path = params.get("ssh_key_path")
+                description = params.get("description", "")
+                tags = params.get("tags", [])
+                compose_path = params.get("compose_path")
+                enabled = params.get("enabled", True)
+                
+                # Validate required parameters for add action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for add action"}
+                if not ssh_host:
+                    return {"success": False, "error": "ssh_host is required for add action"}
+                if not ssh_user:
+                    return {"success": False, "error": "ssh_user is required for add action"}
+
+                # Validate port range
+                if not (1 <= ssh_port <= 65535):
+                    return {
+                        "success": False,
+                        "error": f"ssh_port must be between 1 and 65535, got {ssh_port}",
+                    }
+
+                # Add host with auto-discovery
+                result = await self.add_docker_host(
+                    host_id,
+                    ssh_host,
+                    ssh_user,
+                    ssh_port,
+                    ssh_key_path,
+                    description,
+                    tags,
+                    compose_path,
+                    enabled,
+                )
+
+                # Auto-run discovery if host was added successfully (always enabled)
+                if result.get("success"):
+                    discovery_result = await self.discover_host_capabilities(host_id)
+                    if discovery_result.get("success") and discovery_result.get("recommendations"):
+                        result["discovery"] = discovery_result
+                        result["message"] += " (Discovery completed - check recommendations)"
+
+                return result
+
+            elif action == HostAction.EDIT:
+                # Extract parameters
+                host_id = params.get("host_id", "")
+                ssh_host = params.get("ssh_host")
+                ssh_user = params.get("ssh_user")
+                ssh_port = params.get("ssh_port")
+                ssh_key_path = params.get("ssh_key_path")
+                description = params.get("description")
+                tags = params.get("tags")
+                compose_path = params.get("compose_path")
+                appdata_path = params.get("appdata_path")
+                enabled = params.get("enabled")
+                
+                # Validate required parameters for edit action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for edit action"}
+
+                return await self.edit_docker_host(
+                    host_id,
+                    ssh_host,
+                    ssh_user,
+                    ssh_port,
+                    ssh_key_path,
+                    description,
+                    tags,
+                    compose_path,
+                    appdata_path,
+                    enabled,
+                )
+
+            elif action == HostAction.REMOVE:
+                # Extract parameters
+                host_id = params.get("host_id", "")
+                
+                # Validate required parameters for remove action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for remove action"}
+
+                return await self.remove_docker_host(host_id)
+
+            elif action == HostAction.TEST_CONNECTION:
+                # Extract parameters
+                host_id = params.get("host_id", "")
+                
+                # Validate required parameters for test_connection action
+                if not host_id:
+                    return {
+                        "success": False,
+                        "error": "host_id is required for test_connection action",
+                    }
+
+                return await self.test_connection(host_id)
+
+            elif action == HostAction.DISCOVER:
+                # Extract parameters
+                host_id = params.get("host_id", "")
+                
+                # If no host_id provided, discover all hosts
+                if not host_id:
+                    result = await self.discover_all_hosts()
+                    return self._format_discover_all_result(result)
+
+                # Otherwise discover specific host
+                result = await self.discover_host_capabilities(host_id)
+                return self._format_discover_result(result, host_id)
+
+            elif action == HostAction.PORTS:
+                # Import container service dependency
+                from ..services import ContainerService
+                container_service = ContainerService(self.config, None)  # Context manager not needed for ports
+                
+                # Extract parameters
+                host_id = params.get("host_id", "")
+                port = params.get("port", 0)
+                
+                # Validate required parameters for ports action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for ports action"}
+
+                # Handle sub-actions: "list" (default) or "check"
+                # For ports check, port parameter must be provided
+                if port > 0:
+                    # Check specific port availability
+                    return await container_service.check_port_availability(host_id, port)
+                else:
+                    # List all ports (simplified - always include stopped containers)
+                    result = await container_service.list_host_ports(host_id)
+                    # Convert ToolResult to dict for consistency
+                    if hasattr(result, "structured_content"):
+                        return result.structured_content or {
+                            "success": True,
+                            "data": "No structured content",
+                        }
+                    return result
+
+            elif action == HostAction.IMPORT_SSH:
+                # Import config service dependency
+                from ..services import ConfigService
+                config_service = ConfigService(self.config, None)  # Context manager not needed for config
+                
+                # Extract parameters
+                ssh_config_path = params.get("ssh_config_path")
+                selected_hosts = params.get("selected_hosts")
+                
+                result = await config_service.import_ssh_config(
+                    ssh_config_path, selected_hosts
+                )
+                # Convert ToolResult to dict for consistency
+                if hasattr(result, "structured_content"):
+                    import_result = result.structured_content or {
+                        "success": True,
+                        "data": str(result.content),
+                    }
+                else:
+                    import_result = result
+
+                # Auto-run discovery on imported hosts if import was successful
+                if import_result.get("success") and import_result.get("imported_hosts"):
+                    discovered_hosts = []
+                    for host_info in import_result["imported_hosts"]:
+                        host_id = host_info["host_id"]
+
+                        # Run test_connection and discover for each imported host
+                        try:
+                            test_result = await self.test_connection(host_id)
+                            discovery_result = await self.discover_host_capabilities(
+                                host_id
+                            )
+
+                            discovered_hosts.append(
+                                {
+                                    "host_id": host_id,
+                                    "connection_test": test_result.get("success", False),
+                                    "discovery": discovery_result.get("success", False),
+                                    "recommendations": discovery_result.get("recommendations", []),
+                                }
+                            )
+                        except Exception as e:
+                            self.logger.error(
+                                "Auto-discovery failed for imported host",
+                                host_id=host_id,
+                                error=str(e),
+                            )
+                            discovered_hosts.append(
+                                {
+                                    "host_id": host_id,
+                                    "connection_test": False,
+                                    "discovery": False,
+                                    "error": str(e),
+                                }
+                            )
+
+                    # Add discovery results to import result
+                    import_result["auto_discovery"] = {
+                        "completed": True,
+                        "results": discovered_hosts,
+                    }
+                    import_result["message"] = (
+                        import_result.get("message", "")
+                        + " (Auto-discovery completed for imported hosts)"
+                    )
+
+                return import_result
+
+            elif action == HostAction.CLEANUP:
+                # Import cleanup service dependency
+                from ..services import CleanupService
+                cleanup_service = CleanupService(self.config, None)  # Context manager not needed
+                
+                # Extract parameters
+                host_id = params.get("host_id", "")
+                cleanup_type = params.get("cleanup_type")
+                frequency = params.get("frequency")
+                time = params.get("time")
+                
+                # Handle cleanup sub-actions:
+                # - "cleanup check <host_id>" -> Check disk usage
+                # - "cleanup <cleanup_type> <host_id>" -> Execute cleanup
+                # - "cleanup schedule" with frequency/time -> Add schedule
+                # - "cleanup schedule" without frequency/time -> List or remove schedules
+
+                # Handle schedule operations when frequency is provided (add schedule)
+                if frequency and time:
+                    if not host_id or not cleanup_type:
+                        return {
+                            "success": False,
+                            "error": "host_id and cleanup_type required for scheduling",
+                        }
+                    if cleanup_type not in ["safe", "moderate"]:
+                        return {
+                            "success": False,
+                            "error": "Only 'safe' and 'moderate' cleanup types can be scheduled",
+                        }
+                    return await cleanup_service.add_schedule(
+                        host_id, cleanup_type, frequency, time
+                    )
+
+                # Handle schedule list when no host_id but no frequency (list all schedules)
+                elif not host_id and not frequency and not cleanup_type:
+                    return await cleanup_service.list_schedules()
+
+                # Handle schedule remove when host_id but no frequency/cleanup_type
+                elif host_id and not frequency and not cleanup_type:
+                    return await cleanup_service.remove_schedule(host_id)
+
+                # Handle cleanup operations
+                else:
+                    if not host_id:
+                        return {"success": False, "error": "host_id is required for cleanup action"}
+                    if not cleanup_type:
+                        return {
+                            "success": False,
+                            "error": "cleanup_type is required for cleanup action",
+                        }
+                    if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
+                        return {
+                            "success": False,
+                            "error": "cleanup_type must be one of: check, safe, moderate, aggressive",
+                        }
+
+                    if cleanup_type == "check":
+                        # Show disk usage for cleanup planning
+                        return await cleanup_service.docker_disk_usage(host_id)
+                    else:
+                        # Perform actual cleanup
+                        return await cleanup_service.docker_cleanup(host_id, cleanup_type)
+
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unknown action: {action}",
+                    "valid_actions": [
+                        "list",
+                        "add",
+                        "edit",
+                        "remove",
+                        "test_connection",
+                        "discover",
+                        "ports",
+                        "import_ssh",
+                        "cleanup",
+                    ],
+                }
+
+        except Exception as e:
+            self.logger.error("host service action error", action=action, error=str(e))
+            return {"success": False, "error": f"Service action failed: {str(e)}", "action": action}
+
+    def _format_discover_result(self, result: dict[str, Any], host_id: str) -> dict[str, Any]:
+        """Format discovery result for single host."""
+        if not result.get("success"):
+            return result
+
+        # Add discovery summary information
+        discovery_count = 0
+        if result.get("compose_discovery", {}).get("paths"):
+            discovery_count += len(result["compose_discovery"]["paths"])
+        if result.get("appdata_discovery", {}).get("paths"):
+            discovery_count += len(result["appdata_discovery"]["paths"])
+
+        result["discovery_summary"] = {
+            "host_id": host_id,
+            "paths_discovered": discovery_count,
+            "zfs_capable": result.get("zfs_discovery", {}).get("capable", False),
+            "recommendations_count": len(result.get("recommendations", [])),
+        }
+
+        return result
+
+    def _format_discover_all_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Format discovery result for all hosts."""
+        if not result.get("success"):
+            return result
+
+        # Add summary statistics
+        total_recommendations = 0
+        zfs_hosts = 0
+        total_paths = 0
+
+        discoveries = result.get("discoveries", {})
+        for host_discovery in discoveries.values():
+            if host_discovery.get("success"):
+                total_recommendations += len(host_discovery.get("recommendations", []))
+                if host_discovery.get("zfs_discovery", {}).get("capable"):
+                    zfs_hosts += 1
+                
+                compose_paths = len(host_discovery.get("compose_discovery", {}).get("paths", []))
+                appdata_paths = len(host_discovery.get("appdata_discovery", {}).get("paths", []))
+                total_paths += compose_paths + appdata_paths
+
+        result["discovery_summary"] = {
+            "total_hosts_discovered": result.get("successful_discoveries", 0),
+            "total_recommendations": total_recommendations,
+            "zfs_capable_hosts": zfs_hosts,
+            "total_paths_found": total_paths,
+        }
+
+        return result
+
     async def _test_ssh_connection(
         self, hostname: str, user: str, port: int = 22, identity_file: str | None = None
     ) -> bool:

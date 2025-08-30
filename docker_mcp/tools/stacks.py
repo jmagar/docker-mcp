@@ -376,7 +376,7 @@ class StackTools:
         # Build remote command
         remote_cmd = self._build_remote_command(project_directory, compose_cmd, environment)
 
-        ssh_cmd.extend([f"{host_config.user}@{host_config.hostname}", remote_cmd])
+        ssh_cmd.append(remote_cmd)
 
         # Debug logging
         logger.debug(
