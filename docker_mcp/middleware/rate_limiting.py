@@ -21,7 +21,7 @@ class TokenBucket:
 
     def __init__(self, capacity: int, refill_rate: float):
         """Initialize token bucket.
-        
+
         Args:
             capacity: Maximum number of tokens in bucket
             refill_rate: Tokens added per second
@@ -34,10 +34,10 @@ class TokenBucket:
 
     async def consume(self, tokens: int = 1) -> bool:
         """Try to consume tokens from bucket.
-        
+
         Args:
             tokens: Number of tokens to consume
-            
+
         Returns:
             True if tokens were successfully consumed
         """
@@ -61,13 +61,13 @@ class TokenBucket:
             "capacity": self.capacity,
             "current_tokens": round(self.tokens, 2),
             "refill_rate": self.refill_rate,
-            "last_refill": self.last_refill
+            "last_refill": self.last_refill,
         }
 
 
 class RateLimitingMiddleware(Middleware):
     """FastMCP middleware for request rate limiting using token bucket algorithm.
-    
+
     Features:
     - Token bucket algorithm for smooth rate limiting
     - Per-client rate limiting with configurable identification
@@ -77,15 +77,17 @@ class RateLimitingMiddleware(Middleware):
     - Global and per-method rate limits
     """
 
-    def __init__(self,
-                 max_requests_per_second: float = 10.0,
-                 burst_capacity: int | None = None,
-                 client_id_func: Callable[[MiddlewareContext], str] | None = None,
-                 enable_global_limit: bool = True,
-                 per_method_limits: dict[str, float] | None = None,
-                 cleanup_interval: float = 300.0):  # 5 minutes
+    def __init__(
+        self,
+        max_requests_per_second: float = 10.0,
+        burst_capacity: int | None = None,
+        client_id_func: Callable[[MiddlewareContext], str] | None = None,
+        enable_global_limit: bool = True,
+        per_method_limits: dict[str, float] | None = None,
+        cleanup_interval: float = 300.0,
+    ):  # 5 minutes
         """Initialize rate limiting middleware.
-        
+
         Args:
             max_requests_per_second: Maximum requests per second per client
             burst_capacity: Maximum burst size (defaults to 2x rate limit)
@@ -109,11 +111,9 @@ class RateLimitingMiddleware(Middleware):
         # Statistics
         self.rate_limit_hits = 0
         self.total_requests = 0
-        self.client_stats: dict[str, dict[str, Any]] = defaultdict(lambda: {
-            "requests": 0,
-            "rate_limited": 0,
-            "last_request": time.time()
-        })
+        self.client_stats: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"requests": 0, "rate_limited": 0, "last_request": time.time()}
+        )
 
         # Start cleanup task
         self.last_cleanup = time.time()
@@ -152,7 +152,7 @@ class RateLimitingMiddleware(Middleware):
                 client_id=client_id,
                 method=method,
                 global_tokens_remaining=self._get_remaining_tokens(client_id),
-                total_requests=self.total_requests
+                total_requests=self.total_requests,
             )
 
             return result
@@ -163,34 +163,33 @@ class RateLimitingMiddleware(Middleware):
                 "Request failed after rate limit check",
                 client_id=client_id,
                 method=method,
-                error=str(e)
+                error=str(e),
             )
             raise
 
     async def _check_client_rate_limit(self, client_id: str) -> bool:
         """Check if client is within global rate limit.
-        
+
         Args:
             client_id: Client identifier
-            
+
         Returns:
             True if request is allowed
         """
         if client_id not in self.client_buckets:
             self.client_buckets[client_id] = TokenBucket(
-                capacity=self.burst_capacity,
-                refill_rate=self.max_requests_per_second
+                capacity=self.burst_capacity, refill_rate=self.max_requests_per_second
             )
 
         return await self.client_buckets[client_id].consume()
 
     async def _check_method_rate_limit(self, client_id: str, method: str) -> bool:
         """Check if client is within method-specific rate limit.
-        
+
         Args:
             client_id: Client identifier
             method: MCP method name
-            
+
         Returns:
             True if request is allowed
         """
@@ -199,15 +198,16 @@ class RateLimitingMiddleware(Middleware):
             method_burst = int(method_rate * 2)
 
             self.method_buckets[method][client_id] = TokenBucket(
-                capacity=method_burst,
-                refill_rate=method_rate
+                capacity=method_burst, refill_rate=method_rate
             )
 
         return await self.method_buckets[method][client_id].consume()
 
-    async def _handle_rate_limit_exceeded(self, client_id: str, method: str, limit_type: str) -> None:
+    async def _handle_rate_limit_exceeded(
+        self, client_id: str, method: str, limit_type: str
+    ) -> None:
         """Handle rate limit exceeded scenario.
-        
+
         Args:
             client_id: Client identifier
             method: MCP method name
@@ -224,27 +224,29 @@ class RateLimitingMiddleware(Middleware):
             limit_type=limit_type,
             total_rate_limits=self.rate_limit_hits,
             client_requests=self.client_stats[client_id]["requests"],
-            client_rate_limited=self.client_stats[client_id]["rate_limited"]
+            client_rate_limited=self.client_stats[client_id]["rate_limited"],
         )
 
         # Raise MCP error
         error_message = f"Rate limit exceeded for {limit_type} limits. Try again later."
-        raise McpError(ErrorData(
-            code=-32000,  # Internal Error
-            message=error_message
-        ))
+        raise McpError(
+            ErrorData(
+                code=-32000,  # Internal Error
+                message=error_message,
+            )
+        )
 
     def _default_client_id(self, context: MiddlewareContext) -> str:
         """Default client identification function.
-        
+
         Args:
             context: MCP middleware context
-            
+
         Returns:
             Client identifier string
         """
         # Try to extract client info from context
-        if hasattr(context, 'client_info') and context.client_info:
+        if hasattr(context, "client_info") and context.client_info:
             return str(context.client_info)
 
         # Fallback to source + timestamp for basic identification
@@ -252,10 +254,10 @@ class RateLimitingMiddleware(Middleware):
 
     def _get_remaining_tokens(self, client_id: str) -> float:
         """Get remaining tokens for a client.
-        
+
         Args:
             client_id: Client identifier
-            
+
         Returns:
             Number of remaining tokens
         """
@@ -276,7 +278,8 @@ class RateLimitingMiddleware(Middleware):
 
         # Clean up inactive clients
         inactive_clients = [
-            client_id for client_id, stats in self.client_stats.items()
+            client_id
+            for client_id, stats in self.client_stats.items()
             if stats["last_request"] < inactive_threshold
         ]
 
@@ -292,12 +295,12 @@ class RateLimitingMiddleware(Middleware):
             self.logger.info(
                 "Cleaned up inactive clients",
                 removed_clients=len(inactive_clients),
-                remaining_clients=len(self.client_stats)
+                remaining_clients=len(self.client_stats),
             )
 
     def get_rate_limit_statistics(self) -> dict[str, Any]:
         """Get comprehensive rate limiting statistics.
-        
+
         Returns:
             Dictionary with rate limiting statistics
         """
@@ -310,14 +313,14 @@ class RateLimitingMiddleware(Middleware):
         top_limited_clients = sorted(
             [(client_id, stats["rate_limited"]) for client_id, stats in self.client_stats.items()],
             key=lambda x: x[1],
-            reverse=True
+            reverse=True,
         )[:10]
 
         # Get busiest clients
         busiest_clients = sorted(
             [(client_id, stats["requests"]) for client_id, stats in self.client_stats.items()],
             key=lambda x: x[1],
-            reverse=True
+            reverse=True,
         )[:10]
 
         return {
@@ -330,15 +333,15 @@ class RateLimitingMiddleware(Middleware):
             "per_method_limits": self.per_method_limits,
             "top_limited_clients": top_limited_clients,
             "busiest_clients": busiest_clients,
-            "client_count": len(self.client_stats)
+            "client_count": len(self.client_stats),
         }
 
     def get_client_status(self, client_id: str) -> dict[str, Any] | None:
         """Get rate limiting status for a specific client.
-        
+
         Args:
             client_id: Client identifier
-            
+
         Returns:
             Client rate limiting status or None if client not found
         """
@@ -349,7 +352,7 @@ class RateLimitingMiddleware(Middleware):
             "client_id": client_id,
             "stats": self.client_stats[client_id].copy(),
             "global_bucket": None,
-            "method_buckets": {}
+            "method_buckets": {},
         }
 
         # Add global bucket status
@@ -370,12 +373,14 @@ class RateLimitingMiddleware(Middleware):
         self.client_stats.clear()
         self.logger.info("Rate limiting statistics reset")
 
-    def update_rate_limits(self,
-                          max_requests_per_second: float | None = None,
-                          burst_capacity: int | None = None,
-                          per_method_limits: dict[str, float] | None = None) -> None:
+    def update_rate_limits(
+        self,
+        max_requests_per_second: float | None = None,
+        burst_capacity: int | None = None,
+        per_method_limits: dict[str, float] | None = None,
+    ) -> None:
         """Update rate limiting configuration.
-        
+
         Args:
             max_requests_per_second: New global rate limit
             burst_capacity: New burst capacity
@@ -398,5 +403,5 @@ class RateLimitingMiddleware(Middleware):
             "Rate limit configuration updated",
             max_requests_per_second=self.max_requests_per_second,
             burst_capacity=self.burst_capacity,
-            per_method_limits=self.per_method_limits
+            per_method_limits=self.per_method_limits,
         )

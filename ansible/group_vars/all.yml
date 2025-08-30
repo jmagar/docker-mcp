@@ -1,0 +1,57 @@
+# Docker MCP - Global Variables
+# These variables apply to all hosts unless overridden
+
+# Docker MCP Configuration
+docker_mcp_version: "latest"
+docker_mcp_config_dir: "/opt/docker-mcp/config"
+
+# Default paths (can be overridden per host)
+default_compose_path: "/opt/docker-compose"
+default_appdata_path: "/opt/docker-appdata"
+default_backup_path: "/opt/docker-backups"
+
+# SSH Configuration
+ssh_connection_timeout: 30
+ssh_retries: 3
+
+# Cleanup thresholds
+cleanup_thresholds:
+  disk_usage_warning: 80
+  disk_usage_critical: 90
+  container_age_days: 7
+  image_age_days: 30
+  volume_age_days: 90
+
+# Health check settings
+health_check:
+  disk_warning_threshold: 80
+  disk_critical_threshold: 90
+  memory_warning_threshold: 85
+  memory_critical_threshold: 95
+  container_restart_threshold: 5
+  check_interval_minutes: 15
+
+# Migration settings
+migration:
+  default_transfer_method: "rsync"  # rsync, zfs
+  verify_data_integrity: true
+  create_backup_before_migration: true
+  migration_timeout_minutes: 60
+
+# Backup settings
+backup:
+  default_retention_days: 7
+  backup_compression: true
+  verify_backups: true
+  
+# Docker registry settings
+docker_registry:
+  default_registry: "docker.io"
+  connection_timeout: 30
+  
+# Logging
+logging:
+  level: "INFO"
+  rotate_logs: true
+  max_log_size: "10M"
+  max_log_files: 5

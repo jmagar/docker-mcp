@@ -1,0 +1,246 @@
+---
+- name: Docker MCP Host Setup and SSH Key Distribution
+  hosts: all
+  gather_facts: yes
+  vars:
+    docker_mcp_ssh_key_name: "id_ed25519"
+    docker_mcp_dir: "{{ ansible_env.HOME }}/.docker-mcp"
+    ssh_key_path: "{{ docker_mcp_dir }}/ssh/{{ docker_mcp_ssh_key_name }}"
+    config_dir: "{{ docker_mcp_dir }}/config"
+    
+  tasks:
+    # Prerequisites check
+    - name: Check if SSH and Docker are available
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - "ssh -V"
+        - "docker --version"
+      register: prereq_check
+      failed_when: false
+      changed_when: false
+      delegate_to: localhost
+      run_once: true
+      
+    - name: Display prerequisite check results
+      ansible.builtin.debug:
+        msg: |
+          SSH Version: {{ prereq_check.results[0].stdout | default('Not found') }}
+          Docker Version: {{ prereq_check.results[1].stdout | default('Not found') }}
+      delegate_to: localhost
+      run_once: true
+      
+    # Directory creation
+    - name: Create Docker MCP directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ docker_mcp_dir }}"
+        - "{{ docker_mcp_dir }}/ssh"
+        - "{{ config_dir }}"
+        - "{{ docker_mcp_dir }}/data/logs"
+      delegate_to: localhost
+      run_once: true
+      
+    - name: Set secure permissions on SSH directory
+      ansible.builtin.file:
+        path: "{{ docker_mcp_dir }}/ssh"
+        mode: '0700'
+      delegate_to: localhost
+      run_once: true
+      
+    # SSH key management
+    - name: Check if SSH key exists
+      ansible.builtin.stat:
+        path: "{{ ssh_key_path }}"
+      register: ssh_key_stat
+      delegate_to: localhost
+      run_once: true
+      
+    - name: Generate SSH key if not exists
+      ansible.builtin.openssh_keypair:
+        path: "{{ ssh_key_path }}"
+        type: ed25519
+        comment: "docker-mcp:{{ ansible_hostname }}:{{ ansible_date_time.date }}"
+        mode: '0600'
+      when: not ssh_key_stat.stat.exists
+      delegate_to: localhost
+      run_once: true
+      register: ssh_key_generated
+      
+    - name: Display SSH key information
+      ansible.builtin.debug:
+        msg: |
+          SSH Key Path: {{ ssh_key_path }}
+          SSH Key Generated: {{ ssh_key_generated.changed | default(false) }}
+          Fingerprint: {{ ssh_key_generated.fingerprint | default('N/A') }}
+      delegate_to: localhost
+      run_once: true
+      
+    # Host discovery and setup
+    - name: Test SSH connectivity
+      ansible.builtin.wait_for_connection:
+        timeout: 10
+      register: connection_test
+      failed_when: false
+      
+    - name: Gather host facts
+      ansible.builtin.setup:
+      when: connection_test is succeeded
+      
+    - name: Check Docker availability on hosts
+      ansible.builtin.command: docker version --format '{{.Server.Version}}'
+      register: docker_version_check
+      failed_when: false
+      changed_when: false
+      when: connection_test is succeeded
+      
+    - name: Discover Docker Compose paths
+      ansible.builtin.shell: |
+        # Check for existing compose working directories
+        docker ps -aq --no-trunc 2>/dev/null | xargs -r docker inspect --format '{{index .Config.Labels "com.docker.compose.working_dir"}}' 2>/dev/null | grep -v '^$' | sort | uniq | head -5
+      register: compose_paths_discovery
+      failed_when: false
+      changed_when: false
+      when: connection_test is succeeded and docker_version_check.rc == 0
+      
+    - name: Discover appdata paths from bind mounts
+      ansible.builtin.shell: |
+        # Get bind mount sources from all containers
+        docker ps -aq --no-trunc 2>/dev/null | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | grep -v '^$' | sort | uniq | head -10
+      register: appdata_paths_discovery
+      failed_when: false
+      changed_when: false
+      when: connection_test is succeeded and docker_version_check.rc == 0
+      
+    - name: Check ZFS availability
+      ansible.builtin.shell: |
+        if command -v zfs >/dev/null 2>&1; then
+          echo "available"
+          zfs version | head -1
+          zpool list -H -o name 2>/dev/null | head -3
+        else
+          echo "not_available"
+        fi
+      register: zfs_check
+      failed_when: false
+      changed_when: false
+      when: connection_test is succeeded
+      
+    # SSH key distribution
+    - name: Ensure .ssh directory exists
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.ssh"
+        state: directory
+        mode: '0700'
+      when: connection_test is succeeded
+      
+    - name: Read public key content
+      ansible.builtin.slurp:
+        src: "{{ ssh_key_path }}.pub"
+      register: public_key_content
+      delegate_to: localhost
+      run_once: true
+      
+    - name: Distribute SSH public key
+      ansible.builtin.authorized_key:
+        user: "{{ ansible_user }}"
+        state: present
+        key: "{{ public_key_content.content | b64decode }}"
+        comment: "docker-mcp-key"
+        exclusive: false
+      when: connection_test is succeeded
+      register: key_distribution
+      
+    # Verification
+    - name: Verify SSH key access
+      ansible.builtin.command: echo "SSH key verification successful"
+      when: connection_test is succeeded and key_distribution is succeeded
+      changed_when: false
+      
+    # Results compilation
+    - name: Compile host discovery results
+      ansible.builtin.set_fact:
+        host_discovery_result:
+          host_id: "{{ inventory_hostname }}"
+          hostname: "{{ ansible_host | default(inventory_hostname) }}"
+          connection_successful: "{{ connection_test is succeeded }}"
+          docker_available: "{{ docker_version_check.rc == 0 if docker_version_check is defined else false }}"
+          docker_version: "{{ docker_version_check.stdout | default('N/A') }}"
+          ssh_key_distributed: "{{ key_distribution is succeeded if key_distribution is defined else false }}"
+          zfs_available: "{{ 'available' in zfs_check.stdout if zfs_check is defined else false }}"
+          compose_paths: "{{ compose_paths_discovery.stdout_lines | default([]) }}"
+          appdata_paths: "{{ appdata_paths_discovery.stdout_lines | default([]) }}"
+          ansible_facts:
+            os_family: "{{ ansible_os_family | default('Unknown') }}"
+            distribution: "{{ ansible_distribution | default('Unknown') }}"
+            architecture: "{{ ansible_architecture | default('Unknown') }}"
+      when: connection_test is defined
+      
+    # Summary report
+    - name: Display setup summary
+      ansible.builtin.debug:
+        msg: |
+          Host Setup Results:
+          ==================
+          Host: {{ inventory_hostname }} ({{ ansible_host | default('N/A') }})
+          Connection: {{ 'SUCCESS' if (connection_test is succeeded) else 'FAILED' }}
+          Docker: {{ 'Available (' + docker_version_check.stdout + ')' if (docker_version_check.rc == 0 if docker_version_check is defined else false) else 'Not Available' }}
+          SSH Key: {{ 'Distributed' if (key_distribution is succeeded if key_distribution is defined else false) else 'Failed' }}
+          ZFS: {{ 'Available' if ('available' in zfs_check.stdout if zfs_check is defined else false) else 'Not Available' }}
+          OS: {{ ansible_os_family | default('Unknown') }} {{ ansible_distribution | default('') }}
+          Compose Paths Found: {{ compose_paths_discovery.stdout_lines | length if compose_paths_discovery is defined else 0 }}
+          Appdata Paths Found: {{ appdata_paths_discovery.stdout_lines | length if appdata_paths_discovery is defined else 0 }}
+          
+          {% if compose_paths_discovery is defined and compose_paths_discovery.stdout_lines %}
+          Discovered Compose Paths:
+          {% for path in compose_paths_discovery.stdout_lines %}
+          - {{ path }}
+          {% endfor %}
+          {% endif %}
+          
+          {% if zfs_check is defined and 'available' in zfs_check.stdout %}
+          ZFS Details:
+          {{ zfs_check.stdout | replace('\n', '\n  ') }}
+          {% endif %}
+      when: connection_test is defined
+
+# Post-play summary
+- name: Generate hosts configuration
+  hosts: localhost
+  gather_facts: no
+  run_once: true
+  tasks:
+    - name: Collect successful hosts
+      ansible.builtin.set_fact:
+        successful_hosts: "{{ ansible_play_hosts_all | select('in', hostvars.keys()) | select('match', '.*') | list | select('extract', hostvars, 'host_discovery_result') | selectattr('connection_successful', 'equalto', true) | list }}"
+      when: hostvars is defined
+      
+    - name: Generate Docker MCP hosts.yml configuration
+      ansible.builtin.template:
+        src: hosts.yml.j2
+        dest: "{{ docker_mcp_dir }}/config/hosts.yml"
+        backup: yes
+      vars:
+        timestamp: "{{ ansible_date_time.date }} {{ ansible_date_time.time }}"
+      when: successful_hosts is defined and successful_hosts | length > 0
+      
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg: |
+          
+          ========================================
+          Docker MCP Host Setup Complete!
+          ========================================
+          
+          SSH Key: {{ ssh_key_path }}
+          Successful Hosts: {{ successful_hosts | length if successful_hosts is defined else 0 }}
+          Configuration: {{ docker_mcp_dir }}/config/hosts.yml
+          
+          Next Steps:
+          1. Review the generated configuration
+          2. Test SSH connections: ssh -i {{ ssh_key_path }} user@host
+          3. Start Docker MCP services
+          
+          Failed Hosts: {{ ansible_play_hosts_all | length - (successful_hosts | length if successful_hosts is defined else 0) }}

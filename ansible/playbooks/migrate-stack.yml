@@ -1,0 +1,391 @@
+---
+- name: Docker Stack Migration
+  hosts: localhost
+  gather_facts: no
+  vars:
+    source_host_id: "{{ source_host }}"
+    target_host_id: "{{ target_host }}"
+    stack_name: "{{ stack }}"
+    dry_run: "{{ dry_run_mode | default(false) }}"
+    skip_stop_source: "{{ skip_stop | default(false) }}"
+    start_target: "{{ start_after_migration | default(true) }}"
+    remove_source: "{{ cleanup_source | default(false) }}"
+    
+  tasks:
+    # Pre-flight validation
+    - name: Validate required parameters
+      ansible.builtin.fail:
+        msg: "Missing required parameter: {{ item }}"
+      when: vars[item] is not defined or vars[item] == ""
+      loop:
+        - source_host_id
+        - target_host_id  
+        - stack_name
+        
+    - name: Load host configurations
+      ansible.builtin.set_fact:
+        source_host_config: "{{ hostvars[source_host_id] | default({}) }}"
+        target_host_config: "{{ hostvars[target_host_id] | default({}) }}"
+        
+    - name: Validate hosts exist in inventory
+      ansible.builtin.fail:
+        msg: "Host {{ item }} not found in inventory"
+      when: hostvars[item] is not defined
+      loop:
+        - "{{ source_host_id }}"
+        - "{{ target_host_id }}"
+        
+    - name: Display migration plan
+      ansible.builtin.debug:
+        msg: |
+          Docker Stack Migration Plan:
+          ============================
+          
+          Stack: {{ stack_name }}
+          Source: {{ source_host_id }} ({{ source_host_config.ansible_host | default('unknown') }})
+          Target: {{ target_host_id }} ({{ target_host_config.ansible_host | default('unknown') }})
+          
+          Migration Settings:
+          - Dry Run: {{ dry_run }}
+          - Skip Stop Source: {{ skip_stop_source }}
+          - Start Target: {{ start_target }}
+          - Remove Source: {{ remove_source }}
+          
+          Transfer Method: {{ 'ZFS send/receive' if (source_host_config.zfs_capable and target_host_config.zfs_capable) else 'Rsync' }}
+
+# Source host operations
+- name: Source Host Operations
+  hosts: "{{ source_host_id }}"
+  gather_facts: yes
+  vars:
+    stack_name: "{{ hostvars['localhost']['stack_name'] }}"
+    dry_run: "{{ hostvars['localhost']['dry_run'] }}"
+    skip_stop_source: "{{ hostvars['localhost']['skip_stop_source'] }}"
+    
+  tasks:
+    - name: Check if stack exists on source
+      ansible.builtin.shell: |
+        docker ps -a --filter "label=com.docker.compose.project={{ stack_name }}" --format '{{.Names}}' | head -10
+      register: source_containers
+      changed_when: false
+      
+    - name: Fail if stack not found
+      ansible.builtin.fail:
+        msg: "Stack '{{ stack_name }}' not found on source host {{ inventory_hostname }}"
+      when: source_containers.stdout_lines | length == 0
+      
+    - name: Get stack compose file location
+      ansible.builtin.shell: |
+        docker ps -a --filter "label=com.docker.compose.project={{ stack_name }}" --format '{{.Label "com.docker.compose.working_dir"}}' | head -1
+      register: compose_working_dir
+      changed_when: false
+      
+    - name: Validate compose file exists
+      ansible.builtin.stat:
+        path: "{{ compose_working_dir.stdout }}/docker-compose.yml"
+      register: compose_file_check
+      when: compose_working_dir.stdout != ""
+      
+    - name: Use alternative compose file names if needed
+      ansible.builtin.find:
+        paths: "{{ compose_working_dir.stdout }}"
+        patterns: ["docker-compose.yaml", "compose.yml", "compose.yaml"]
+        file_type: file
+      register: alt_compose_files
+      when: compose_file_check is not defined or not compose_file_check.stat.exists
+      
+    - name: Set compose file path
+      ansible.builtin.set_fact:
+        compose_file_path: |
+          {% if compose_file_check is defined and compose_file_check.stat.exists %}
+          {{ compose_working_dir.stdout }}/docker-compose.yml
+          {% elif alt_compose_files.files | length > 0 %}
+          {{ alt_compose_files.files[0].path }}
+          {% else %}
+          ""
+          {% endif %}
+        
+    - name: Read compose file content
+      ansible.builtin.slurp:
+        src: "{{ compose_file_path }}"
+      register: compose_content
+      when: compose_file_path != ""
+      
+    - name: Parse volume information from compose file
+      ansible.builtin.shell: |
+        # Extract volume mounts from running containers
+        docker inspect $(docker ps -aq --filter "label=com.docker.compose.project={{ stack_name }}") \
+          --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' \
+          2>/dev/null | sort | uniq
+      register: bind_mount_paths
+      changed_when: false
+      
+    - name: Get named volumes
+      ansible.builtin.shell: |
+        docker volume ls --filter "label=com.docker.compose.project={{ stack_name }}" --format '{{.Name}}'
+      register: named_volumes
+      changed_when: false
+      
+    - name: Get volume locations for named volumes
+      ansible.builtin.shell: |
+        docker volume inspect {{ item }} --format '{{.Mountpoint}}'
+      register: volume_locations
+      loop: "{{ named_volumes.stdout_lines }}"
+      when: named_volumes.stdout_lines | length > 0
+      changed_when: false
+      
+    - name: Compile all volume paths
+      ansible.builtin.set_fact:
+        all_volume_paths: "{{ (bind_mount_paths.stdout_lines + (volume_locations.results | map(attribute='stdout') | list)) | unique }}"
+        
+    - name: Check running containers
+      ansible.builtin.shell: |
+        docker ps --filter "label=com.docker.compose.project={{ stack_name }}" --format '{{.Names}}' | wc -l
+      register: running_containers_count
+      changed_when: false
+      
+    - name: Display pre-migration state
+      ansible.builtin.debug:
+        msg: |
+          Source Stack Analysis:
+          ======================
+          Stack: {{ stack_name }}
+          Total Containers: {{ source_containers.stdout_lines | length }}
+          Running Containers: {{ running_containers_count.stdout }}
+          Compose File: {{ compose_file_path }}
+          Volume Paths: {{ all_volume_paths | length }} found
+          
+          Bind Mounts:
+          {% for path in bind_mount_paths.stdout_lines %}
+          - {{ path }}
+          {% endfor %}
+          
+          Named Volumes:
+          {% for volume in named_volumes.stdout_lines %}
+          - {{ volume }}
+          {% endfor %}
+          
+    - name: Stop source stack (unless skipped)
+      ansible.builtin.shell: |
+        cd "{{ compose_working_dir.stdout }}"
+        docker compose down
+      register: source_stop_result
+      when: not skip_stop_source and not dry_run and running_containers_count.stdout | int > 0
+      
+    - name: Wait for containers to fully stop
+      ansible.builtin.wait_for:
+        timeout: 30
+      when: source_stop_result is succeeded
+      
+    - name: Verify containers stopped
+      ansible.builtin.shell: |
+        docker ps --filter "label=com.docker.compose.project={{ stack_name }}" --format '{{.Names}}'
+      register: verify_stopped
+      changed_when: false
+      when: source_stop_result is defined
+      
+    - name: Create data inventory
+      ansible.builtin.shell: |
+        find {{ item }} -type f -exec wc -c {} + 2>/dev/null | tail -1 || echo "0 total"
+      register: data_inventory
+      loop: "{{ all_volume_paths }}"
+      when: all_volume_paths | length > 0 and not dry_run
+      changed_when: false
+      
+    - name: Prepare source data for transfer
+      ansible.builtin.set_fact:
+        migration_data:
+          stack_name: "{{ stack_name }}"
+          compose_content: "{{ compose_content.content | b64decode if compose_content is defined else '' }}"
+          compose_working_dir: "{{ compose_working_dir.stdout }}"
+          volume_paths: "{{ all_volume_paths }}"
+          containers_stopped: "{{ verify_stopped.stdout_lines | length == 0 if verify_stopped is defined else false }}"
+          data_size_bytes: "{{ data_inventory.results | map(attribute='stdout') | map('regex_search', '(\\d+) total$', '\\1') | map('first') | map('int') | sum if data_inventory is defined else 0 }}"
+
+# Target host operations  
+- name: Target Host Operations
+  hosts: "{{ target_host_id }}"
+  gather_facts: yes
+  vars:
+    stack_name: "{{ hostvars['localhost']['stack_name'] }}"
+    dry_run: "{{ hostvars['localhost']['dry_run'] }}"
+    start_target: "{{ hostvars['localhost']['start_target'] }}"
+    source_data: "{{ hostvars[hostvars['localhost']['source_host_id']]['migration_data'] }}"
+    
+  tasks:
+    - name: Check if stack already exists on target
+      ansible.builtin.shell: |
+        docker ps -a --filter "label=com.docker.compose.project={{ stack_name }}" --format '{{.Names}}' | wc -l
+      register: target_existing_check
+      changed_when: false
+      
+    - name: Warn about existing stack
+      ansible.builtin.debug:
+        msg: |
+          ⚠️  WARNING: Stack '{{ stack_name }}' already has {{ target_existing_check.stdout }} containers on target host.
+          Migration will overwrite existing data!
+      when: target_existing_check.stdout | int > 0
+      
+    - name: Determine target appdata path
+      ansible.builtin.set_fact:
+        target_appdata_path: "{{ docker_appdata_path | default('/opt/docker-appdata') }}"
+        target_compose_path: "{{ docker_compose_path | default('/opt/docker-compose') }}"
+        
+    - name: Create target directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ target_appdata_path }}/{{ stack_name }}"
+        - "{{ target_compose_path }}/{{ stack_name }}"
+      when: not dry_run
+      
+    # ZFS transfer (if both hosts support it)
+    - name: ZFS-based transfer
+      block:
+        - name: Create ZFS snapshot on source
+          ansible.builtin.shell: |
+            zfs snapshot {{ zfs_dataset }}@{{ stack_name }}_migration_{{ ansible_date_time.epoch }}
+          delegate_to: "{{ hostvars['localhost']['source_host_id'] }}"
+          register: zfs_snapshot
+          when: not dry_run
+          
+        - name: ZFS send/receive transfer  
+          ansible.builtin.shell: |
+            ssh {{ hostvars[hostvars['localhost']['source_host_id']].ansible_user }}@{{ hostvars[hostvars['localhost']['source_host_id']].ansible_host }} \
+              "zfs send {{ hostvars[hostvars['localhost']['source_host_id']].zfs_dataset }}@{{ stack_name }}_migration_{{ ansible_date_time.epoch }}" | \
+              zfs receive {{ zfs_dataset }}/{{ stack_name }}
+          register: zfs_transfer
+          when: not dry_run
+          
+        - name: Display ZFS transfer result
+          ansible.builtin.debug:
+            msg: "ZFS transfer completed successfully via send/receive"
+          when: zfs_transfer is succeeded
+          
+      when: zfs_capable and hostvars[hostvars['localhost']['source_host_id']].zfs_capable | default(false)
+      
+    # Rsync transfer (fallback or non-ZFS hosts)
+    - name: Rsync-based transfer
+      block:
+        - name: Create archive on source host
+          ansible.builtin.shell: |
+            cd /tmp
+            tar -czf {{ stack_name }}_migration_{{ ansible_date_time.epoch }}.tar.gz -C / {{ source_data.volume_paths | join(' -C / ') }}
+          delegate_to: "{{ hostvars['localhost']['source_host_id'] }}"
+          register: archive_creation
+          when: not dry_run and source_data.volume_paths | length > 0
+          
+        - name: Transfer archive via rsync
+          ansible.builtin.synchronize:
+            src: "/tmp/{{ stack_name }}_migration_{{ ansible_date_time.epoch }}.tar.gz"
+            dest: "/tmp/{{ stack_name }}_migration_{{ ansible_date_time.epoch }}.tar.gz" 
+            mode: pull
+          delegate_to: "{{ hostvars['localhost']['source_host_id'] }}"
+          when: archive_creation is succeeded
+          
+        - name: Extract archive on target
+          ansible.builtin.unarchive:
+            src: "/tmp/{{ stack_name }}_migration_{{ ansible_date_time.epoch }}.tar.gz"
+            dest: "{{ target_appdata_path }}/{{ stack_name }}"
+            remote_src: yes
+          when: archive_creation is succeeded
+          
+        - name: Clean up temporary archive
+          ansible.builtin.file:
+            path: "/tmp/{{ stack_name }}_migration_{{ ansible_date_time.epoch }}.tar.gz"
+            state: absent
+          when: archive_creation is succeeded
+          
+      when: not (zfs_capable and hostvars[hostvars['localhost']['source_host_id']].zfs_capable | default(false))
+      
+    - name: Create updated compose file
+      ansible.builtin.copy:
+        content: |
+          {{ source_data.compose_content | regex_replace('/opt/docker-appdata', target_appdata_path) | regex_replace(source_data.compose_working_dir, target_compose_path + '/' + stack_name) }}
+        dest: "{{ target_compose_path }}/{{ stack_name }}/docker-compose.yml"
+        mode: '0644'
+      when: not dry_run and source_data.compose_content != ""
+      
+    - name: Start target stack (if requested)
+      ansible.builtin.shell: |
+        cd "{{ target_compose_path }}/{{ stack_name }}"
+        docker compose up -d
+      register: target_start_result
+      when: start_target and not dry_run
+      
+    - name: Verify target stack startup
+      ansible.builtin.shell: |
+        sleep 10
+        docker ps --filter "label=com.docker.compose.project={{ stack_name }}" --format '{{.Names}}:{{.Status}}'
+      register: target_verification
+      when: target_start_result is succeeded
+      changed_when: false
+
+# Final cleanup and reporting
+- name: Migration Summary
+  hosts: localhost
+  gather_facts: no
+  vars:
+    source_host_id: "{{ source_host }}"
+    target_host_id: "{{ target_host }}"
+    stack_name: "{{ stack }}"
+    dry_run: "{{ dry_run_mode | default(false) }}"
+    remove_source: "{{ cleanup_source | default(false) }}"
+    
+  tasks:
+    - name: Remove source stack (if requested)
+      ansible.builtin.shell: |
+        cd "{{ hostvars[source_host_id]['migration_data']['compose_working_dir'] }}"
+        docker compose down -v --remove-orphans
+        rm -rf "{{ hostvars[source_host_id]['migration_data']['compose_working_dir'] }}"
+      delegate_to: "{{ source_host_id }}"
+      when: remove_source and not dry_run and hostvars[target_host_id]['target_start_result'] is succeeded
+      
+    - name: Display migration summary
+      ansible.builtin.debug:
+        msg: |
+          
+          =====================================
+          Docker Stack Migration Summary
+          =====================================
+          
+          Stack: {{ stack_name }}
+          Source: {{ source_host_id }} → Target: {{ target_host_id }}
+          {% if dry_run %}
+          Mode: DRY RUN (no changes made)
+          {% else %}
+          Mode: EXECUTED
+          {% endif %}
+          
+          Migration Results:
+          - Source containers stopped: {{ hostvars[source_host_id]['migration_data']['containers_stopped'] if not dry_run else 'N/A (dry run)' }}
+          - Data transferred: {{ (hostvars[source_host_id]['migration_data']['data_size_bytes'] / 1024 / 1024) | round(2) if not dry_run else 'N/A (dry run)' }} MB
+          - Target stack started: {{ hostvars[target_host_id]['target_start_result'] is succeeded if not dry_run else 'N/A (dry run)' }}
+          - Source cleaned up: {{ remove_source and not dry_run }}
+          
+          {% if not dry_run and hostvars[target_host_id]['target_verification'] is defined %}
+          Target Stack Status:
+          {% for container in hostvars[target_host_id]['target_verification']['stdout_lines'] %}
+          - {{ container }}
+          {% endfor %}
+          {% endif %}
+          
+          {% if dry_run %}
+          To execute this migration:
+          ansible-playbook migrate-stack.yml -e source_host={{ source_host_id }} -e target_host={{ target_host_id }} -e stack={{ stack_name }}
+          {% endif %}
+          
+          Next Steps:
+          {% if not dry_run %}
+          1. Verify application functionality on target host
+          2. Update DNS/load balancer configurations
+          3. Monitor logs for any issues
+          {% if not remove_source %}
+          4. Clean up source stack when confident: ansible-playbook migrate-stack.yml -e cleanup_source=true
+          {% endif %}
+          {% else %}
+          1. Review the migration plan above
+          2. Execute with: ansible-playbook migrate-stack.yml -e dry_run_mode=false
+          {% endif %}

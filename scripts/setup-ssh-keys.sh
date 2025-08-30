@@ -10,7 +10,7 @@ trap 'echo "[ERROR] Unexpected failure at line $LINENO (exit=$?): ${BASH_COMMAND
 
 # Configuration (matching install.sh conventions)
 DOCKER_MCP_DIR="${HOME}/.docker-mcp"
-SSH_KEY_NAME="docker-mcp-key"
+SSH_KEY_NAME="id_ed25519"
 SSH_KEY_PATH="${DOCKER_MCP_DIR}/ssh/${SSH_KEY_NAME}"
 CONFIG_DIR="${DOCKER_MCP_DIR}/config"
 DATA_DIR="${DOCKER_MCP_DIR}/data"
@@ -775,7 +775,7 @@ distribute_keys_parallel() {
         
         # Wait for all background jobs to complete
         for pid in "${pids[@]}"; do
-            wait "$pid"
+            wait "$pid" || true
         done
     fi
     

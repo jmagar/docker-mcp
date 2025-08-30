@@ -15,6 +15,7 @@ logger = structlog.get_logger()
 
 class VolumeParsingError(DockerMCPError):
     """Volume parsing operation failed."""
+
     pass
 
 
@@ -24,13 +25,15 @@ class VolumeParser:
     def __init__(self):
         self.logger = logger.bind(component="volume_parser")
 
-    async def parse_compose_volumes(self, compose_content: str, source_appdata_path: str = None) -> dict[str, Any]:
+    async def parse_compose_volumes(
+        self, compose_content: str, source_appdata_path: str = None
+    ) -> dict[str, Any]:
         """Parse Docker Compose file to extract volume information.
-        
+
         Args:
             compose_content: Docker Compose YAML content
             source_appdata_path: Source host's appdata path from hosts.yml for expanding ${APPDATA_PATH}
-            
+
         Returns:
             Dictionary with volume information:
             - named_volumes: List of named volume names
@@ -75,17 +78,19 @@ class VolumeParser:
             return volumes_info
 
         except yaml.YAMLError as e:
-            raise VolumeParsingError(f"Failed to parse compose file: {e}")
+            raise VolumeParsingError(f"Failed to parse compose file: {e}") from e
         except Exception as e:
-            raise VolumeParsingError(f"Error extracting volumes: {e}")
+            raise VolumeParsingError(f"Error extracting volumes: {e}") from e
 
-    def _collect_service_volumes(self, compose_data: dict[str, Any], source_appdata_path: str = None) -> dict[str, list[str]]:
+    def _collect_service_volumes(
+        self, compose_data: dict[str, Any], source_appdata_path: str = None
+    ) -> dict[str, list[str]]:
         """Collect and categorize volumes from all services.
-        
+
         Args:
             compose_data: Parsed Docker Compose YAML data
             source_appdata_path: Source host's appdata path for variable expansion
-            
+
         Returns:
             Dictionary with 'named' and 'bind' volume lists
         """
@@ -115,7 +120,7 @@ class VolumeParser:
                             service=service_name,
                             volume_name=volume_info["name"],
                             destination=volume_info.get("destination", ""),
-                            original=str(volume)
+                            original=str(volume),
                         )
                     elif volume_info["type"] == "bind":
                         result["bind"].append(volume_info["source"])
@@ -125,7 +130,7 @@ class VolumeParser:
                             service=service_name,
                             source_path=volume_info["source"],
                             destination=volume_info.get("destination", ""),
-                            original=str(volume)
+                            original=str(volume),
                         )
                 else:
                     service_volumes["skipped"] += 1
@@ -133,7 +138,7 @@ class VolumeParser:
                         "Skipped volume entry",
                         service=service_name,
                         volume=str(volume),
-                        reason="Unable to normalize"
+                        reason="Unable to normalize",
                     )
 
             # Log service summary if it has volumes
@@ -144,7 +149,7 @@ class VolumeParser:
                     named_volumes=service_volumes["named"],
                     bind_mounts=service_volumes["bind"],
                     skipped=service_volumes["skipped"],
-                    total=sum(service_volumes.values())
+                    total=sum(service_volumes.values()),
                 )
 
         self.logger.info(
@@ -153,18 +158,20 @@ class VolumeParser:
             services_with_volumes=services_with_volumes,
             volume_entries_processed=volume_entries_processed,
             named_collected=len(result["named"]),
-            bind_collected=len(result["bind"])
+            bind_collected=len(result["bind"]),
         )
 
         return result
 
-    def _normalize_volume_entry(self, volume: Any, source_appdata_path: str = None) -> dict[str, str] | None:
+    def _normalize_volume_entry(
+        self, volume: Any, source_appdata_path: str = None
+    ) -> dict[str, str] | None:
         """Normalize a single volume entry into standard dict structure.
-        
+
         Args:
             volume: Volume entry (string or dict)
             source_appdata_path: Source host's appdata path for variable expansion
-            
+
         Returns:
             Normalized volume dict or None if invalid
         """
@@ -175,23 +182,25 @@ class VolumeParser:
                 return {
                     "type": "named",
                     "name": volume.get("source", ""),
-                    "destination": volume.get("target", "")
+                    "destination": volume.get("target", ""),
                 }
             elif volume.get("type") == "bind":
                 return {
                     "type": "bind",
                     "source": volume.get("source", ""),
-                    "destination": volume.get("target", "")
+                    "destination": volume.get("target", ""),
                 }
         return None
 
-    def _parse_volume_string(self, volume_str: str, source_appdata_path: str = None) -> dict[str, str]:
+    def _parse_volume_string(
+        self, volume_str: str, source_appdata_path: str = None
+    ) -> dict[str, str]:
         """Parse Docker volume string format with environment variable expansion.
-        
+
         Args:
             volume_str: Volume string like "data:/app/data" or "/host/path:/container/path" or "${APPDATA_PATH}/service:/data"
             source_appdata_path: Source host's appdata path from hosts.yml for expanding ${APPDATA_PATH}
-            
+
         Returns:
             Dictionary with volume type and details
         """
@@ -232,11 +241,11 @@ class VolumeParser:
         named_volumes: list[str],
     ) -> dict[str, str]:
         """Get actual filesystem paths for named Docker volumes.
-        
+
         Args:
             ssh_cmd: SSH command parts for remote execution
             named_volumes: List of named volume names
-            
+
         Returns:
             Dictionary mapping volume names to filesystem paths
         """
@@ -244,12 +253,14 @@ class VolumeParser:
 
         for volume_name in named_volumes:
             # Docker volume inspect to get mount point (with shell injection protection)
-            inspect_cmd = f"docker volume inspect {shlex.quote(volume_name)} --format '{{{{.Mountpoint}}}}'"
+            inspect_cmd = (
+                f"docker volume inspect {shlex.quote(volume_name)} --format '{{{{.Mountpoint}}}}'"
+            )
             full_cmd = ssh_cmd + [inspect_cmd]
 
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=full_cmd: subprocess.run(  # nosec B603
+                lambda cmd=full_cmd: subprocess.run(  # noqa: S603
                     cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -279,58 +290,13 @@ class VolumeParser:
         target_appdata_path: str = None,
     ) -> str:
         """Update compose file paths for target host.
-        
+
         Args:
             compose_content: Original compose file content
             old_paths: Mapping of old volume paths
             new_base_path: New base path for volumes on target
             target_appdata_path: Target host's appdata path for environment variable replacement
-            
-        Returns:
-            Updated compose file content
-        """
-        updated_content = compose_content
 
-        # First, replace environment variables with actual target paths
-        if target_appdata_path:
-            updated_content = updated_content.replace("${APPDATA_PATH}", target_appdata_path)
-            self.logger.debug(
-                "Replaced APPDATA_PATH environment variable",
-                target_path=target_appdata_path,
-            )
-
-        # Replace bind mount paths (for any remaining literal paths)
-        for old_path in old_paths.values():
-            if old_path in updated_content:
-                # Extract relative path component
-                path_parts = old_path.split("/")
-                relative_name = path_parts[-1] if path_parts else "data"
-                new_path = f"{new_base_path}/{relative_name}"
-                updated_content = updated_content.replace(old_path, new_path)
-
-                self.logger.debug(
-                    "Updated compose path",
-                    old=old_path,
-                    new=new_path,
-                )
-
-        return updated_content
-
-    def update_compose_for_migration(
-        self,
-        compose_content: str,
-        old_paths: dict[str, str],
-        new_base_path: str,
-        target_appdata_path: str = None,
-    ) -> str:
-        """Update compose file paths for target host.
-        
-        Args:
-            compose_content: Original compose file content
-            old_paths: Mapping of old volume paths
-            new_base_path: New base path for volumes on target
-            target_appdata_path: Target host's appdata path for environment variable replacement
-            
         Returns:
             Updated compose file content
         """

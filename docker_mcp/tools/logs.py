@@ -1,8 +1,10 @@
 """Log streaming MCP tools."""
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
+import docker
 import structlog
 
 from ..core.config_loader import DockerMCPConfig
@@ -41,23 +43,28 @@ class LogTools:
             Container logs
         """
         try:
-            # Build Docker logs command
-            cmd = f"logs --tail {lines}"
+            client = await self.context_manager.get_client(host_id)
+            loop = asyncio.get_event_loop()
 
+            # Get container and retrieve logs using Docker SDK
+            container = await loop.run_in_executor(
+                None, lambda: client.containers.get(container_id)
+            )
+
+            # Build kwargs for logs method
+            logs_kwargs = {
+                "tail": lines,
+                "timestamps": timestamps,
+            }
             if since:
-                cmd += f" --since {since}"
+                logs_kwargs["since"] = since
 
-            if timestamps:
-                cmd += " --timestamps"
+            # Get logs using Docker SDK
+            logs_bytes = await loop.run_in_executor(None, lambda: container.logs(**logs_kwargs))
 
-            cmd += f" {container_id}"
-
-            result = await self.context_manager.execute_docker_command(host_id, cmd)
-
-            # Parse logs
-            logs_data = []
-            if isinstance(result, dict) and "output" in result:
-                logs_data = result["output"].strip().split("\n")
+            # Parse logs (logs_bytes is bytes, need to decode)
+            logs_str = logs_bytes.decode("utf-8", errors="replace")
+            logs_data = logs_str.strip().split("\n") if logs_str.strip() else []
 
             # Create logs response
             logs = ContainerLogs(
@@ -77,6 +84,17 @@ class LogTools:
 
             return logs.model_dump()
 
+        except docker.errors.NotFound:
+            logger.error("Container not found for logs", host_id=host_id, container_id=container_id)
+            return {"error": f"Container {container_id} not found"}
+        except docker.errors.APIError as e:
+            logger.error(
+                "Docker API error getting container logs",
+                host_id=host_id,
+                container_id=container_id,
+                error=str(e),
+            )
+            return {"error": f"Failed to get logs: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container logs",
@@ -251,7 +269,9 @@ class LogTools:
 
         except DockerCommandError as e:
             if "No such container" in str(e):
-                raise DockerCommandError(f"Container {container_id} not found on host {host_id}") from e
+                raise DockerCommandError(
+                    f"Container {container_id} not found on host {host_id}"
+                ) from e
             raise
 
     async def _stream_logs_generator(self, stream_config: LogStreamRequest):

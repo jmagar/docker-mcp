@@ -1,0 +1,352 @@
+---
+- name: Docker MCP Health Check
+  hosts: "{{ target_hosts | default('enabled_hosts') }}"
+  gather_facts: yes
+  vars:
+    detailed_check: "{{ detailed | default(false) }}"
+    alert_thresholds:
+      disk_usage_warning: 80
+      disk_usage_critical: 90
+      memory_warning: 85
+      memory_critical: 95
+      container_restart_threshold: 5
+    
+  tasks:
+    # Basic connectivity and service availability
+    - name: Test SSH connectivity
+      ansible.builtin.wait_for_connection:
+        timeout: 10
+      register: ssh_connectivity
+      
+    - name: Check Docker daemon status
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+      register: docker_service
+      failed_when: false
+      
+    - name: Get Docker version and info
+      ansible.builtin.command: docker version --format '{{.Server.Version}}'
+      register: docker_version
+      failed_when: false
+      changed_when: false
+      
+    - name: Get Docker system info
+      ansible.builtin.command: docker system info --format json
+      register: docker_info
+      failed_when: false
+      changed_when: false
+      
+    # Container health assessment
+    - name: List all containers
+      ansible.builtin.command: docker ps -a --format '{{.Names}}:{{.Status}}:{{.Image}}'
+      register: all_containers
+      changed_when: false
+      
+    - name: Get unhealthy containers
+      ansible.builtin.shell: |
+        docker ps --filter health=unhealthy --format '{{.Names}}:{{.Status}}'
+      register: unhealthy_containers
+      changed_when: false
+      
+    - name: Get recently restarted containers
+      ansible.builtin.shell: |
+        docker ps --format '{{.Names}}:{{.Status}}' | grep -E '(Restarting|seconds?|minute?)' || true
+      register: restarted_containers
+      changed_when: false
+      
+    # Resource utilization checks
+    - name: Check disk usage
+      ansible.builtin.shell: df -h / | awk 'NR==2 {print $5}' | sed 's/%//'
+      register: disk_usage_percent
+      changed_when: false
+      
+    - name: Check memory usage
+      ansible.builtin.shell: free | grep Mem | awk '{printf "%.0f", ($3/$2) * 100.0}'
+      register: memory_usage_percent
+      changed_when: false
+      
+    - name: Get Docker disk usage
+      ansible.builtin.command: docker system df --format json
+      register: docker_disk_usage
+      failed_when: false
+      changed_when: false
+      
+    # Docker-specific health metrics
+    - name: Count containers by status
+      ansible.builtin.shell: |
+        echo "running:$(docker ps --filter status=running -q | wc -l)"
+        echo "exited:$(docker ps --filter status=exited -q | wc -l)"
+        echo "paused:$(docker ps --filter status=paused -q | wc -l)"
+      register: container_counts
+      changed_when: false
+      
+    - name: Check for failed services
+      ansible.builtin.shell: |
+        docker ps --filter status=exited --filter exit=1 --format '{{.Names}}:{{.Status}}' | head -10
+      register: failed_services
+      changed_when: false
+      
+    # Network connectivity tests (detailed mode)
+    - name: Test container network connectivity
+      ansible.builtin.shell: |
+        docker network ls --format '{{.Name}}:{{.Driver}}:{{.Scope}}'
+      register: docker_networks
+      changed_when: false
+      when: detailed_check
+      
+    - name: Check Docker registry connectivity
+      ansible.builtin.uri:
+        url: https://registry-1.docker.io/v2/
+        method: GET
+        status_code: [200, 401]  # 401 is expected for unauthenticated requests
+      register: registry_check
+      failed_when: false
+      when: detailed_check
+      
+    # Log analysis (detailed mode)
+    - name: Check Docker daemon logs for errors
+      ansible.builtin.shell: |
+        journalctl -u docker.service --since "1 hour ago" --no-pager | grep -i error | tail -5 || echo "No errors found"
+      register: docker_logs
+      changed_when: false
+      when: detailed_check
+      
+    - name: Get container logs for unhealthy services
+      ansible.builtin.shell: |
+        docker logs {{ item.split(':')[0] }} --tail 10 2>&1 || echo "Failed to get logs for {{ item.split(':')[0] }}"
+      register: unhealthy_logs
+      loop: "{{ unhealthy_containers.stdout_lines }}"
+      when: unhealthy_containers.stdout_lines | length > 0 and detailed_check
+      changed_when: false
+      
+    # Performance metrics (detailed mode)
+    - name: Get container resource usage
+      ansible.builtin.shell: |
+        docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}'
+      register: container_stats
+      when: detailed_check
+      changed_when: false
+      
+    # Health status assessment
+    - name: Assess overall health status
+      ansible.builtin.set_fact:
+        health_status:
+          overall: |
+            {% set issues = [] %}
+            {% if ssh_connectivity is failed %}
+            {% set _ = issues.append('SSH connectivity failed') %}
+            {% endif %}
+            {% if docker_service.state != 'started' %}
+            {% set _ = issues.append('Docker service not running') %}
+            {% endif %}
+            {% if disk_usage_percent.stdout | int > alert_thresholds.disk_usage_critical %}
+            {% set _ = issues.append('Critical disk usage') %}
+            {% elif disk_usage_percent.stdout | int > alert_thresholds.disk_usage_warning %}
+            {% set _ = issues.append('High disk usage') %}
+            {% endif %}
+            {% if memory_usage_percent.stdout | int > alert_thresholds.memory_critical %}
+            {% set _ = issues.append('Critical memory usage') %}
+            {% elif memory_usage_percent.stdout | int > alert_thresholds.memory_warning %}
+            {% set _ = issues.append('High memory usage') %}
+            {% endif %}
+            {% if unhealthy_containers.stdout_lines | length > 0 %}
+            {% set _ = issues.append('Unhealthy containers detected') %}
+            {% endif %}
+            {% if failed_services.stdout_lines | length > 0 %}
+            {% set _ = issues.append('Failed services detected') %}
+            {% endif %}
+            {{ 'CRITICAL' if issues | select('match', '.*Critical.*') | list | length > 0 else ('WARNING' if issues | length > 0 else 'HEALTHY') }}
+          connectivity: "{{ 'OK' if ssh_connectivity is succeeded else 'FAILED' }}"
+          docker_service: "{{ 'OK' if docker_service.state == 'started' else 'FAILED' }}"
+          docker_version: "{{ docker_version.stdout if docker_version.rc == 0 else 'UNKNOWN' }}"
+          disk_usage: "{{ disk_usage_percent.stdout }}%"
+          memory_usage: "{{ memory_usage_percent.stdout }}%"
+          containers:
+            total: "{{ all_containers.stdout_lines | length }}"
+            running: "{{ container_counts.stdout_lines | select('match', '^running:.*') | first | regex_replace('^running:', '') }}"
+            exited: "{{ container_counts.stdout_lines | select('match', '^exited:.*') | first | regex_replace('^exited:', '') }}"
+            unhealthy: "{{ unhealthy_containers.stdout_lines | length }}"
+            failed: "{{ failed_services.stdout_lines | length }}"
+          issues: |
+            {% set issues = [] %}
+            {% if ssh_connectivity is failed %}
+            {% set _ = issues.append('SSH connectivity failed') %}
+            {% endif %}
+            {% if docker_service.state != 'started' %}
+            {% set _ = issues.append('Docker service not running') %}
+            {% endif %}
+            {% if disk_usage_percent.stdout | int > alert_thresholds.disk_usage_warning %}
+            {% set _ = issues.append('Disk usage: ' + disk_usage_percent.stdout + '%') %}
+            {% endif %}
+            {% if memory_usage_percent.stdout | int > alert_thresholds.memory_warning %}
+            {% set _ = issues.append('Memory usage: ' + memory_usage_percent.stdout + '%') %}
+            {% endif %}
+            {% if unhealthy_containers.stdout_lines | length > 0 %}
+            {% set _ = issues.append('Unhealthy containers: ' + (unhealthy_containers.stdout_lines | length | string)) %}
+            {% endif %}
+            {% if failed_services.stdout_lines | length > 0 %}
+            {% set _ = issues.append('Failed services: ' + (failed_services.stdout_lines | length | string)) %}
+            {% endif %}
+            {{ issues | join(', ') if issues else 'None detected' }}
+          
+    # Display health report
+    - name: Display health report
+      ansible.builtin.debug:
+        msg: |
+          
+          Docker MCP Health Report - {{ inventory_hostname }}
+          =====================================================
+          
+          Overall Status: {{ health_status.overall }}
+          Timestamp: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          
+          System Health:
+          - SSH Connectivity: {{ health_status.connectivity }}
+          - Docker Service: {{ health_status.docker_service }}
+          - Docker Version: {{ health_status.docker_version }}
+          - Disk Usage: {{ health_status.disk_usage }} (Warning: >{{ alert_thresholds.disk_usage_warning }}%, Critical: >{{ alert_thresholds.disk_usage_critical }}%)
+          - Memory Usage: {{ health_status.memory_usage }} (Warning: >{{ alert_thresholds.memory_warning }}%, Critical: >{{ alert_thresholds.memory_critical }}%)
+          
+          Container Status:
+          - Total Containers: {{ health_status.containers.total }}
+          - Running: {{ health_status.containers.running }}
+          - Exited: {{ health_status.containers.exited }}
+          - Unhealthy: {{ health_status.containers.unhealthy }}
+          - Failed: {{ health_status.containers.failed }}
+          
+          {% if health_status.issues != 'None detected' %}
+          Issues Found:
+          {{ health_status.issues }}
+          {% endif %}
+          
+          {% if unhealthy_containers.stdout_lines | length > 0 %}
+          Unhealthy Containers:
+          {% for container in unhealthy_containers.stdout_lines %}
+          - {{ container }}
+          {% endfor %}
+          {% endif %}
+          
+          {% if failed_services.stdout_lines | length > 0 %}
+          Failed Services:
+          {% for service in failed_services.stdout_lines %}
+          - {{ service }}
+          {% endfor %}
+          {% endif %}
+          
+          {% if detailed_check %}
+          
+          === DETAILED METRICS ===
+          
+          Docker Networks: {{ docker_networks.stdout_lines | length }}
+          Registry Connectivity: {{ 'OK' if registry_check.status == 200 or registry_check.status == 401 else 'FAILED' }}
+          
+          {% if docker_logs.stdout != 'No errors found' %}
+          Recent Docker Errors:
+          {{ docker_logs.stdout }}
+          {% endif %}
+          
+          {% if container_stats is defined %}
+          Container Resource Usage:
+          {{ container_stats.stdout }}
+          {% endif %}
+          {% endif %}
+      
+    # Generate alerts for critical issues
+    - name: Generate critical alerts
+      ansible.builtin.debug:
+        msg: |
+          🚨 CRITICAL ALERT for {{ inventory_hostname }}:
+          {{ health_status.issues }}
+      when: health_status.overall == 'CRITICAL'
+      
+    - name: Generate warning alerts  
+      ansible.builtin.debug:
+        msg: |
+          ⚠️  WARNING for {{ inventory_hostname }}:
+          {{ health_status.issues }}
+      when: health_status.overall == 'WARNING'
+
+# Summary report across all hosts
+- name: Health Check Summary
+  hosts: localhost
+  gather_facts: no
+  run_once: true
+  tasks:
+    - name: Collect health statuses from all hosts
+      ansible.builtin.set_fact:
+        all_health_status: |
+          {% set results = [] %}
+          {% for host in ansible_play_hosts %}
+          {% if hostvars[host]['health_status'] is defined %}
+          {% set _ = results.append({
+            'host': host,
+            'status': hostvars[host]['health_status']['overall'],
+            'issues': hostvars[host]['health_status']['issues'],
+            'containers_total': hostvars[host]['health_status']['containers']['total'],
+            'containers_running': hostvars[host]['health_status']['containers']['running'],
+            'disk_usage': hostvars[host]['health_status']['disk_usage'],
+            'memory_usage': hostvars[host]['health_status']['memory_usage']
+          }) %}
+          {% endif %}
+          {% endfor %}
+          {{ results }}
+    
+    - name: Display overall health summary
+      ansible.builtin.debug:
+        msg: |
+          
+          =====================================
+          Docker MCP Fleet Health Summary
+          =====================================
+          
+          {% set healthy = all_health_status | selectattr('status', 'equalto', 'HEALTHY') | list %}
+          {% set warnings = all_health_status | selectattr('status', 'equalto', 'WARNING') | list %}
+          {% set critical = all_health_status | selectattr('status', 'equalto', 'CRITICAL') | list %}
+          {% set total_containers = all_health_status | sum(attribute='containers_total') %}
+          {% set running_containers = all_health_status | sum(attribute='containers_running') %}
+          
+          Fleet Status:
+          - Total Hosts: {{ all_health_status | length }}
+          - Healthy: {{ healthy | length }}
+          - Warning: {{ warnings | length }}
+          - Critical: {{ critical | length }}
+          
+          Container Summary:
+          - Total Containers: {{ total_containers }}
+          - Running Containers: {{ running_containers }}
+          - Success Rate: {{ ((running_containers / total_containers) * 100) | round(1) if total_containers > 0 else 'N/A' }}%
+          
+          {% if critical | length > 0 %}
+          🚨 CRITICAL HOSTS:
+          {% for host in critical %}
+          - {{ host.host }}: {{ host.issues }}
+          {% endfor %}
+          {% endif %}
+          
+          {% if warnings | length > 0 %}
+          ⚠️  WARNING HOSTS:
+          {% for host in warnings %}
+          - {{ host.host }}: {{ host.issues }}
+          {% endfor %}
+          {% endif %}
+          
+          Host Details:
+          {% for host in all_health_status %}
+          - {{ host.host }}: {{ host.status }} | Containers: {{ host.containers_running }}/{{ host.containers_total }} | Disk: {{ host.disk_usage }} | Memory: {{ host.memory_usage }}
+          {% endfor %}
+          
+          Recommended Actions:
+          {% if critical | length > 0 %}
+          1. 🚨 Address critical issues immediately
+          {% endif %}
+          {% if warnings | length > 0 %}
+          2. ⚠️  Investigate warning conditions
+          {% endif %}
+          3. Schedule regular health checks
+          4. Monitor resource trends
+          
+          Commands:
+          - Detailed check: ansible-playbook health-check.yml -e detailed=true
+          - Specific hosts: ansible-playbook health-check.yml -e target_hosts=host1,host2
+          - Cleanup: ansible-playbook docker-cleanup.yml -e cleanup_level=safe

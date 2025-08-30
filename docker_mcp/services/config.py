@@ -14,6 +14,7 @@ from ..core.compose_manager import ComposeManager
 from ..core.config_loader import DockerMCPConfig, save_config
 from ..core.docker_context import DockerContextManager
 from ..core.ssh_config_parser import SSHConfigParser
+from ..utils import validate_host
 
 
 class ConfigService:
@@ -25,16 +26,10 @@ class ConfigService:
         self.compose_manager = ComposeManager(config, context_manager)
         self.logger = structlog.get_logger()
 
-    def _validate_host(self, host_id: str) -> tuple[bool, str]:
-        """Validate host exists in configuration."""
-        if host_id not in self.config.hosts:
-            return False, f"Host '{host_id}' not found"
-        return True, ""
-
     async def update_host_config(self, host_id: str, compose_path: str) -> ToolResult:
         """Update host configuration with compose file path."""
         try:
-            is_valid, error_msg = self._validate_host(host_id)
+            is_valid, error_msg = validate_host(self.config, host_id)
             if not is_valid:
                 return ToolResult(
                     content=[TextContent(type="text", text=f"Error: {error_msg}")],
@@ -87,7 +82,7 @@ class ConfigService:
             hosts_to_check = [host_id] if host_id else list(self.config.hosts.keys())
 
             if host_id:
-                is_valid, error_msg = self._validate_host(host_id)
+                is_valid, error_msg = validate_host(self.config, host_id)
                 if not is_valid:
                     return ToolResult(
                         content=[TextContent(type="text", text=f"Error: {error_msg}")],
@@ -193,7 +188,9 @@ class ConfigService:
         # Generate recommendation
         suggested_path = result["suggested_path"]
         if suggested_path:
-            self._add_recommendation(lines, recommendations, host_id, current_path, suggested_path, result)
+            self._add_recommendation(
+                lines, recommendations, host_id, current_path, suggested_path, result
+            )
 
         lines.append("")
         return lines
@@ -212,20 +209,24 @@ class ConfigService:
             lines.append("✅ Current configuration matches discovery results")
         elif current_path:
             lines.append(f"💡 Recommendation: Consider changing to {suggested_path}")
-            recommendations.append({
-                "host_id": host_id,
-                "current_path": current_path,
-                "suggested_path": suggested_path,
-                "reason": result["analysis"],
-            })
+            recommendations.append(
+                {
+                    "host_id": host_id,
+                    "current_path": current_path,
+                    "suggested_path": suggested_path,
+                    "reason": result["analysis"],
+                }
+            )
         else:
             lines.append(f"💡 Recommendation: Set compose_path to {suggested_path}")
-            recommendations.append({
-                "host_id": host_id,
-                "current_path": None,
-                "suggested_path": suggested_path,
-                "reason": result["analysis"],
-            })
+            recommendations.append(
+                {
+                    "host_id": host_id,
+                    "current_path": None,
+                    "suggested_path": suggested_path,
+                    "reason": result["analysis"],
+                }
+            )
 
     def _format_recommendations(self, recommendations: list[dict[str, Any]]) -> list[str]:
         """Format configuration recommendations."""
@@ -246,14 +247,16 @@ class ConfigService:
             )
             lines.append("")
 
-        lines.extend([
-            "Note: Each stack will be stored in its own subdirectory:",
-            "  {compose_path}/{stack_name}/docker-compose.yml",
-            "",
-            "Example: If compose_path is '/mnt/user/compose' and you deploy",
-            "a stack named 'myapp', it will be stored at:",
-            "  /mnt/user/compose/myapp/docker-compose.yml",
-        ])
+        lines.extend(
+            [
+                "Note: Each stack will be stored in its own subdirectory:",
+                "  {compose_path}/{stack_name}/docker-compose.yml",
+                "",
+                "Example: If compose_path is '/mnt/user/compose' and you deploy",
+                "a stack named 'myapp', it will be stored at:",
+                "  /mnt/user/compose/myapp/docker-compose.yml",
+            ]
+        )
 
         return lines
 
@@ -272,7 +275,9 @@ class ConfigService:
             is_valid, status_message = ssh_parser.validate_config_file()
             if not is_valid:
                 return ToolResult(
-                    content=[TextContent(type="text", text=f"❌ SSH Config Error: {status_message}")],
+                    content=[
+                        TextContent(type="text", text=f"❌ SSH Config Error: {status_message}")
+                    ],
                     structured_content={"success": False, "error": status_message},
                 )
 
@@ -280,7 +285,9 @@ class ConfigService:
             importable_hosts = ssh_parser.get_importable_hosts()
             if not importable_hosts:
                 return ToolResult(
-                    content=[TextContent(type="text", text="❌ No importable hosts found in SSH config")],
+                    content=[
+                        TextContent(type="text", text="❌ No importable hosts found in SSH config")
+                    ],
                     structured_content={"success": False, "error": "No importable hosts found"},
                 )
 
@@ -300,7 +307,12 @@ class ConfigService:
 
             if not imported_hosts:
                 return ToolResult(
-                    content=[TextContent(type="text", text="❌ No new hosts to import (all selected hosts already exist)")],
+                    content=[
+                        TextContent(
+                            type="text",
+                            text="❌ No new hosts to import (all selected hosts already exist)",
+                        )
+                    ],
                     structured_content={"success": False, "error": "No new hosts to import"},
                 )
 
@@ -355,14 +367,16 @@ class ConfigService:
                 summary_lines.append(f"      → Key: {entry.identity_file}")
             summary_lines.append("")
 
-        summary_lines.extend([
-            "To import specific hosts, use:",
-            '  import_ssh_config(selected_hosts="1,3,5")  # Import hosts 1, 3, and 5',
-            '  import_ssh_config(selected_hosts="all")     # Import all hosts',
-            "",
-            "To import all hosts:",
-            '  import_ssh_config(selected_hosts="all")',
-        ])
+        summary_lines.extend(
+            [
+                "To import specific hosts, use:",
+                '  import_ssh_config(selected_hosts="1,3,5")  # Import hosts 1, 3, and 5',
+                '  import_ssh_config(selected_hosts="all")     # Import all hosts',
+                "",
+                "To import all hosts:",
+                '  import_ssh_config(selected_hosts="all")',
+            ]
+        )
 
         return ToolResult(
             content=[TextContent(type="text", text="\n".join(summary_lines))],
@@ -382,7 +396,9 @@ class ConfigService:
             },
         )
 
-    def _parse_host_selection(self, selected_hosts: str, importable_hosts: list) -> list | ToolResult:
+    def _parse_host_selection(
+        self, selected_hosts: str, importable_hosts: list
+    ) -> list | ToolResult:
         """Parse host selection string and return hosts to import."""
         if selected_hosts.lower() == "all":
             return importable_hosts
@@ -395,13 +411,26 @@ class ConfigService:
                     hosts_to_import.append(importable_hosts[idx - 1])
                 else:
                     return ToolResult(
-                        content=[TextContent(type="text", text=f"❌ Invalid host index: {idx}. Valid range: 1-{len(importable_hosts)}")],
-                        structured_content={"success": False, "error": f"Invalid host index: {idx}"},
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=f"❌ Invalid host index: {idx}. Valid range: 1-{len(importable_hosts)}",
+                            )
+                        ],
+                        structured_content={
+                            "success": False,
+                            "error": f"Invalid host index: {idx}",
+                        },
                     )
             return hosts_to_import
         except ValueError:
             return ToolResult(
-                content=[TextContent(type="text", text="❌ Invalid selection format. Use comma-separated numbers or 'all'")],
+                content=[
+                    TextContent(
+                        type="text",
+                        text="❌ Invalid selection format. Use comma-separated numbers or 'all'",
+                    )
+                ],
                 structured_content={"success": False, "error": "Invalid selection format"},
             )
 
@@ -433,21 +462,25 @@ class ConfigService:
             # Set compose path if discovered or provided
             if compose_path:
                 docker_host.compose_path = compose_path
-                compose_path_configs.append({
-                    "host_id": host_id,
-                    "compose_path": compose_path,
-                    "discovered": True,
-                })
+                compose_path_configs.append(
+                    {
+                        "host_id": host_id,
+                        "compose_path": compose_path,
+                        "discovered": True,
+                    }
+                )
 
             # Update the host in configuration
             self.config.hosts[host_id] = docker_host
-            imported_hosts.append({
-                "host_id": host_id,
-                "hostname": docker_host.hostname,
-                "user": docker_host.user,
-                "port": docker_host.port,
-                "compose_path": docker_host.compose_path,
-            })
+            imported_hosts.append(
+                {
+                    "host_id": host_id,
+                    "hostname": docker_host.hostname,
+                    "user": docker_host.user,
+                    "port": docker_host.port,
+                    "compose_path": docker_host.compose_path,
+                }
+            )
 
         return imported_hosts, compose_path_configs
 
@@ -494,14 +527,14 @@ class ConfigService:
             summary_lines.extend(["Compose Path Configuration:", "─" * 28])
             for config in compose_path_configs:
                 source = "discovered" if config["discovered"] else "manually set"
-                summary_lines.append(
-                    f"• {config['host_id']}: {config['compose_path']} ({source})"
-                )
+                summary_lines.append(f"• {config['host_id']}: {config['compose_path']} ({source})")
             summary_lines.append("")
 
-        summary_lines.extend([
-            "Configuration saved to hosts.yml and hot-reloaded.",
-            "You can now use these hosts with deploy_stack and other tools.",
-        ])
+        summary_lines.extend(
+            [
+                "Configuration saved to hosts.yml and hot-reloaded.",
+                "You can now use these hosts with deploy_stack and other tools.",
+            ]
+        )
 
         return summary_lines
