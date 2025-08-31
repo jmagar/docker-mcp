@@ -35,14 +35,18 @@ That's it! The installer:
 ## 🛠 The 3 Tools
 
 ### Tool 1: `docker_hosts`
-Manage your Docker hosts and connectivity.
+Simplified Docker hosts management tool.
 
 **Actions:**
 - `list` - List all configured Docker hosts
-- `add` - Add a new Docker host
-- `ports` - List port mappings for a host
-- `compose_path` - Update host compose path
-- `import_ssh` - Import hosts from SSH config
+- `add` - Add a new Docker host (auto-runs test_connection and discover)
+- `ports` - List or check port usage on a host
+- `import_ssh` - Import hosts from SSH config (auto-runs test_connection and discover for each)
+- `cleanup` - Docker system cleanup with integrated schedule management
+- `test_connection` - Test host connectivity (also runs discover)
+- `discover` - Discover paths and capabilities on hosts
+- `edit` - Modify host configuration
+- `remove` - Remove host from configuration
 
 **Schema for `add` action:**
 ```json
@@ -55,20 +59,40 @@ Manage your Docker hosts and connectivity.
   "ssh_key_path": "~/.ssh/id_ed25519", // Optional: SSH key path
   "description": "Production server",   // Optional: description
   "tags": ["production", "web"],       // Optional: tags for filtering
-  "compose_path": "/opt/compose"       // Optional: compose file path
+  "enabled": true                      // Optional: default true
+}
+```
+
+**Schema for `cleanup` action:**
+```json
+{
+  "action": "cleanup",
+  "host_id": "production-1",        // Required: target host
+  "cleanup_type": "safe",           // Required: "check"|"safe"|"moderate"|"aggressive"
+  "frequency": "daily",             // Optional: "daily"|"weekly"|"monthly"|"custom"
+  "time": "02:00"                   // Optional: HH:MM format (24-hour)
+}
+```
+
+**Schema for `discover` action:**
+```json
+{
+  "action": "discover",
+  "host_id": "production-1"         // Required: host to discover (or "all" for all hosts)
 }
 ```
 
 ### Tool 2: `docker_container`
-Control containers across all your hosts.
+Consolidated Docker container management tool.
 
 **Actions:**
 - `list` - List containers on a host
-- `info` - Get detailed container information
-- `start` / `stop` / `restart` - Container lifecycle
-- `logs` - View or stream container logs
-- `pull` - Pull Docker images
-- `build` - Build containers from Dockerfile
+- `info` - Get container information
+- `start` - Start a container
+- `stop` - Stop a container
+- `restart` - Restart a container
+- `build` - Build/rebuild a container
+- `logs` - Get container logs
 
 **Schema for `list` action:**
 ```json
@@ -84,25 +108,38 @@ Control containers across all your hosts.
 **Schema for lifecycle actions:**
 ```json
 {
-  "action": "start",             // Or "stop", "restart"
+  "action": "start",             // Or "stop", "restart", "build"
   "host_id": "production-1",     // Required: target host
   "container_id": "nginx-web",   // Required: container name or ID
-  "force": false,                // Optional: force stop
+  "force": false,                // Optional: force the operation
   "timeout": 10                  // Optional: timeout in seconds
 }
 ```
 
+**Schema for `logs` action:**
+```json
+{
+  "action": "logs",
+  "host_id": "production-1",     // Required: target host
+  "container_id": "nginx-web",   // Required: container name or ID
+  "follow": false,               // Optional: follow log output
+  "lines": 100                   // Optional: number of log lines to retrieve
+}
+```
+
 ### Tool 3: `docker_compose`
-Deploy and manage Docker Compose stacks.
+Consolidated Docker Compose stack management tool.
 
 **Actions:**
-- `deploy` - Deploy a new stack
-- `list` - List all stacks on a host
-- `up` / `down` / `restart` - Stack lifecycle
-- `logs` - View stack logs
-- `build` / `pull` - Build or update images
-- `discover` - Find compose files on host
-- `migrate` - Migrate stack between hosts with data
+- `list` - List stacks on a host
+- `deploy` - Deploy a stack
+- `up` - Manage stack lifecycle (bring up)
+- `down` - Manage stack lifecycle (bring down)
+- `restart` - Manage stack lifecycle (restart)
+- `build` - Manage stack lifecycle (build)
+- `discover` - Discover compose paths on a host
+- `logs` - Get stack logs
+- `migrate` - Migrate stack between hosts
 
 **Schema for `deploy` action:**
 ```json
@@ -119,14 +156,26 @@ Deploy and manage Docker Compose stacks.
 }
 ```
 
+**Schema for lifecycle actions:**
+```json
+{
+  "action": "up",                   // Or "down", "restart", "build"
+  "host_id": "production-1",        // Required: target host
+  "stack_name": "wordpress",        // Required: stack name
+  "options": {                      // Optional: additional options
+    "force_recreate": false
+  }
+}
+```
+
 **Schema for `logs` action:**
 ```json
 {
   "action": "logs",
   "host_id": "production-1",        // Required: target host
   "stack_name": "wordpress",        // Required: stack name
-  "lines": 100,                     // Optional: number of lines
-  "follow": false                   // Optional: stream logs
+  "follow": false,                  // Optional: follow log output
+  "lines": 100                      // Optional: number of log lines to retrieve
 }
 ```
 
@@ -135,12 +184,12 @@ Deploy and manage Docker Compose stacks.
 {
   "action": "migrate",
   "host_id": "production-1",        // Required: source host
-  "target_host_id": "production-2",  // Required: destination host
+  "target_host_id": "production-2", // Required: destination host
   "stack_name": "wordpress",        // Required: stack to migrate
-  "skip_stop_source": false,        // Optional: DANGEROUS - skip stopping (default: false, always stops)
-  "start_target": true,             // Optional: start on target after
-  "remove_source": false,           // Optional: remove from source
-  "dry_run": false                  // Optional: test without changes
+  "remove_source": false,           // Optional: remove source stack after migration
+  "skip_stop_source": false,        // Optional: skip stopping source stack before migration
+  "start_target": true,             // Optional: start target stack after migration
+  "dry_run": false                  // Optional: perform a dry run without making changes
 }
 ```
 
