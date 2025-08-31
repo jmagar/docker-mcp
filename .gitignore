@@ -92,3 +92,8 @@ tmp/
 
 # Tests (exclude from git tracking)
 tests/
+
+# Test documentation files
+DOCKER_MCP_COMPREHENSIVE_TEST_PLAN.md
+DOCKER_MCP_TEST_RESULTS.md
+*TEST*.md
