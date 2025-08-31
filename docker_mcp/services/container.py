@@ -712,13 +712,13 @@ class ContainerService:
 
     async def handle_action(self, action, **params) -> dict[str, Any]:
         """Unified action handler for all container operations.
-        
+
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
         try:
             # Import dependencies for this handler
             from ..models.enums import ContainerAction
-            
+
             # Extract common parameters
             host_id = params.get("host_id", "")
             container_id = params.get("container_id", "")
@@ -813,6 +813,7 @@ class ContainerService:
                 # For now, delegate to tools layer
                 try:
                     from ..tools.logs import LogTools
+
                     log_tools = LogTools(self.config, self.context_manager)
                     logs_result = await log_tools.get_container_logs(
                         host_id=host_id,
@@ -879,7 +880,16 @@ class ContainerService:
                 return {
                     "success": False,
                     "error": f"Unknown action: {action}",
-                    "valid_actions": ["list", "info", "start", "stop", "restart", "build", "logs", "pull"],
+                    "valid_actions": [
+                        "list",
+                        "info",
+                        "start",
+                        "stop",
+                        "restart",
+                        "build",
+                        "logs",
+                        "pull",
+                    ],
                 }
 
         except Exception as e:

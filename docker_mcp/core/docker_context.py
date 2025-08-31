@@ -19,6 +19,47 @@ from .exceptions import DockerContextError
 logger = structlog.get_logger()
 
 
+def _normalize_hostname(hostname: str) -> str:
+    """Normalize hostname for SSH connections to handle case sensitivity issues.
+
+    SSH known_hosts files are case-sensitive, but hostnames should be treated
+    case-insensitively for better compatibility.
+
+    Args:
+        hostname: The hostname to normalize
+
+    Returns:
+        Normalized hostname (lowercase)
+    """
+    return hostname.lower().strip()
+
+
+def _build_ssh_url_with_fallback(host_config: DockerHost) -> list[tuple[str, str]]:
+    """Build SSH URLs with fallback options for known_hosts compatibility.
+
+    Returns a list of (ssh_url, description) tuples to try in order.
+    """
+    base_user_host = f"{host_config.user}@{host_config.hostname}"
+    normalized_host = f"{host_config.user}@{_normalize_hostname(host_config.hostname)}"
+
+    port_suffix = f":{host_config.port}" if host_config.port != 22 else ""
+
+    urls = []
+
+    # Try original hostname first
+    original_url = f"ssh://{base_user_host}{port_suffix}"
+    urls.append((original_url, f"original hostname ({host_config.hostname})"))
+
+    # Try normalized hostname if different from original
+    if _normalize_hostname(host_config.hostname) != host_config.hostname:
+        normalized_url = f"ssh://{normalized_host}{port_suffix}"
+        urls.append(
+            (normalized_url, f"normalized hostname ({_normalize_hostname(host_config.hostname)})")
+        )
+
+    return urls
+
+
 class DockerContextManager:
     """Manages Docker contexts for SSH connections."""
 
@@ -293,53 +334,53 @@ class DockerContextManager:
             if host_id not in self.config.hosts:
                 raise DockerContextError(f"Host {host_id} not configured")
 
-            # Ensure context exists
-            context_name = await self.ensure_context(host_id)
+            # Ensure context exists (for potential fallback use)
+            await self.ensure_context(host_id)
 
-            # Create Docker SDK client with paramiko SSH support
+            # Create Docker SDK client with paramiko SSH support and hostname fallback
             host_config = self.config.hosts[host_id]
-            ssh_url = f"ssh://{host_config.user}@{host_config.hostname}"
-            if host_config.port != 22:
-                ssh_url += f":{host_config.port}"
+            ssh_urls = _build_ssh_url_with_fallback(host_config)
 
-            # Create client with SSH connection using paramiko
-            try:
-                # Docker SDK with use_ssh_client=False uses paramiko directly for SSH connections.
-                # This is faster and more reliable than use_ssh_client=True which shells out
-                # to the system SSH command and can have timeout issues.
-                client = docker.DockerClient(base_url=ssh_url, use_ssh_client=False, timeout=10)
-                # Test the connection
-                client.ping()
-
-                # Cache the working client
-                self._client_cache[host_id] = client
-
-                logger.debug(f"Created Docker SDK client for host {host_id}")
-                return client
-
-            except Exception as e:
-                logger.warning(f"Failed to create Docker SDK client for {host_id}: {e}")
-                # Try fallback with context
+            # Try each SSH URL variant
+            for ssh_url, description in ssh_urls:
                 try:
-                    # Use docker context with environment
-                    import os
-
-                    env = os.environ.copy()
-                    env["DOCKER_CONTEXT"] = context_name
-
-                    # This creates a client that will use the context
-                    client = docker.from_env(environment=env, timeout=10)
+                    # Docker SDK with use_ssh_client=False uses paramiko directly for SSH connections.
+                    # This is faster and more reliable than use_ssh_client=True which shells out
+                    # to the system SSH command and can have timeout issues.
+                    client = docker.DockerClient(base_url=ssh_url, use_ssh_client=False, timeout=10)
+                    # Test the connection to ensure it's actually connected to the remote host
                     client.ping()
 
+                    # Validate we're connected to the right host by checking version endpoint
+                    version_info = client.version()
+                    if not version_info:
+                        raise Exception(
+                            "Unable to retrieve Docker version - connection may be invalid"
+                        )
+
+                    # Cache the working client
                     self._client_cache[host_id] = client
-                    logger.debug(f"Created Docker SDK client using context for host {host_id}")
+
+                    if description != f"original hostname ({host_config.hostname})":
+                        logger.info(
+                            f"Connected to {host_id} using {description} (hostname case fallback)"
+                        )
+                    else:
+                        logger.debug(f"Created Docker SDK client for host {host_id}")
                     return client
 
-                except Exception as context_e:
-                    logger.error(
-                        f"Failed to create Docker client with context for {host_id}: {context_e}"
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to create Docker SDK client for {host_id} with {description}: {e}"
                     )
-                    return None
+                    continue
+
+            # If all direct SSH attempts failed, log final error but don't try docker.from_env()
+            # as that would create a localhost client which causes confusion
+            logger.warning(
+                f"Failed to create Docker SDK client for {host_id}: all SSH connection attempts failed"
+            )
+            return None
 
         except Exception as e:
             logger.error(f"Error getting Docker client for {host_id}: {e}")

@@ -327,7 +327,9 @@ class ZFSTransfer(BaseTransfer):
             try:
                 await self.cleanup_snapshot(source_host, f"{source_dataset}@{snapshot_name}")
             except Exception as cleanup_err:
-                self.logger.warning("Cleanup snapshot failed during error handling", error=str(cleanup_err))
+                self.logger.warning(
+                    "Cleanup snapshot failed during error handling", error=str(cleanup_err)
+                )
 
             raise ZFSError(f"ZFS transfer failed: {str(e)}") from e
 

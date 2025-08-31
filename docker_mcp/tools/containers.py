@@ -251,7 +251,7 @@ class ContainerTools:
             }
 
     async def stop_container(
-        self, host_id: str, container_id: str, timeout: int = 10
+        self, host_id: str, container_id: str, timeout: int = 30
     ) -> dict[str, Any]:
         """Stop a container on a Docker host.
 
@@ -306,6 +306,24 @@ class ContainerTools:
                 "container_id": container_id,
                 "host_id": host_id,
                 "error": str(e),
+                "timestamp": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            # Catch network/timeout errors like "fetch failed"
+            logger.error(
+                "Unexpected error stopping container",
+                host_id=host_id,
+                container_id=container_id,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
+            return {
+                "success": False,
+                "message": f"Network or timeout error stopping container {container_id}: {str(e)}",
+                "container_id": container_id,
+                "host_id": host_id,
+                "error": str(e),
+                "error_type": type(e).__name__,
                 "timestamp": datetime.now().isoformat(),
             }
 

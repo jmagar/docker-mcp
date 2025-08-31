@@ -236,7 +236,9 @@ class StackValidation:
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
-                    lambda cmd=check_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+                    lambda cmd=check_cmd: subprocess.run(
+                        cmd, capture_output=True, text=True, check=False
+                    ),  # noqa: S603
                 )
 
                 is_available = result.returncode == 0 and "AVAILABLE" in result.stdout

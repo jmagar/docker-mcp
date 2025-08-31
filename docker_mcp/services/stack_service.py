@@ -216,14 +216,15 @@ class StackService:
 
     async def handle_action(self, action, **params) -> dict[str, Any]:
         """Unified action handler for all stack operations.
-        
+
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
         import re
+
         try:
             # Import dependencies for this handler
             from ..models.enums import ComposeAction
-            
+
             # Extract common parameters
             host_id = params.get("host_id", "")
             stack_name = params.get("stack_name", "")
@@ -339,9 +340,7 @@ class StackService:
                     # Use stack service to execute docker-compose logs command
                     logs_options = {"tail": str(lines), "follow": follow}
 
-                    result = await self.manage_stack(
-                        host_id, stack_name, "logs", logs_options
-                    )
+                    result = await self.manage_stack(host_id, stack_name, "logs", logs_options)
 
                     # Format the result for logs
                     if hasattr(result, "structured_content") and result.structured_content:

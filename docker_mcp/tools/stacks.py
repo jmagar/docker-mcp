@@ -668,8 +668,8 @@ class StackTools:
             ]
 
             # Add key file if specified
-            if host.key_file:
-                ssh_cmd.extend(["-i", host.key_file])
+            if host.identity_file:
+                ssh_cmd.extend(["-i", host.identity_file])
 
             # Add port if not default
             if host.port != 22:

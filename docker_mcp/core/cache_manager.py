@@ -50,7 +50,9 @@ class CacheConfig:
 
     # Stats collection performance
     MAX_STATS_CONTAINERS: int = 20  # Max containers to collect stats for
-    STATS_SEMAPHORE_LIMIT: int = 5  # Concurrent stats operations
+    STATS_SEMAPHORE_LIMIT: int = (
+        3  # Concurrent stats operations (reduced to avoid SSH channel exhaustion)
+    )
 
 
 @dataclass
@@ -371,6 +373,9 @@ class DockerCacheManager:
         try:
             client = await self._get_docker_client(host_id, {})
             if not client:
+                self.logger.debug(
+                    f"No Docker client available for {host_id}, skipping container {container_id[:12]} update"
+                )
                 return
 
             # Get the specific container
@@ -409,8 +414,13 @@ class DockerCacheManager:
 
             if not client:
                 self.logger.warning(
-                    f"Could not connect to host {host_id} - no Docker client available"
+                    f"Could not connect to host {host_id} - no Docker client available, skipping cache update"
                 )
+                # Remove any stale cache data for this host
+                if host_id in self.containers_cache:
+                    del self.containers_cache[host_id]
+                if host_id in self.cache_timestamps:
+                    del self.cache_timestamps[host_id]
                 return
 
             # Get all containers (running and stopped)
@@ -449,6 +459,59 @@ class DockerCacheManager:
             host_time = time.time() - host_start
             self.logger.error(
                 f"Error updating cache for host {host_id} after {host_time:.2f}s: {e}",
+                exc_info=True,
+            )
+
+    async def _update_container_list_only(self, host_id: str, host_config: dict):
+        """Update container list without collecting stats (discovery mode - full parsing but no stats)"""
+        host_start = time.time()
+        try:
+            self.logger.debug(f"Starting discovery cache update for host {host_id}")
+
+            # Create Docker client for this host
+            client = await self._get_docker_client(host_id, host_config)
+
+            if not client:
+                self.logger.warning(
+                    f"Could not connect to host {host_id} - no Docker client available, skipping discovery cache update"
+                )
+                # Remove any stale cache data for this host
+                if host_id in self.containers_cache:
+                    del self.containers_cache[host_id]
+                if host_id in self.cache_timestamps:
+                    del self.cache_timestamps[host_id]
+                return
+
+            # Get all containers (running and stopped) - no stats collection
+            containers = await self._get_containers_async(client)
+
+            # Update cache for each container with full parsing but no stats
+            host_cache = {}
+            for container in containers:
+                try:
+                    # Use full container cache builder with empty stats (for discovery)
+                    container_cache = await self._build_container_cache(
+                        host_id,
+                        container,
+                        {},  # Empty stats dict - no CPU/memory collection
+                    )
+                    host_cache[container.id] = container_cache
+                except Exception as e:
+                    self.logger.error(f"Error creating discovery cache for container {container.name}: {e}")
+
+            # Store in memory cache
+            self.containers_cache[host_id] = host_cache
+            self.cache_timestamps[host_id] = time.time()
+
+            host_time = time.time() - host_start
+            self.logger.debug(
+                f"Host {host_id} discovery cache updated: {len(host_cache)} containers in {host_time:.2f}s (full parsing, no stats)"
+            )
+
+        except Exception as e:
+            host_time = time.time() - host_start
+            self.logger.error(
+                f"Error updating discovery cache for host {host_id} after {host_time:.2f}s: {e}",
                 exc_info=True,
             )
 
@@ -588,16 +651,30 @@ class DockerCacheManager:
             last_updated=time.time(),
         )
 
+
     async def get_containers(
-        self, host_id: str, force_refresh: bool = False
+        self, host_id: str, force_refresh: bool = False, discovery_mode: bool = False
     ) -> list[ContainerCache]:
-        """Get cached containers for a host"""
-        if force_refresh or not self._is_cache_fresh(host_id):
+        """Get cached containers for a host
+
+        Args:
+            host_id: The host to get containers for
+            force_refresh: Force cache refresh even if cache is fresh
+            discovery_mode: Use discovery mode - fetches containers without stats for path discovery
+        """
+        cache_is_fresh = self._is_cache_fresh(host_id)
+
+        if force_refresh or not cache_is_fresh:
             self.logger.info(f"Cache miss for host {host_id}, triggering refresh")
             # Trigger immediate update
             hosts = await self._get_configured_hosts()
             if host_id in hosts:
-                await self._update_host_cache(host_id, hosts[host_id])
+                if discovery_mode:
+                    # Discovery mode: get containers without expensive stats
+                    await self._update_container_list_only(host_id, hosts[host_id])
+                else:
+                    # Normal mode: get containers with stats
+                    await self._update_host_cache(host_id, hosts[host_id])
 
         return list(self.containers_cache.get(host_id, {}).values())
 
@@ -816,6 +893,26 @@ class DockerCacheManager:
         """Get Docker client for host (reuse your existing SSH/Docker logic)"""
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                self.logger.warning(
+                    f"No Docker client available for {host_id} - host may be unreachable"
+                )
+                return None
+
+            # Verify client is actually connected to remote host (not localhost)
+            try:
+                version_info = client.version()
+                if not version_info:
+                    self.logger.error(
+                        f"Docker client for {host_id} returned empty version info - invalid connection"
+                    )
+                    return None
+            except Exception as ping_error:
+                self.logger.error(
+                    f"Docker client for {host_id} failed connection test: {ping_error}"
+                )
+                return None
+
             return client
         except Exception as e:
             self.logger.error(f"Failed to get Docker client for {host_id}: {e}")
@@ -833,12 +930,22 @@ class DockerCacheManager:
         loop = asyncio.get_event_loop()
 
         async def get_single_stat(container):
-            try:
-                stats = await loop.run_in_executor(None, lambda: container.stats(stream=False))
-                return container.name, self._parse_stats(stats)
-            except Exception as e:
-                self.logger.warning(f"Failed to get stats for {container.name}: {e}")
-                return container.name, {}
+            max_retries = 2
+            for attempt in range(max_retries + 1):
+                try:
+                    stats = await loop.run_in_executor(None, lambda: container.stats(stream=False))
+                    return container.name, self._parse_stats(stats)
+                except Exception as e:
+                    if attempt < max_retries and "ChannelException" in str(e):
+                        # SSH channel error - wait and retry
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        self.logger.debug(
+                            f"Retrying stats for {container.name} (attempt {attempt + 2})"
+                        )
+                        continue
+                    else:
+                        self.logger.warning(f"Failed to get stats for {container.name}: {e}")
+                        return container.name, {}
 
         # Limit concurrent stat collection to avoid overwhelming Docker daemon
         semaphore = asyncio.Semaphore(self.cache_config.STATS_SEMAPHORE_LIMIT)

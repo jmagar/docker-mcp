@@ -7,7 +7,6 @@ across multiple remote hosts via SSH connections.
 
 import argparse
 import os
-import re
 import sys
 import tempfile
 from pathlib import Path
@@ -251,7 +250,7 @@ class DockerMCPServer:
         self.cache_manager = None
 
         # Initialize service layer
-        self.host_service = HostService(config)
+        self.host_service = HostService(config, self.context_manager)
         self.container_service = ContainerService(config, self.context_manager)
         self.stack_service = StackService(config, self.context_manager)
         self.config_service = ConfigService(config, self.context_manager)
@@ -375,8 +374,9 @@ class DockerMCPServer:
         """
         try:
             # Port mapping resource - ports://{host_id}
-            port_resource = PortMappingResource(self.container_service, self)
-            self.app.add_resource(port_resource)
+            # FIXME: Temporarily disabled due to Pydantic validation error
+            # port_resource = PortMappingResource(self.container_service, self)
+            # self.app.add_resource(port_resource)
 
             # Docker host info resource - docker://{host_id}/info
             info_resource = DockerInfoResource(
@@ -474,9 +474,11 @@ class DockerMCPServer:
         • test_connection: Test host connectivity (also runs discover)
           - Required: host_id
 
-        • discover: Discover paths and capabilities
-          - Optional: host_id (if not provided, discovers all hosts)
+        • discover: Discover paths and capabilities on hosts
+          - Required: host_id (use 'all' to discover all hosts sequentially)
           - Discovers: compose_path, appdata_path, ZFS capabilities
+          - Single host: Fast discovery (5-15 seconds)
+          - All hosts: Sequential discovery (30-60 seconds total)
           - Auto-tags: Adds "zfs" tag if ZFS detected
 
         • edit: Modify host configuration
@@ -924,7 +926,6 @@ class DockerMCPServer:
     async def stop_hot_reload(self) -> None:
         """Stop hot reload watcher."""
         await self.hot_reload_manager.stop_hot_reload()
-
 
     def run(self) -> None:
         """Run the FastMCP server."""
