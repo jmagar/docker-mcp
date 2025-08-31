@@ -40,15 +40,44 @@ That's it! The installer:
 Simplified Docker hosts management tool.
 
 **Actions:**
-- `list` - List all configured Docker hosts
-- `add` - Add a new Docker host (auto-runs test_connection and discover)
-- `ports` - List or check port usage on a host
-- `import_ssh` - Import hosts from SSH config (auto-runs test_connection and discover for each)
-- `cleanup` - Docker system cleanup with integrated schedule management
-- `test_connection` - Test host connectivity (also runs discover)
-- `discover` - Discover paths and capabilities on hosts
-- `edit` - Modify host configuration
-- `remove` - Remove host from configuration
+• **list**: List all configured Docker hosts
+  - Required: none
+
+• **add**: Add a new Docker host (auto-runs test_connection and discover)
+  - Required: host_id, ssh_host, ssh_user
+  - Optional: ssh_port (default: 22), ssh_key_path, description, tags, enabled (default: true)
+
+• **ports**: List or check port usage on a host
+  - Required: host_id
+  - Optional: port (for availability check)
+
+• **import_ssh**: Import hosts from SSH config (auto-runs test_connection and discover for each)
+  - Required: none
+  - Optional: ssh_config_path, selected_hosts
+
+• **cleanup**: Docker system cleanup with integrated schedule management
+  - Required: host_id, cleanup_type
+  - Valid cleanup_type: "check" | "safe" | "moderate" | "aggressive"
+  - For scheduling: cleanup_type, frequency, time
+  - Valid frequency: "daily" | "weekly" | "monthly" | "custom"
+  - Valid time: HH:MM format (24-hour, e.g., "02:00", "14:30")
+
+• **test_connection**: Test host connectivity (also runs discover)
+  - Required: host_id
+
+• **discover**: Discover paths and capabilities on hosts
+  - Required: host_id (use 'all' to discover all hosts sequentially)
+  - Discovers: compose_path, appdata_path, ZFS capabilities
+  - Single host: Fast discovery (5-15 seconds)
+  - All hosts: Sequential discovery (30-60 seconds total)
+  - Auto-tags: Adds "zfs" tag if ZFS detected
+
+• **edit**: Modify host configuration
+  - Required: host_id
+  - Optional: ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, compose_path, appdata_path, enabled
+
+• **remove**: Remove host from configuration
+  - Required: host_id
 
 **Natural language examples:**
 ```
@@ -69,13 +98,32 @@ Simplified Docker hosts management tool.
 Consolidated Docker container management tool.
 
 **Actions:**
-- `list` - List containers on a host
-- `info` - Get container information
-- `start` - Start a container
-- `stop` - Stop a container
-- `restart` - Restart a container
-- `build` - Build/rebuild a container
-- `logs` - Get container logs
+• **list**: List containers on a host
+  - Required: host_id
+  - Optional: all_containers, limit, offset
+
+• **info**: Get container information
+  - Required: host_id, container_id
+
+• **start**: Start a container
+  - Required: host_id, container_id
+  - Optional: force, timeout
+
+• **stop**: Stop a container
+  - Required: host_id, container_id
+  - Optional: force, timeout
+
+• **restart**: Restart a container
+  - Required: host_id, container_id
+  - Optional: force, timeout
+
+• **build**: Build/rebuild a container
+  - Required: host_id, container_id
+  - Optional: force, timeout
+
+• **logs**: Get container logs
+  - Required: host_id, container_id
+  - Optional: follow, lines
 
 **Natural language examples:**
 ```
@@ -96,15 +144,27 @@ Consolidated Docker container management tool.
 Consolidated Docker Compose stack management tool.
 
 **Actions:**
-- `list` - List stacks on a host
-- `deploy` - Deploy a stack
-- `up` - Manage stack lifecycle (bring up)
-- `down` - Manage stack lifecycle (bring down)
-- `restart` - Manage stack lifecycle (restart)
-- `build` - Manage stack lifecycle (build)
-- `discover` - Discover compose paths on a host
-- `logs` - Get stack logs
-- `migrate` - Migrate stack between hosts
+• **list**: List stacks on a host
+  - Required: host_id
+
+• **deploy**: Deploy a stack
+  - Required: host_id, stack_name, compose_content
+  - Optional: environment, pull_images, recreate
+
+• **up/down/restart/build**: Manage stack lifecycle
+  - Required: host_id, stack_name
+  - Optional: options
+
+• **discover**: Discover compose paths on a host
+  - Required: host_id
+
+• **logs**: Get stack logs
+  - Required: host_id, stack_name
+  - Optional: follow, lines
+
+• **migrate**: Migrate stack between hosts
+  - Required: host_id, target_host_id, stack_name
+  - Optional: remove_source, skip_stop_source, start_target, dry_run
 
 **Natural language examples:**
 ```
@@ -329,12 +389,6 @@ git clone https://github.com/jmagar/docker-mcp
 cd docker-mcp
 uv sync
 uv run docker-mcp
-```
-
-### Run Tests
-```bash
-uv run pytest                  # All tests
-uv run pytest -k "not slow"    # Fast tests only
 ```
 
 ### Format Code
