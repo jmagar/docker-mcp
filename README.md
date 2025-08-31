@@ -34,6 +34,8 @@ That's it! The installer:
 
 ## 🛠 The 3 Tools
 
+**Simply talk to your AI assistant in plain English.** No complex commands or JSON needed - just describe what you want to do with your Docker infrastructure.
+
 ### Tool 1: `docker_hosts`
 Simplified Docker hosts management tool.
 
@@ -48,38 +50,19 @@ Simplified Docker hosts management tool.
 - `edit` - Modify host configuration
 - `remove` - Remove host from configuration
 
-**Schema for `add` action:**
-```json
-{
-  "action": "add",
-  "host_id": "production-1",        // Required: unique identifier
-  "ssh_host": "192.168.1.100",      // Required: hostname or IP
-  "ssh_user": "dockeruser",          // Required: SSH username
-  "ssh_port": 22,                    // Optional: default 22
-  "ssh_key_path": "~/.ssh/id_ed25519", // Optional: SSH key path
-  "description": "Production server",   // Optional: description
-  "tags": ["production", "web"],       // Optional: tags for filtering
-  "enabled": true                      // Optional: default true
-}
+**Natural language examples:**
 ```
-
-**Schema for `cleanup` action:**
-```json
-{
-  "action": "cleanup",
-  "host_id": "production-1",        // Required: target host
-  "cleanup_type": "safe",           // Required: "check"|"safe"|"moderate"|"aggressive"
-  "frequency": "daily",             // Optional: "daily"|"weekly"|"monthly"|"custom"
-  "time": "02:00"                   // Optional: HH:MM format (24-hour)
-}
-```
-
-**Schema for `discover` action:**
-```json
-{
-  "action": "discover",
-  "host_id": "production-1"         // Required: host to discover (or "all" for all hosts)
-}
+"Add a new Docker host called production-1 at 192.168.1.100 with user dockeruser"
+"Add host staging at 10.0.1.50 using SSH key ~/.ssh/staging_key"
+"List all my Docker hosts"
+"Check what ports are being used on production-1"
+"Import hosts from my SSH config"
+"Clean up Docker on production-1 using safe mode"
+"Set up daily cleanup at 2 AM for production-1"
+"Test connection to staging-server"
+"Discover capabilities on all hosts"
+"Update the compose path for production-1 to /opt/stacks"
+"Remove the old-server host from my configuration"
 ```
 
 ### Tool 2: `docker_container`
@@ -94,37 +77,19 @@ Consolidated Docker container management tool.
 - `build` - Build/rebuild a container
 - `logs` - Get container logs
 
-**Schema for `list` action:**
-```json
-{
-  "action": "list",
-  "host_id": "production-1",    // Required: which host to query
-  "all_containers": false,       // Optional: include stopped containers
-  "limit": 20,                   // Optional: pagination limit
-  "offset": 0                    // Optional: pagination offset
-}
+**Natural language examples:**
 ```
-
-**Schema for lifecycle actions:**
-```json
-{
-  "action": "start",             // Or "stop", "restart", "build"
-  "host_id": "production-1",     // Required: target host
-  "container_id": "nginx-web",   // Required: container name or ID
-  "force": false,                // Optional: force the operation
-  "timeout": 10                  // Optional: timeout in seconds
-}
-```
-
-**Schema for `logs` action:**
-```json
-{
-  "action": "logs",
-  "host_id": "production-1",     // Required: target host
-  "container_id": "nginx-web",   // Required: container name or ID
-  "follow": false,               // Optional: follow log output
-  "lines": 100                   // Optional: number of log lines to retrieve
-}
+"List all containers on production-1"
+"Show all containers including stopped ones on staging"
+"Get info about the nginx container on production-1"
+"Start the wordpress container on production-1"
+"Stop the mysql database on staging"
+"Restart the web server container on production-1"
+"Force stop the stuck container on production-1 with 30 second timeout"
+"Build the app container on staging"
+"Show logs for nginx on production-1"
+"Stream live logs from the api container on production-1"
+"Show last 500 lines from the database logs on staging"
 ```
 
 ### Tool 3: `docker_compose`
@@ -141,56 +106,22 @@ Consolidated Docker Compose stack management tool.
 - `logs` - Get stack logs
 - `migrate` - Migrate stack between hosts
 
-**Schema for `deploy` action:**
-```json
-{
-  "action": "deploy",
-  "host_id": "production-1",        // Required: target host
-  "stack_name": "wordpress",        // Required: stack identifier
-  "compose_content": "...",         // Required: docker-compose.yml content
-  "environment": {                  // Optional: environment variables
-    "DB_PASSWORD": "secret"
-  },
-  "pull_images": true,              // Optional: pull latest images
-  "recreate": false                 // Optional: force recreate containers
-}
+**Natural language examples:**
 ```
-
-**Schema for lifecycle actions:**
-```json
-{
-  "action": "up",                   // Or "down", "restart", "build"
-  "host_id": "production-1",        // Required: target host
-  "stack_name": "wordpress",        // Required: stack name
-  "options": {                      // Optional: additional options
-    "force_recreate": false
-  }
-}
-```
-
-**Schema for `logs` action:**
-```json
-{
-  "action": "logs",
-  "host_id": "production-1",        // Required: target host
-  "stack_name": "wordpress",        // Required: stack name
-  "follow": false,                  // Optional: follow log output
-  "lines": 100                      // Optional: number of log lines to retrieve
-}
-```
-
-**Schema for `migrate` action:**
-```json
-{
-  "action": "migrate",
-  "host_id": "production-1",        // Required: source host
-  "target_host_id": "production-2", // Required: destination host
-  "stack_name": "wordpress",        // Required: stack to migrate
-  "remove_source": false,           // Optional: remove source stack after migration
-  "skip_stop_source": false,        // Optional: skip stopping source stack before migration
-  "start_target": true,             // Optional: start target stack after migration
-  "dry_run": false                  // Optional: perform a dry run without making changes
-}
+"List all stacks on production-1"
+"Deploy wordpress stack to production-1 with this compose file: <content>"
+"Deploy plex to media-server with DB_PASSWORD=secret123"
+"Bring up the wordpress stack on production-1"
+"Take down the old-app stack on staging"
+"Restart the plex stack on media-server"
+"Build the development stack on staging"
+"Discover compose files on production-1"
+"Show logs from the wordpress stack on production-1"
+"Stream live logs from plex stack on media-server"
+"Show last 200 lines from api-stack logs on staging"
+"Migrate wordpress from old-server to new-server"
+"Do a dry run migration of plex from server1 to server2"
+"Migrate database stack and remove it from the source after"
 ```
 
 **🚀 Advanced Migration Features:**
@@ -230,30 +161,28 @@ volumes:
   db_data:
 ```
 
-Use with: `docker_compose` action: `deploy`
+Use with: "Deploy wordpress stack to production-1 with this compose file"
 
 ### Monitor Multiple Hosts
-1. Use `docker_hosts` with action `list` to get all hosts
-2. For each host, use `docker_container` with action `list`
-3. Use `docker_container` with action `logs` to monitor specific containers
+Simply ask your AI assistant:
+- "Show me all my Docker hosts"
+- "List all containers on each host"
+- "Show me the logs from nginx on production-1"
+- "Stream live logs from all my database containers"
 
 ### Emergency Container Management
-- Stop all containers: `docker_container` with action `stop` and `force: true`
-- Check what's using ports: `docker_hosts` with action `ports`
-- Restart services: `docker_container` with action `restart`
+When things go wrong, just describe the problem:
+- "Force stop all containers on production-1"
+- "What's using port 80 on my staging server?"
+- "Restart all my web services"
+- "Show me what's currently running on production-1"
 
 ### Migrate Stack to New Host
 Perfect for hardware upgrades, load balancing, or moving to faster storage:
 
 1. **Test the migration** (dry run):
-   ```json
-   {
-     "action": "migrate",
-     "host_id": "old-server",
-     "target_host_id": "new-server",
-     "stack_name": "wordpress",
-     "dry_run": true
-   }
+   ```
+   "Do a dry run migration of wordpress from old-server to new-server"
    ```
 
 2. **High-Performance ZFS Migration** (automatic when both hosts support ZFS):
@@ -431,21 +360,19 @@ docker-mcp/
 ## 🆘 Need Help?
 
 ### Container won't start?
-```bash
-# Check what's running on a port
-docker_hosts action=ports host_id=my-server
-
-# See container logs
-docker_container action=logs host_id=my-server container_id=my-app
+Just ask your AI assistant:
+```
+"What's running on port 80 on my-server?"
+"Show me the logs from my-app container on my-server"
+"Why won't my nginx container start on production-1?"
 ```
 
 ### Can't connect to a host?
-```bash
-# Test SSH connection
-ssh user@your-host
-
-# Import from SSH config
-docker_hosts action=import_ssh
+Let your AI assistant help troubleshoot:
+```
+"Test the connection to my staging server"
+"Import all hosts from my SSH config"
+"Add my new server at 192.168.1.100 to Docker Manager"
 ```
 
 ### Something else?
