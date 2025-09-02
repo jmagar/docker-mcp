@@ -34,6 +34,7 @@ class ComposeAction(Enum):
     """Actions for the docker_compose tool."""
 
     LIST = "list"
+    DISCOVER = "discover"
     VIEW = "view"
     DEPLOY = "deploy"
     UP = "up"

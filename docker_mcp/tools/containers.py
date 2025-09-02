@@ -7,7 +7,12 @@ from typing import Any
 import docker
 import structlog
 
-from ..constants import DOCKER_COMPOSE_CONFIG_FILES, DOCKER_COMPOSE_PROJECT
+from ..constants import (
+    DOCKER_COMPOSE_CONFIG_FILES,
+    DOCKER_COMPOSE_PROJECT,
+    DOCKER_COMPOSE_SERVICE,
+)
+from .stacks import StackTools
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
@@ -652,7 +657,7 @@ class ContainerTools:
         Returns:
             Operation result
         """
-        valid_actions = ["start", "stop", "restart", "pause", "unpause", "remove"]
+        valid_actions = ["start", "stop", "restart", "pause", "unpause", "remove", "build"]
         if action not in valid_actions:
             return {
                 "success": False,
@@ -663,29 +668,82 @@ class ContainerTools:
             }
 
         try:
-            # Build command based on action
-            cmd = self._build_container_command(action, container_id, force, timeout)
+            if action == "build":
+                # Build via docker compose for the service this container belongs to
+                client = await self.context_manager.get_client(host_id)
+                loop = asyncio.get_event_loop()
+                container = await loop.run_in_executor(
+                    None, lambda: client.containers.get(container_id)
+                )
+                labels = container.labels or container.attrs.get("Config", {}).get("Labels", {}) or {}
+                project = labels.get(DOCKER_COMPOSE_PROJECT)
+                service = labels.get(DOCKER_COMPOSE_SERVICE)
 
-            await self.context_manager.execute_docker_command(host_id, cmd)
+                if not project or not service:
+                    return {
+                        "success": False,
+                        "error": "Container is not part of a compose project; cannot build",
+                        "container_id": container_id,
+                        "host_id": host_id,
+                    }
 
-            logger.info(
-                f"Container {action} completed",
-                host_id=host_id,
-                container_id=container_id,
-                action=action,
-                force=force,
-            )
+                # Use StackTools to run compose build for the specific service
+                stack_tools = StackTools(self.config, self.context_manager)
+                options = {"services": [service]}
+                build_result = await stack_tools.manage_stack(host_id, project, "build", options)
 
-            return {
-                "success": True,
-                "message": f"Container {container_id} {action}{'d' if action.endswith('e') else 'ed'} successfully",
-                "container_id": container_id,
-                "host_id": host_id,
-                "action": action,
-                "force": force,
-                "timeout": timeout if action in ["stop", "restart"] else None,
-                "timestamp": datetime.now().isoformat(),
-            }
+                if build_result.get("success"):
+                    logger.info(
+                        "Container build completed via compose",
+                        host_id=host_id,
+                        container_id=container_id,
+                        project=project,
+                        service=service,
+                    )
+                    return {
+                        "success": True,
+                        "message": f"Service '{service}' in project '{project}' built successfully",
+                        "container_id": container_id,
+                        "host_id": host_id,
+                        "project": project,
+                        "service": service,
+                        "action": action,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": build_result.get("error", "Build failed"),
+                        "container_id": container_id,
+                        "host_id": host_id,
+                        "project": project,
+                        "service": service,
+                        "action": action,
+                    }
+            else:
+                # Build command based on action
+                cmd = self._build_container_command(action, container_id, force, timeout)
+
+                await self.context_manager.execute_docker_command(host_id, cmd)
+
+                logger.info(
+                    f"Container {action} completed",
+                    host_id=host_id,
+                    container_id=container_id,
+                    action=action,
+                    force=force,
+                )
+
+                return {
+                    "success": True,
+                    "message": f"Container {container_id} {action}{'d' if action.endswith('e') else 'ed'} successfully",
+                    "container_id": container_id,
+                    "host_id": host_id,
+                    "action": action,
+                    "force": force,
+                    "timeout": timeout if action in ["stop", "restart"] else None,
+                    "timestamp": datetime.now().isoformat(),
+                }
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error(

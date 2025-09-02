@@ -22,12 +22,8 @@ class HostService:
     def __init__(self, config: DockerMCPConfig, context_manager=None, cache_manager=None):
         self.config = config
         self.context_manager = context_manager
-        self.cache_manager = cache_manager
         self.logger = structlog.get_logger()
 
-    def set_cache_manager(self, cache_manager):
-        """Set the cache manager after initialization."""
-        self.cache_manager = cache_manager
 
     async def add_docker_host(
         self,
@@ -116,6 +112,7 @@ class HostService:
                 hosts.append(
                     {
                         HOST_ID: host_id,
+                        "id": host_id,  # Backward-compatible alias used by some tests/tools
                         "hostname": host_config.hostname,
                         "user": host_config.user,
                         "port": host_config.port,
@@ -738,107 +735,12 @@ class HostService:
     async def _discover_compose_paths(self, host: DockerHost) -> dict[str, Any]:
         """Discover Docker Compose file locations from running containers."""
         try:
-            # Use cache manager if available, otherwise fall back to SSH
-            if self.cache_manager:
-                return await self._discover_compose_paths_cached(host)
-            else:
-                return await self._discover_compose_paths_ssh(host)
+            # Use SSH for compose path discovery
+            return await self._discover_compose_paths_ssh(host)
         except Exception as e:
             self.logger.error("Compose path discovery failed", host_id=host.hostname, error=str(e))
             return {"paths": [], "recommended": None, "error": str(e)}
 
-    async def _discover_compose_paths_cached(self, host: DockerHost) -> dict[str, Any]:
-        """Discover compose paths using cache manager."""
-        try:
-            # Find host_id from hostname
-            host_id = None
-            for hid, hconfig in self.config.hosts.items():
-                if hconfig.hostname == host.hostname:
-                    host_id = hid
-                    break
-
-            if not host_id:
-                self.logger.warning("Could not find host_id for hostname", hostname=host.hostname)
-                return {"paths": [], "recommended": None}
-
-            # Try cache manager first, fall back to direct container service
-            containers = []
-            if self.cache_manager:
-                try:
-                    containers = await self.cache_manager.get_containers(host_id, discovery_mode=True)
-                except Exception as e:
-                    self.logger.warning("Cache manager failed, using direct container service", host_id=host_id, error=str(e))
-            
-            # Fallback to SSH-based discovery with timeout protection
-            if not containers:
-                self.logger.info("Using SSH-based compose discovery", host_id=host_id)
-                return await asyncio.wait_for(
-                    self._discover_compose_paths_ssh(host),
-                    timeout=15.0  # 15 second timeout for SSH discovery
-                )
-
-            # Extract compose working directories
-            compose_dirs = []
-            for container in containers:
-                if container.compose_working_dir:
-                    compose_dirs.append(container.compose_working_dir)
-
-            if compose_dirs:
-                # Count parent directories (where compose files typically live)
-                path_counter = Counter()
-                for compose_dir in compose_dirs:
-                    parent_dir = str(Path(compose_dir).parent)
-                    path_counter[parent_dir] += 1
-
-                # Get unique paths and recommend the most common one
-                unique_paths = list(path_counter.keys())
-                recommended = path_counter.most_common(1)[0][0] if path_counter else None
-
-                self.logger.info(
-                    "Discovered compose paths from cache",
-                    host_id=host_id,
-                    paths_found=len(unique_paths),
-                    containers_checked=len(containers),
-                    recommended=recommended,
-                )
-
-                return {"paths": unique_paths, "recommended": recommended}
-
-            # No compose directories found - provide helpful guidance
-            self.logger.debug("No compose working directories found in cache", host_id=host_id)
-            
-            # Generate contextual guidance based on what we found
-            if not containers:
-                guidance = (
-                    "No containers running on this host. "
-                    "Deploy some containers first, then re-run discovery. "
-                    "Common compose locations:\n"
-                    "• /opt/compose\n"
-                    "• /home/*/docker-compose\n"
-                    "• /srv/docker"
-                )
-            else:
-                guidance = (
-                    f"Found {len(containers)} containers but no compose files detected. "
-                    "Your containers may have been deployed without Docker Compose labels, "
-                    "or compose files may be in non-standard locations. Common locations:\n"
-                    "• /opt/compose\n"
-                    "• /home/*/docker-compose\n"
-                    "• /srv/docker\n"
-                    f"You can manually set with: docker_hosts edit {host_id} compose_path /path/to/compose"
-                )
-
-            return {
-                "paths": [], 
-                "recommended": None,
-                "guidance": guidance,
-                "containers_checked": len(containers)
-            }
-
-        except Exception as e:
-            self.logger.error("Cache-based compose discovery failed", error=str(e))
-            # Fall back to SSH method
-            return await self._discover_compose_paths_ssh(host)
 
     async def _discover_compose_paths_ssh(self, host: DockerHost) -> dict[str, Any]:
         """Discover compose paths using SSH (fallback method)."""
@@ -903,126 +805,12 @@ class HostService:
     async def _discover_appdata_paths(self, host: DockerHost) -> dict[str, Any]:
         """Discover appdata/volume storage locations from container bind mounts."""
         try:
-            # Use cache manager if available, otherwise fall back to SSH
-            if self.cache_manager:
-                return await self._discover_appdata_paths_cached(host)
-            else:
-                return await self._discover_appdata_paths_ssh(host)
+            # Use SSH for appdata path discovery
+            return await self._discover_appdata_paths_ssh(host)
         except Exception as e:
             self.logger.error("Appdata path discovery failed", host_id=host.hostname, error=str(e))
             return {"paths": [], "recommended": None, "error": str(e)}
 
-    async def _discover_appdata_paths_cached(self, host: DockerHost) -> dict[str, Any]:
-        """Discover appdata paths using cache manager."""
-        try:
-            # Find host_id from hostname
-            host_id = None
-            for hid, hconfig in self.config.hosts.items():
-                if hconfig.hostname == host.hostname:
-                    host_id = hid
-                    break
-
-            if not host_id:
-                self.logger.warning("Could not find host_id for hostname", hostname=host.hostname)
-                return {"paths": [], "recommended": None}
-
-            # Try cache manager first, fall back to SSH discovery
-            containers = []
-            if self.cache_manager:
-                try:
-                    containers = await self.cache_manager.get_containers(host_id, discovery_mode=True)
-                except Exception as e:
-                    self.logger.warning("Cache manager failed, using SSH-based appdata discovery", host_id=host_id, error=str(e))
-            
-            # Fallback to SSH-based discovery with timeout protection
-            if not containers:
-                self.logger.info("Using SSH-based appdata discovery", host_id=host_id)
-                return await asyncio.wait_for(
-                    self._discover_appdata_paths_ssh(host),
-                    timeout=15.0  # 15 second timeout for SSH discovery
-                )
-
-            # Extract bind mount paths from all containers
-            all_bind_mounts = []
-            for container in containers:
-                all_bind_mounts.extend(container.bind_mounts)
-
-            if all_bind_mounts:
-                # Find common base paths by analyzing mount points
-                base_path_counts = Counter()
-                for mount_path in all_bind_mounts:
-                    # Skip system paths and temporary mounts
-                    if mount_path.startswith(("/proc", "/sys", "/dev", "/tmp", "/var/run")):  # noqa: S108
-                        continue
-
-                    # Find potential base appdata paths
-                    path_parts = Path(mount_path).parts
-                    for i in range(2, min(5, len(path_parts))):  # Check 2-4 levels deep
-                        potential_base = str(Path(*path_parts[:i]))
-                        if potential_base not in ["/", "/home", "/opt", "/srv", "/mnt"]:
-                            base_path_counts[potential_base] += 1
-
-                if base_path_counts:
-                    # Get unique paths and recommend the most common one
-                    unique_paths = list(base_path_counts.keys())
-                    recommended = (
-                        base_path_counts.most_common(1)[0][0] if base_path_counts else None
-                    )
-
-                    self.logger.info(
-                        "Discovered appdata paths from cache",
-                        host_id=host_id,
-                        paths_found=len(unique_paths),
-                        containers_checked=len(containers),
-                        bind_mounts_analyzed=len(all_bind_mounts),
-                        recommended=recommended,
-                    )
-
-                    return {"paths": unique_paths, "recommended": recommended}
-
-            # No bind mounts found - provide helpful guidance
-            self.logger.debug("No bind mounts found in cache", host_id=host_id)
-            
-            # Generate contextual guidance based on what we found
-            if not containers:
-                guidance = (
-                    "No containers running on this host. "
-                    "Deploy containers with bind mounts to detect appdata paths automatically. "
-                    "Common appdata locations:\n"
-                    "• /opt/appdata\n"
-                    "• /mnt/appdata\n"
-                    "• /srv/docker/appdata"
-                )
-            elif not all_bind_mounts:
-                guidance = (
-                    f"Found {len(containers)} containers but no bind mounts detected. "
-                    "Containers may be using Docker volumes instead of bind mounts. "
-                    "Common appdata locations:\n"
-                    "• /opt/appdata\n"
-                    "• /mnt/appdata\n"
-                    "• /srv/docker/appdata\n"
-                    f"You can manually set with: docker_hosts edit {host_id} appdata_path /path/to/appdata"
-                )
-            else:
-                guidance = (
-                    f"Found {len(all_bind_mounts)} bind mounts but couldn't determine common appdata path. "
-                    "Mounts may be scattered across different directories. "
-                    "Review the bind mounts and manually set the base path:\n"
-                    f"docker_hosts edit {host_id} appdata_path /path/to/appdata"
-                )
-
-            return {
-                "paths": [], 
-                "recommended": None,
-                "guidance": guidance,
-                "containers_checked": len(containers),
-                "bind_mounts_analyzed": len(all_bind_mounts)
-            }
-
-        except Exception as e:
-            self.logger.error("Cache-based appdata discovery failed", error=str(e))
-            # Fall back to SSH method
-            return await self._discover_appdata_paths_ssh(host)
 
     async def _discover_appdata_paths_ssh(self, host: DockerHost) -> dict[str, Any]:
         """Discover appdata paths using SSH (fallback method)."""

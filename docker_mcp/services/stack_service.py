@@ -15,12 +15,18 @@ from ..core.docker_context import DockerContextManager
 from .stack.migration_orchestrator import StackMigrationOrchestrator
 from .stack.operations import StackOperations
 from .stack.validation import StackValidation
+from .logs import LogsService
 
 
 class StackService:
     """Facade service for Docker Compose stack management operations."""
 
-    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+    def __init__(
+        self,
+        config: DockerMCPConfig,
+        context_manager: DockerContextManager,
+        logs_service: LogsService | None = None,
+    ):
         self.config = config
         self.context_manager = context_manager
         self.logger = structlog.get_logger()
@@ -29,6 +35,7 @@ class StackService:
         self.operations = StackOperations(config, context_manager)
         self.migration_orchestrator = StackMigrationOrchestrator(config, context_manager)
         self.validation = StackValidation()
+        self.logs_service = logs_service or LogsService(config, context_manager)
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
         """Validate host exists in configuration."""
@@ -372,6 +379,31 @@ class StackService:
                         error=str(e),
                     )
                     return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
+
+            elif action == ComposeAction.DISCOVER:
+                # Validate required parameters for discover action
+                if not host_id:
+                    return {"success": False, "error": "host_id is required for discover action"}
+
+                try:
+                    # Use ComposeManager via operations -> stack_tools
+                    compose_manager = self.operations.stack_tools.compose_manager
+                    discovery = await compose_manager.discover_compose_locations(host_id)
+
+                    return {
+                        "success": True,
+                        "host_id": host_id,
+                        "compose_discovery": discovery,
+                    }
+                except Exception as e:
+                    self.logger.error(
+                        "compose discover error", host_id=host_id, error=str(e)
+                    )
+                    return {
+                        "success": False,
+                        "error": f"Failed to discover compose paths: {str(e)}",
+                        "host_id": host_id,
+                    }
 
             elif action == ComposeAction.MIGRATE:
                 # Validate required parameters for migrate action

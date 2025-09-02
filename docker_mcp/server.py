@@ -17,7 +17,6 @@ from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
 try:
-    from .core.cache_manager import get_cache_manager
     from .core.config_loader import DockerMCPConfig, load_config
     from .core.docker_context import DockerContextManager
     from .core.file_watcher import HotReloadManager
@@ -39,9 +38,7 @@ try:
     )
     from .services import ConfigService, ContainerService, HostService, StackService
     from .services.cleanup import CleanupService
-    from .tools.logs import LogTools
 except ImportError:
-    from docker_mcp.core.cache_manager import get_cache_manager
     from docker_mcp.core.config_loader import DockerMCPConfig, load_config
     from docker_mcp.core.docker_context import DockerContextManager
     from docker_mcp.core.file_watcher import HotReloadManager
@@ -60,7 +57,6 @@ except ImportError:
     )
     from docker_mcp.services import ConfigService, ContainerService, HostService, StackService
     from docker_mcp.services.cleanup import CleanupService
-    from docker_mcp.tools.logs import LogTools
 
 
 # Import enum definitions
@@ -246,18 +242,20 @@ class DockerMCPServer:
         # Initialize core managers
         self.context_manager = DockerContextManager(config)
 
-        # Initialize cache manager (will be created asynchronously)
-        self.cache_manager = None
 
         # Initialize service layer
+        from .services.logs import LogsService
+
+        self.logs_service = LogsService(config, self.context_manager)
         self.host_service = HostService(config, self.context_manager)
-        self.container_service = ContainerService(config, self.context_manager)
-        self.stack_service = StackService(config, self.context_manager)
+        self.container_service = ContainerService(
+            config, self.context_manager, self.logs_service
+        )
+        self.stack_service = StackService(config, self.context_manager, self.logs_service)
         self.config_service = ConfigService(config, self.context_manager)
         self.cleanup_service = CleanupService(config)
 
-        # Initialize remaining tools (logs not yet moved to services)
-        self.log_tools = LogTools(config, self.context_manager)
+        # No legacy log tools; logs handled via LogsService
 
         # Initialize hot reload manager (always enabled)
         self.hot_reload_manager = HotReloadManager()
@@ -274,16 +272,6 @@ class DockerMCPServer:
             config_path=self._config_path,
         )
 
-    async def _initialize_cache_manager(self) -> None:
-        """Initialize the Docker cache manager asynchronously."""
-        if self.cache_manager is None:
-            self.cache_manager = await get_cache_manager(self.config, self.context_manager)
-
-            # Set cache manager on services that can use it
-            self.host_service.set_cache_manager(self.cache_manager)
-            self.container_service.set_cache_manager(self.cache_manager)
-
-            self.logger.info("Docker Cache Manager initialized and started")
 
     def _initialize_app(self) -> None:
         """Initialize FastMCP app, middleware, and register tools."""
@@ -374,22 +362,19 @@ class DockerMCPServer:
         """
         try:
             # Port mapping resource - ports://{host_id}
-            # FIXME: Temporarily disabled due to Pydantic validation error
-            # port_resource = PortMappingResource(self.container_service, self)
-            # self.app.add_resource(port_resource)
+            port_resource = PortMappingResource(self.container_service, self)
+            self.app.add_resource(port_resource)
 
             # Docker host info resource - docker://{host_id}/info
-            info_resource = DockerInfoResource(
-                context_manager=self.context_manager, host_service=self.host_service
-            )
+            info_resource = DockerInfoResource(self.context_manager, self.host_service)
             self.app.add_resource(info_resource)
 
             # Docker containers resource - docker://{host_id}/containers
-            containers_resource = DockerContainersResource(container_service=self.container_service)
+            containers_resource = DockerContainersResource(self.container_service)
             self.app.add_resource(containers_resource)
 
             # Docker compose resource - docker://{host_id}/compose
-            compose_resource = DockerComposeResource(stack_service=self.stack_service)
+            compose_resource = DockerComposeResource(self.stack_service)
             self.app.add_resource(compose_resource)
 
             self.logger.info(
@@ -795,8 +780,8 @@ class DockerMCPServer:
             if host_id not in self.config.hosts:
                 return {"success": False, "error": f"Host {host_id} not found"}
 
-            # Use log tools to get logs
-            logs_result = await self.log_tools.get_container_logs(
+            # Use logs service to get logs
+            logs_result = await self.logs_service.get_container_logs(
                 host_id=host_id,
                 container_id=container_id,
                 lines=lines,
@@ -914,8 +899,9 @@ class DockerMCPServer:
         self.config_service.config = new_config
         self.cleanup_service.config = new_config
 
-        # Update remaining tools with new config
-        self.log_tools.config = new_config
+        # Recreate logs service with updated config
+        from .services.logs import LogsService
+        self.logs_service = LogsService(new_config, self.context_manager)
 
         self.logger.info("Configuration updated", hosts=list(new_config.hosts.keys()))
 
@@ -930,42 +916,16 @@ class DockerMCPServer:
     def run(self) -> None:
         """Run the FastMCP server."""
         try:
-            # Initialize FastMCP app first
+            # Initialize FastMCP app and run once
             self._initialize_app()
 
-            # Initialize cache manager synchronously before FastMCP starts
-            import asyncio
-
-            # Create and start cache manager in separate loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-            # Initialize cache manager and start background tasks
-            loop.run_until_complete(self._initialize_cache_manager())
-
-            # Don't close the loop - let cache manager run in background
-            # FastMCP will use the same event loop
-
             self.logger.info(
                 "Starting Docker MCP Server",
                 host=self.config.server.host,
                 port=self.config.server.port,
             )
 
-            # Start FastMCP server (this handles its own event loop)
-            self.app.run(
-                transport="streamable-http",
-                host=self.config.server.host,
-                port=self.config.server.port,
-            )
-
-            self.logger.info(
-                "Starting Docker MCP Server",
-                host=self.config.server.host,
-                port=self.config.server.port,
-            )
-
-            # FastMCP.run() is synchronous and handles its own event loop
+            # FastMCP.run() is synchronous and manages its own event loop
             self.app.run(
                 transport="streamable-http",
                 host=self.config.server.host,
