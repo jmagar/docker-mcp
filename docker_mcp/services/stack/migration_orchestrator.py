@@ -222,12 +222,12 @@ class StackMigrationOrchestrator:
                 source_paths = []
                 path_mappings = {}  # For compose file path updates
                 target_appdata_path = target_host.appdata_path or "/opt/docker-appdata"
-                
+
                 for mount in expected_mounts:
                     if ":" in mount:
                         source_path = mount.split(":", 1)[0]
                         source_paths.append(source_path)
-                        
+
                         # Create mapping from source path to target path for compose file updates
                         # Extract the relative path under the stack directory
                         if f"/{stack_name}/" in source_path:
@@ -239,7 +239,7 @@ class StackMigrationOrchestrator:
                         else:
                             # Fallback: assume entire source directory maps to target stack directory
                             path_mappings[source_path] = f"{target_appdata_path}/{stack_name}"
-                
+
                 # Transfer data directly (no archiving)
                 transfer_success, transfer_results = await self.executor.transfer_data(
                     source_host, target_host, source_paths, stack_name, dry_run

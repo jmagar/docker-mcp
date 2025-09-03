@@ -5,7 +5,6 @@ Business logic for Docker host management operations.
 """
 
 import asyncio
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -470,7 +469,7 @@ class HostService:
 
                     # Save configuration after adding tag
                     try:
-                        save_config(self.config)
+                        save_config(self.config, getattr(self.config, "config_file", None))
                         tag_added = True
                     except Exception as e:
                         self.logger.error(
@@ -496,11 +495,11 @@ class HostService:
             # Add overall guidance if discovery found nothing useful
             total_paths_found = len(compose_result["paths"]) + len(appdata_result["paths"])
             has_useful_discovery = (
-                total_paths_found > 0 
-                or zfs_result["capable"] 
+                total_paths_found > 0
+                or zfs_result["capable"]
                 or len(capabilities["recommendations"]) > 0
             )
-            
+
             if not has_useful_discovery:
                 capabilities["overall_guidance"] = (
                     "Discovery found no automatic configuration. This is common for:\n"
@@ -629,17 +628,17 @@ class HostService:
         """
         try:
             self.logger.info("Starting sequential discovery for all hosts", total_hosts=len(self.config.hosts))
-            
+
             discoveries = {}
             successful_discoveries = 0
             failed_discoveries = 0
             enabled_hosts = []
-            
+
             # Collect enabled hosts first
             for host_id, host_config in self.config.hosts.items():
                 if host_config.enabled:
                     enabled_hosts.append(host_id)
-            
+
             if not enabled_hosts:
                 return {
                     "success": True,
@@ -650,20 +649,20 @@ class HostService:
                     "discoveries": {},
                     "summary": "No enabled hosts to discover",
                 }
-                
+
             # Process each host one at a time
             for i, host_id in enumerate(enabled_hosts, 1):
                 self.logger.info(
                     f"Starting discovery for host {host_id} ({i}/{len(enabled_hosts)})"
                 )
-                
+
                 try:
                     # Set a reasonable timeout for single host discovery
                     result = await asyncio.wait_for(
                         self.discover_host_capabilities(host_id),
                         timeout=30.0  # 30 seconds per host
                     )
-                    
+
                     discoveries[host_id] = result
                     if result.get("success"):
                         successful_discoveries += 1
@@ -671,7 +670,7 @@ class HostService:
                     else:
                         failed_discoveries += 1
                         self.logger.warning(f"Discovery failed for host {host_id}: {result.get('error', 'Unknown error')}")
-                        
+
                 except asyncio.TimeoutError:
                     error_msg = "Discovery timed out after 30 seconds"
                     self.logger.error(f"Discovery timed out for host {host_id}")
@@ -681,7 +680,7 @@ class HostService:
                         "host_id": host_id
                     }
                     failed_discoveries += 1
-                    
+
                 except Exception as e:
                     error_msg = str(e)
                     self.logger.error(f"Discovery failed for host {host_id}: {error_msg}")
@@ -691,12 +690,12 @@ class HostService:
                         "host_id": host_id
                     }
                     failed_discoveries += 1
-            
+
             # Calculate summary statistics
             total_recommendations = 0
             zfs_capable_hosts = 0
             total_paths_found = 0
-            
+
             for discovery in discoveries.values():
                 if discovery.get("success") and discovery.get("recommendations"):
                     total_recommendations += len(discovery["recommendations"])
@@ -706,7 +705,7 @@ class HostService:
                     total_paths_found += len(discovery["compose_discovery"]["paths"])
                 if discovery.get("appdata_discovery", {}).get("paths"):
                     total_paths_found += len(discovery["appdata_discovery"]["paths"])
-            
+
             # Return comprehensive results
             return {
                 "success": True,
@@ -723,7 +722,7 @@ class HostService:
                     "total_paths_found": total_paths_found,
                 }
             }
-            
+
         except Exception as e:
             self.logger.error("Sequential discovery failed", error=str(e))
             return {
@@ -779,7 +778,7 @@ class HostService:
 
             # Fallback to file system search if no running containers with compose labels
             fallback_cmd = ssh_cmd + [
-                "find /opt /srv /home -maxdepth 3 -name 'docker-compose.*' -o -name 'compose.*' 2>/dev/null | head -10"
+                "find /opt /srv /home -maxdepth 3 \\( -name 'docker-compose.*' -o -name 'compose.*' \\) 2>/dev/null | head -10"
             ]
 
             process = await asyncio.create_subprocess_exec(
@@ -1280,16 +1279,16 @@ class HostService:
 
         # Collect and format all guidance messages for display
         guidance_messages = []
-        
+
         if compose_guidance := result.get("compose_discovery", {}).get("guidance"):
             guidance_messages.append(f"📁 **Compose Paths**: {compose_guidance}")
-        
+
         if appdata_guidance := result.get("appdata_discovery", {}).get("guidance"):
             guidance_messages.append(f"💾 **Appdata Paths**: {appdata_guidance}")
-        
+
         if overall_guidance := result.get("overall_guidance"):
             guidance_messages.append(f"💡 **Overall Guidance**: {overall_guidance}")
-        
+
         # Add formatted guidance to result if any guidance exists
         if guidance_messages:
             result["helpful_guidance"] = "\n\n".join(guidance_messages)

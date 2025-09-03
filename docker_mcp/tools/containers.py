@@ -12,7 +12,6 @@ from ..constants import (
     DOCKER_COMPOSE_PROJECT,
     DOCKER_COMPOSE_SERVICE,
 )
-from .stacks import StackTools
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
@@ -21,6 +20,7 @@ from ..models.container import (
     PortConflict,
     PortMapping,
 )
+from .stacks import StackTools
 
 logger = structlog.get_logger()
 
@@ -31,6 +31,7 @@ class ContainerTools:
     def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
         self.config = config
         self.context_manager = context_manager
+        self.stack_tools = StackTools(config, context_manager)
 
     async def list_containers(
         self, host_id: str, all_containers: bool = False, limit: int = 20, offset: int = 0
@@ -675,7 +676,9 @@ class ContainerTools:
                 container = await loop.run_in_executor(
                     None, lambda: client.containers.get(container_id)
                 )
-                labels = container.labels or container.attrs.get("Config", {}).get("Labels", {}) or {}
+                labels = (
+                    container.labels or container.attrs.get("Config", {}).get("Labels", {}) or {}
+                )
                 project = labels.get(DOCKER_COMPOSE_PROJECT)
                 service = labels.get(DOCKER_COMPOSE_SERVICE)
 
@@ -688,9 +691,10 @@ class ContainerTools:
                     }
 
                 # Use StackTools to run compose build for the specific service
-                stack_tools = StackTools(self.config, self.context_manager)
                 options = {"services": [service]}
-                build_result = await stack_tools.manage_stack(host_id, project, "build", options)
+                build_result = await self.stack_tools.manage_stack(
+                    host_id, project, "build", options
+                )
 
                 if build_result.get("success"):
                     logger.info(

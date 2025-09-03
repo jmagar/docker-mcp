@@ -51,7 +51,7 @@ class ZFSTransfer(BaseTransfer):
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     check_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -63,7 +63,7 @@ class ZFSTransfer(BaseTransfer):
             list_cmd = ssh_cmd + ["zfs list > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     list_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -121,7 +121,7 @@ class ZFSTransfer(BaseTransfer):
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     df_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -135,10 +135,10 @@ class ZFSTransfer(BaseTransfer):
                 return None
 
             # Get the actual dataset name using zfs list
-            zfs_cmd = ssh_cmd + [f"zfs list -H -o name {path} 2>/dev/null | head -1"]
+            zfs_cmd = ssh_cmd + [f"zfs list -H -o name {shlex.quote(path)} 2>/dev/null | head -1"]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     zfs_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -148,11 +148,11 @@ class ZFSTransfer(BaseTransfer):
 
             # Fallback: try to find dataset by mountpoint
             mount_cmd = ssh_cmd + [
-                f"zfs list -H -o name,mountpoint | grep '{path}' | head -1 | cut -f1"
+                f"zfs list -H -o name,mountpoint | grep {shlex.quote(path)} | head -1 | cut -f1"
             ]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     mount_cmd, check=False, capture_output=True, text=True
                 ),
             )
@@ -198,7 +198,7 @@ class ZFSTransfer(BaseTransfer):
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # noqa: S603
+            lambda: subprocess.run(  # nosec B603
                 snap_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -236,10 +236,10 @@ class ZFSTransfer(BaseTransfer):
                 "Using RECURSIVE ZFS destroy - this will delete child snapshots!",
                 snapshot=full_snapshot,
             )
-            destroy_cmd = ssh_cmd + [f"zfs destroy -r {full_snapshot}"]
+            destroy_cmd = ssh_cmd + [f"zfs destroy -r {shlex.quote(full_snapshot)}"]
         else:
             # Safer: only destroy the specific snapshot
-            destroy_cmd = ssh_cmd + [f"zfs destroy {full_snapshot}"]
+            destroy_cmd = ssh_cmd + [f"zfs destroy {shlex.quote(full_snapshot)}"]
 
         self.logger.info(
             "Cleaning up ZFS snapshot", snapshot=full_snapshot, recursive=recursive, validated=True
@@ -247,7 +247,7 @@ class ZFSTransfer(BaseTransfer):
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # noqa: S603
+            lambda: subprocess.run(  # nosec B603
                 destroy_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -353,8 +353,9 @@ class ZFSTransfer(BaseTransfer):
 
         # Build the ZFS send command - be careful with -R flag
         # Use -R (recursive) only if specifically requested, default to single snapshot
+        import shlex
         send_flags = "-R" if getattr(self, "_use_recursive_send", False) else ""
-        send_cmd = " ".join(source_ssh_cmd) + f" 'zfs send {send_flags} {full_snapshot}'"
+        send_cmd = " ".join(source_ssh_cmd) + f" \"zfs send {send_flags} {shlex.quote(full_snapshot)}\""
 
         # Clean up target dataset completely before receive to eliminate race condition
         # This runs as a separate command to avoid pipe complications
@@ -363,12 +364,12 @@ class ZFSTransfer(BaseTransfer):
             "Preparing target dataset for migration",
             target_dataset=target_dataset,
         )
-        
+
         # Check if target dataset exists and destroy it completely if needed
         await self._prepare_target_dataset(target_host, target_dataset)
-        
+
         # Build simple ZFS receive command
-        recv_cmd = " ".join(target_ssh_cmd) + f" 'zfs recv {recv_flags} {target_dataset}'"
+        recv_cmd = " ".join(target_ssh_cmd) + f" \"zfs recv {recv_flags} {shlex.quote(target_dataset)}\""
 
         # Combine with pipe (send | receive)
         full_cmd = f"{send_cmd} | {recv_cmd}"
@@ -384,7 +385,7 @@ class ZFSTransfer(BaseTransfer):
         # Execute the combined command
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # noqa: S603
+            lambda: subprocess.run(  # nosec B603
                 ["/bin/bash", "-c", full_cmd], check=False, capture_output=True, text=True
             ),
         )
@@ -426,11 +427,11 @@ class ZFSTransfer(BaseTransfer):
 
         # 1. Verify target dataset exists
         target_exists_cmd = target_ssh_cmd + [
-            f"zfs list {target_dataset} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
+            f"zfs list {shlex.quote(target_dataset)} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(target_exists_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(target_exists_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if "NOT_FOUND" in result.stdout:
@@ -438,11 +439,11 @@ class ZFSTransfer(BaseTransfer):
 
         # 2. Get source snapshot properties
         source_props_cmd = source_ssh_cmd + [
-            f"zfs get -H -p used,referenced,compressratio {source_snapshot} 2>/dev/null || echo 'FAILED'"
+            f"zfs get -H -p used,referenced,compressratio {shlex.quote(source_snapshot)} 2>/dev/null || echo 'FAILED'"
         ]
         source_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(source_props_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(source_props_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if "FAILED" in source_result.stdout or source_result.returncode != 0:
@@ -450,11 +451,11 @@ class ZFSTransfer(BaseTransfer):
         else:
             # 3. Get target dataset properties
             target_props_cmd = target_ssh_cmd + [
-                f"zfs get -H -p used,referenced,compressratio {target_dataset} 2>/dev/null || echo 'FAILED'"
+                f"zfs get -H -p used,referenced,compressratio {shlex.quote(target_dataset)} 2>/dev/null || echo 'FAILED'"
             ]
             target_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     target_props_cmd, capture_output=True, text=True, check=False
                 ),
             )
@@ -492,7 +493,7 @@ class ZFSTransfer(BaseTransfer):
         ]
         access_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(access_test_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(access_test_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if access_result.returncode != 0:
@@ -552,7 +553,7 @@ class ZFSTransfer(BaseTransfer):
         """
         transfer_results = []
         overall_success = True
-        
+
         self.logger.info(
             "Starting multi-service ZFS transfer",
             services_count=len(service_paths),
@@ -560,10 +561,10 @@ class ZFSTransfer(BaseTransfer):
             target_host=target_host.hostname,
             service_paths=service_paths
         )
-        
+
         # Group paths by their containing dataset to avoid duplicate transfers
         datasets_to_transfer = {}
-        
+
         for service_path in service_paths:
             try:
                 # Determine source dataset from service path
@@ -584,7 +585,7 @@ class ZFSTransfer(BaseTransfer):
                         "skipped": True
                     })
                     continue
-                
+
                 # Group by dataset - all paths in same dataset will be transferred together
                 if source_dataset not in datasets_to_transfer:
                     datasets_to_transfer[source_dataset] = {
@@ -592,7 +593,7 @@ class ZFSTransfer(BaseTransfer):
                         "dataset": source_dataset
                     }
                 datasets_to_transfer[source_dataset]["paths"].append(service_path)
-                
+
             except Exception as e:
                 service_name = service_path.split('/')[-1]
                 self.logger.error("Failed to determine dataset for path", service_path=service_path, error=str(e))
@@ -602,7 +603,7 @@ class ZFSTransfer(BaseTransfer):
                     "service_path": service_path,
                     "error": str(e)
                 })
-        
+
         # Transfer each unique dataset
         for source_dataset, dataset_info in datasets_to_transfer.items():
             try:
@@ -610,31 +611,31 @@ class ZFSTransfer(BaseTransfer):
                 dataset_base_path = await self._get_dataset_mountpoint(source_host, source_dataset)
                 if not dataset_base_path:
                     raise ZFSError(f"Could not determine mountpoint for dataset {source_dataset}")
-                
+
                 # Calculate target dataset name - extract service name from dataset
                 # e.g., rpool/appdata/test-mcp-simple -> test-mcp-simple
                 dataset_parts = source_dataset.split('/')
                 service_dataset_name = dataset_parts[-1] if len(dataset_parts) > 1 else source_dataset
-                
+
                 # Target dataset path
                 if target_host.zfs_dataset:
                     target_dataset = f"{target_host.zfs_dataset}/{service_dataset_name}"
                 else:
                     raise ZFSError(f"Target host {target_host.hostname} has no zfs_dataset configured")
-                
+
                 # Target path (mountpoint)
                 target_service_path = dataset_base_path.replace(
-                    source_host.appdata_path, 
+                    source_host.appdata_path,
                     target_host.appdata_path
                 )
-                
+
                 self.logger.info(
                     "Transferring dataset",
                     source_dataset=source_dataset,
                     target_dataset=target_dataset,
                     paths_included=dataset_info["paths"]
                 )
-                
+
                 # Transfer the dataset
                 result = await self.transfer(
                     source_host=source_host,
@@ -644,7 +645,7 @@ class ZFSTransfer(BaseTransfer):
                     source_dataset=source_dataset,
                     target_dataset=target_dataset,
                 )
-                
+
                 # Mark all paths in this dataset as transferred
                 if result.get("success", False):
                     for path in dataset_info["paths"]:
@@ -657,7 +658,7 @@ class ZFSTransfer(BaseTransfer):
                             "target_dataset": target_dataset,
                             "dataset_transfer": True  # Indicates this was part of dataset transfer
                         })
-                    
+
                     self.logger.info(
                         "Dataset transfer completed successfully",
                         source_dataset=source_dataset,
@@ -676,17 +677,17 @@ class ZFSTransfer(BaseTransfer):
                             "target_dataset": target_dataset,
                             "error": result.get("error", "Dataset transfer failed")
                         })
-                    
+
                     self.logger.error(
                         "Dataset transfer failed",
                         source_dataset=source_dataset,
                         error=result.get("error", "Unknown error")
                     )
-                    
+
             except Exception as e:
                 overall_success = False
                 self.logger.error("Dataset transfer failed", source_dataset=source_dataset, error=str(e))
-                
+
                 # Mark all paths in this dataset as failed
                 for path in dataset_info["paths"]:
                     path_name = path.split('/')[-1]
@@ -697,12 +698,12 @@ class ZFSTransfer(BaseTransfer):
                         "source_dataset": source_dataset,
                         "error": str(e)
                     })
-        
+
         # Calculate final statistics
         successful_services = [r for r in transfer_results if r.get("success", False)]
         failed_services = [r for r in transfer_results if not r.get("success", False)]
         datasets_transferred = len([d for d in datasets_to_transfer.keys() if any(r.get("success", False) and r.get("source_dataset") == d for r in transfer_results)])
-        
+
         result = {
             "success": overall_success,
             "transfer_type": "zfs_multi_service",
@@ -713,13 +714,13 @@ class ZFSTransfer(BaseTransfer):
             "datasets_transferred": datasets_transferred,
             "total_datasets": len(datasets_to_transfer),
         }
-        
+
         if overall_success:
             result["message"] = f"Successfully transferred {datasets_transferred} datasets containing {len(successful_services)} service paths"
         else:
             result["message"] = f"Transfer completed with errors: {datasets_transferred}/{len(datasets_to_transfer)} datasets transferred"
             result["errors"] = [r.get("error", "Unknown error") for r in failed_services if r.get("error")]
-        
+
         self.logger.info(
             "Multi-service ZFS transfer completed",
             success=overall_success,
@@ -729,7 +730,7 @@ class ZFSTransfer(BaseTransfer):
             total_services=len(service_paths),
             total_datasets=len(datasets_to_transfer)
         )
-        
+
         return result
 
     async def _get_dataset_mountpoint(self, host: DockerHost, dataset: str) -> str | None:
@@ -743,18 +744,18 @@ class ZFSTransfer(BaseTransfer):
             Mountpoint path or None if not found
         """
         ssh_cmd = self.build_ssh_cmd(host)
-        cmd = ssh_cmd + [f"zfs get -H -o value mountpoint {dataset} 2>/dev/null || echo 'NOT_FOUND'"]
-        
+        cmd = ssh_cmd + [f"zfs get -H -o value mountpoint {shlex.quote(dataset)} 2>/dev/null || echo 'NOT_FOUND'"]
+
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
-        
+
         if result.returncode == 0 and "NOT_FOUND" not in result.stdout:
             mountpoint = result.stdout.strip()
             if mountpoint and mountpoint != "-":  # "-" means no mountpoint
                 return mountpoint
-                
+
         return None
 
     async def _cleanup_target_snapshots(self, host: DockerHost, dataset: str) -> None:
@@ -768,18 +769,18 @@ class ZFSTransfer(BaseTransfer):
             dataset: Target dataset name
         """
         ssh_cmd = self.build_ssh_cmd(host)
-        
+
         # List existing snapshots for this dataset
-        list_cmd = ssh_cmd + [f"zfs list -H -t snapshot -o name {dataset} 2>/dev/null || true"]
-        
+        list_cmd = ssh_cmd + [f"zfs list -H -t snapshot -o name {shlex.quote(dataset)} 2>/dev/null || true"]
+
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(list_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(list_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
-        
+
         if result.returncode == 0 and result.stdout.strip():
             snapshots = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-            
+
             if snapshots:
                 self.logger.info(
                     "Cleaning up existing snapshots on target dataset for migration",
@@ -787,22 +788,22 @@ class ZFSTransfer(BaseTransfer):
                     snapshots_to_remove=len(snapshots),
                     snapshots=snapshots[:3]  # Log first 3 for reference
                 )
-                
+
                 # Destroy each snapshot
                 for snapshot in snapshots:
-                    destroy_cmd = ssh_cmd + [f"zfs destroy {snapshot} 2>/dev/null || true"]
+                    destroy_cmd = ssh_cmd + [f"zfs destroy {shlex.quote(snapshot)} 2>/dev/null || true"]
                     destroy_result = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: subprocess.run(destroy_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+                        lambda: subprocess.run(destroy_cmd, capture_output=True, text=True, check=False),  # nosec B603
                     )
-                    
+
                     if destroy_result.returncode != 0:
                         self.logger.warning(
                             "Failed to destroy snapshot, continuing anyway",
                             snapshot=snapshot,
                             error=destroy_result.stderr.strip()
                         )
-                
+
                 self.logger.info("Target dataset snapshot cleanup completed", dataset=dataset)
             else:
                 self.logger.debug("No existing snapshots found on target dataset", dataset=dataset)
@@ -818,29 +819,29 @@ class ZFSTransfer(BaseTransfer):
             dataset: Target dataset name
         """
         ssh_cmd = self.build_ssh_cmd(host)
-        
+
         # Check if target dataset exists
-        check_cmd = ssh_cmd + [f"zfs list {dataset} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"]
-        
+        check_cmd = ssh_cmd + [f"zfs list {shlex.quote(dataset)} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"]
+
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
-        
+
         if "EXISTS" in result.stdout:
             self.logger.info(
                 "Target dataset exists, destroying it for clean migration",
                 dataset=dataset,
                 host=host.hostname
             )
-            
+
             # Destroy the entire dataset (this also removes all snapshots)
-            destroy_cmd = ssh_cmd + [f"zfs destroy -r {dataset} 2>/dev/null || true"]
+            destroy_cmd = ssh_cmd + [f"zfs destroy -r {shlex.quote(dataset)} 2>/dev/null || true"]
             destroy_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(destroy_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+                lambda: subprocess.run(destroy_cmd, capture_output=True, text=True, check=False),  # nosec B603
             )
-            
+
             if destroy_result.returncode == 0:
                 self.logger.info("Target dataset destroyed successfully", dataset=dataset)
             else:
@@ -851,7 +852,7 @@ class ZFSTransfer(BaseTransfer):
                 )
         else:
             self.logger.info(
-                "Target dataset does not exist, ready for clean receive", 
+                "Target dataset does not exist, ready for clean receive",
                 dataset=dataset,
                 host=host.hostname
             )

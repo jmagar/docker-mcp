@@ -49,7 +49,7 @@ class StackNetwork:
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(  # noqa: S603
+                    lambda: subprocess.run(  # nosec B603
                         source_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
                     ),
                 )
@@ -66,7 +66,7 @@ class StackNetwork:
             try:
                 result = await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(  # noqa: S603
+                    lambda: subprocess.run(  # nosec B603
                         target_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
                     ),
                 )
@@ -90,7 +90,7 @@ class StackNetwork:
                     ]
                     result = await loop.run_in_executor(
                         None,
-                        lambda: subprocess.run(  # noqa: S603
+                        lambda: subprocess.run(  # nosec B603
                             create_test_file_cmd,
                             capture_output=True,
                             text=True,
@@ -114,7 +114,7 @@ class StackNetwork:
 
                         result = await loop.run_in_executor(
                             None,
-                            lambda: subprocess.run(  # noqa: S603
+                            lambda: subprocess.run(  # nosec B603
                                 rsync_test_cmd,
                                 capture_output=True,
                                 text=True,
@@ -145,11 +145,11 @@ class StackNetwork:
                             await asyncio.gather(
                                 loop.run_in_executor(
                                     None,
-                                    lambda: subprocess.run(cleanup_source, check=False),  # noqa: S603
+                                    lambda: subprocess.run(cleanup_source, check=False),  # nosec B603
                                 ),
                                 loop.run_in_executor(
                                     None,
-                                    lambda: subprocess.run(cleanup_target, check=False),  # noqa: S603
+                                    lambda: subprocess.run(cleanup_target, check=False),  # nosec B603
                                 ),
                             )
                         else:
@@ -318,7 +318,7 @@ class StackNetwork:
 
             create_result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     create_cmd, capture_output=True, text=True, check=False, timeout=30
                 ),
             )
@@ -337,7 +337,7 @@ class StackNetwork:
 
             transfer_result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     transfer_cmd, capture_output=True, text=True, check=False, timeout=60
                 ),
             )
@@ -370,7 +370,7 @@ class StackNetwork:
                 *[
                     loop.run_in_executor(
                         None,
-                        lambda cmd=cmd: subprocess.run(cmd, check=False),  # noqa: S603
+                        lambda cmd=cmd: subprocess.run(cmd, check=False),  # nosec B603
                     )
                     for cmd in cleanup_commands
                 ]

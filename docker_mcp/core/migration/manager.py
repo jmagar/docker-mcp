@@ -1,16 +1,13 @@
 """Main migration orchestrator for Docker stack transfers."""
 
 import asyncio
-import os
 import shlex
 import subprocess
-import tempfile
 from typing import Any
 
 import structlog
 
 from ...constants import DOCKER_COMPOSE_PROJECT
-from ...utils import build_ssh_command
 from ..config_loader import DockerHost
 from ..exceptions import DockerMCPError
 from ..transfer import ArchiveUtils, RsyncTransfer, ZFSTransfer
@@ -95,7 +92,7 @@ class MigrationManager:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # noqa: S603
+            lambda: subprocess.run(  # nosec B603
                 check_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -127,7 +124,7 @@ class MigrationManager:
                 stop_cmd = ssh_cmd + [f"docker kill {shlex.quote(container)}"]
                 await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda cmd=stop_cmd: subprocess.run(  # noqa: S603
+                    lambda cmd=stop_cmd: subprocess.run(  # nosec B603
                         cmd, check=False, capture_output=True, text=True
                     ),
                 )
@@ -163,7 +160,7 @@ class MigrationManager:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=full_cmd: subprocess.run(  # noqa: S603
+            lambda cmd=full_cmd: subprocess.run(  # nosec B603
                 cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -215,7 +212,7 @@ class MigrationManager:
                 target_host=target_host,
                 service_paths=source_paths,  # Pass individual service paths
             )
-            
+
             if isinstance(result, dict):
                 result.setdefault("transfer_type", "zfs")
                 result.setdefault("success", False)  # Ensure success key exists
@@ -235,12 +232,12 @@ class MigrationManager:
             # For rsync, directly sync each source path to target
             transfer_results = []
             overall_success = True
-            
+
             for source_path in source_paths:
                 try:
                     # For rsync, sync directly to target_path (which already includes stack name from executor)
                     # Don't append basename to avoid path duplication like /appdata/stack/stack
-                    
+
                     result = await transfer_instance.transfer(
                         source_host=source_host,
                         target_host=target_host,
@@ -249,11 +246,11 @@ class MigrationManager:
                         compress=True,
                         delete=False,  # Safety: don't delete target files
                     )
-                    
+
                     transfer_results.append(result)
                     if not result.get("success", False):
                         overall_success = False
-                        
+
                 except Exception as e:
                     overall_success = False
                     transfer_results.append({
@@ -269,12 +266,12 @@ class MigrationManager:
                 "paths_transferred": len([r for r in transfer_results if r.get("success", False)]),
                 "total_paths": len(source_paths),
             }
-            
+
             if not overall_success:
                 final_result["message"] = "Some rsync transfers failed"
             else:
                 final_result["message"] = f"Successfully transferred {final_result['paths_transferred']} paths via rsync"
-            
+
             return final_result
 
     # Delegate methods to focused components

@@ -56,7 +56,7 @@ class StackMigrationExecutor:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(read_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+                lambda: subprocess.run(read_cmd, capture_output=True, text=True, check=False),  # nosec B603
             )
 
             if result.returncode != 0:
@@ -287,7 +287,7 @@ class StackMigrationExecutor:
                 try:
                     import asyncio as _asyncio
                     await _asyncio.sleep(2)  # Initial delay for deployment to settle
-                    
+
                     # Poll for container readiness
                     for attempt in range(10):  # Up to 10 seconds
                         # Check if container exists and is running
@@ -296,21 +296,21 @@ class StackMigrationExecutor:
                         check_cmd = ssh_cmd + [
                             f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}' | grep -q . && echo 'RUNNING' || echo 'NOT_READY'"
                         ]
-                        
+
                         import subprocess
                         result = await _asyncio.get_event_loop().run_in_executor(
                             None,
-                            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+                            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # nosec B603
                         )
-                        
+
                         if result.returncode == 0 and "RUNNING" in result.stdout:
                             self.logger.info("Container ready for verification", stack_name=stack_name, attempt=attempt+1)
                             break
-                            
+
                         await _asyncio.sleep(1)
                     else:
                         self.logger.warning("Container may not be fully ready for verification", stack_name=stack_name)
-                        
+
                 except Exception as e:
                     self.logger.warning("Container readiness check failed", error=str(e))
                     # Continue anyway - verification will handle missing containers
@@ -429,7 +429,7 @@ class StackMigrationExecutor:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(remove_cmd, check=False),  # noqa: S603
+                lambda: subprocess.run(remove_cmd, check=False),  # nosec B603
             )
 
             cleanup_results = {

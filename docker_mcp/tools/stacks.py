@@ -347,6 +347,7 @@ class StackTools:
         compose_file_path: str,
         compose_args: list[str],
         environment: dict[str, str] | None = None,
+        timeout: int = 300,
     ) -> str:
         """Execute docker compose command via SSH on remote host."""
         # Extract directory from full path
@@ -391,12 +392,12 @@ class StackTools:
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     ssh_cmd,
                     check=False,
                     text=True,
                     capture_output=True,
-                    timeout=300,  # 5 minute timeout for deployment
+                    timeout=timeout,
                 ),
             )
 
@@ -424,18 +425,18 @@ class StackTools:
     def _build_remote_command(
         self, project_directory: str, compose_cmd: list[str], environment: dict[str, str] | None
     ) -> str:
-        """Build remote Docker compose command."""
-        # Build environment variables for remote execution
-        env_vars = []
-        if environment:
-            for key, value in environment.items():
-                env_vars.append(f"{key}={value}")
+        """Build remote Docker compose command with safe quoting."""
+        import shlex
 
-        # Combine environment and docker compose command
-        if env_vars:
-            return f"cd {project_directory} && {' '.join(env_vars)} {' '.join(compose_cmd)}"
-        else:
-            return f"cd {project_directory} && {' '.join(compose_cmd)}"
+        quoted_cd = f"cd {shlex.quote(project_directory)}"
+        env_prefix = ""
+
+        if environment:
+            parts = [f"{k}={shlex.quote(v)}" for k, v in environment.items()]
+            env_prefix = " " + " ".join(parts)
+
+        quoted_compose = " ".join(shlex.quote(arg) for arg in compose_cmd)
+        return f"{quoted_cd} &&{env_prefix} {quoted_compose}"
 
     async def manage_stack(
         self, host_id: str, stack_name: str, action: str, options: dict[str, Any] | None = None
@@ -566,8 +567,10 @@ class StackTools:
                 )
 
             # Execute via SSH using the same method as deploy_stack
+            # Use operation-specific timeouts: 300s for up/build, 60s for logs/ps
+            timeout = 300 if action in ["up", "build"] else 60
             result = await self._execute_compose_with_file(
-                context_name, stack_name, compose_file_path, compose_args, None
+                context_name, stack_name, compose_file_path, compose_args, None, timeout
             )
 
             # Parse action-specific outputs
@@ -601,19 +604,22 @@ class StackTools:
     def _parse_ps_output_from_ssh(self, result: str) -> dict[str, Any]:
         """Parse docker compose ps output from SSH execution."""
         try:
-            services = []
-            # SSH result is just the raw output string from docker compose ps --format json
-            # Each line should be a JSON object representing a service
-            for line in result.strip().split("\n"):
-                if line.strip():
-                    try:
-                        service_data = json.loads(line)
-                        services.append(service_data)
-                    except json.JSONDecodeError:
-                        continue
-            return {"services": services}
+            s = result.strip()
+            # First try full JSON (array or object)
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return {"services": parsed}
+            return {"services": [parsed]}
         except Exception:
-            return {"services": []}
+            # Fallback: JSON-lines
+            services = []
+            for line in result.strip().split("\n"):
+                try:
+                    if line.strip():
+                        services.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return {"services": services}
 
     def _validate_stack_inputs(
         self, host_id: str, stack_name: str, action: str
@@ -664,7 +670,7 @@ class StackTools:
 
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     ssh_cmd,
                     check=False,
                     capture_output=True,

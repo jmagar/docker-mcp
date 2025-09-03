@@ -6,7 +6,6 @@ Business logic for Docker cleanup and disk usage operations.
 
 import asyncio
 import re
-import subprocess
 from datetime import datetime
 from typing import Any
 
@@ -21,7 +20,7 @@ class CleanupService:
 
     def __init__(self, config: DockerMCPConfig):
         self.config = config
-        self.logger = structlog.get_logger()
+        self.logger = structlog.get_logger().bind(service="CleanupService")
 
     async def docker_cleanup(self, host_id: str, cleanup_type: str) -> dict[str, Any]:
         """Perform Docker cleanup operations on a host.
@@ -44,6 +43,7 @@ class CleanupService:
             self.logger.info(
                 "Starting Docker cleanup",
                 host_id=host_id,
+                operation="docker_cleanup",
                 cleanup_type=cleanup_type,
                 hostname=host.hostname,
             )
@@ -85,42 +85,61 @@ class CleanupService:
 
             host = self.config.hosts[host_id]
 
-            self.logger.info("Checking Docker disk usage", host_id=host_id, hostname=host.hostname)
+            self.logger.info(
+                "Checking Docker disk usage",
+                host_id=host_id,
+                operation="docker_disk_usage",
+                hostname=host.hostname,
+            )
 
             # Get disk usage summary
             summary_cmd = build_ssh_command(host) + ["docker", "system", "df"]
-            summary_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # noqa: S603
-                    summary_cmd, check=False, capture_output=True, text=True
-                ),
-            )
+            proc = await asyncio.create_subprocess_exec(
+                *summary_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )  # nosec B603
+            try:
+                summary_stdout, summary_stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=60
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return {"success": False, "error": "Timeout getting docker disk usage summary"}
 
-            if summary_result.returncode != 0:
+            if proc.returncode != 0:
                 return {
                     "success": False,
-                    "error": f"Failed to get disk usage: {summary_result.stderr}",
+                    "error": f"Failed to get disk usage: {summary_stderr.decode()}",
                 }
 
             # Get detailed usage
             detailed_cmd = build_ssh_command(host) + ["docker", "system", "df", "-v"]
-            detailed_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # noqa: S603
-                    detailed_cmd, check=False, capture_output=True, text=True
-                ),
-            )
+            dproc = await asyncio.create_subprocess_exec(
+                *detailed_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )  # nosec B603
+            try:
+                detailed_stdout, detailed_stderr = await asyncio.wait_for(
+                    dproc.communicate(), timeout=120
+                )
+            except asyncio.TimeoutError:
+                dproc.kill()
+                await dproc.wait()
+                detailed_stdout = b""  # fall back to no details
 
             # Parse results
-            summary = self._parse_disk_usage_summary(summary_result.stdout)
+            summary = self._parse_disk_usage_summary(summary_stdout.decode())
             detailed = (
-                self._parse_disk_usage_detailed(detailed_result.stdout)
-                if detailed_result.returncode == 0
+                self._parse_disk_usage_detailed(detailed_stdout.decode())
+                if dproc.returncode == 0
                 else {}
             )
 
             # Generate cleanup recommendations
-            cleanup_potential = self._analyze_cleanup_potential(summary_result.stdout)
+            cleanup_potential = self._analyze_cleanup_potential(summary_stdout.decode())
             recommendations = self._generate_cleanup_recommendations(summary, detailed)
 
             # Base response with essential information
@@ -244,29 +263,40 @@ class CleanupService:
 
     async def _run_cleanup_command(self, cmd: list[str], resource_type: str) -> dict[str, Any]:
         """Run a cleanup command and parse results."""
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # noqa: S603
-                cmd, check=False, capture_output=True, text=True
-            ),
-        )
-
-        if result.returncode != 0:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )  # nosec B603
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
             return {
                 "resource_type": resource_type,
                 "success": False,
-                "error": result.stderr,
+                "error": "Timeout executing cleanup command",
+                "space_reclaimed": "0B",
+            }
+
+        if proc.returncode != 0:
+            return {
+                "resource_type": resource_type,
+                "success": False,
+                "error": stderr.decode(),
                 "space_reclaimed": "0B",
             }
 
         # Parse space reclaimed from output
-        space_reclaimed = self._parse_cleanup_output(result.stdout)
+        out_str = stdout.decode().strip()
+        space_reclaimed = self._parse_cleanup_output(out_str)
 
         return {
             "resource_type": resource_type,
             "success": True,
             "space_reclaimed": space_reclaimed,
-            "output": result.stdout.strip(),
+            "output": out_str,
         }
 
     def _parse_disk_usage_summary(self, output: str) -> dict[str, Any]:
@@ -684,13 +714,12 @@ class CleanupService:
 
         # Add specific cleanup commands if there are recommendations
         if recommendations:
-            recommendations.extend(
-                [
-                    "",  # Separator line
-                    "🔧 Recommended Actions:",
-                    "• Run 'docker_hosts cleanup safe' to clean containers, networks, and build cache",
-                    "• Run 'docker_hosts cleanup moderate' to also remove unused images",
-                ]
+            recommendations.append("🔧 Recommended Actions:")
+            recommendations.append(
+                "• Run 'docker_hosts cleanup safe' to clean containers, networks, and build cache"
+            )
+            recommendations.append(
+                "• Run 'docker_hosts cleanup moderate' to also remove unused images"
             )
 
             # Only suggest aggressive cleanup if there are volumes to clean
@@ -780,13 +809,15 @@ class CleanupService:
                 "--format",
                 "{{.Names}}",
             ]
-            containers_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(containers_cmd, check=False, capture_output=True, text=True),  # noqa: S603
-            )
+            containers_proc = await asyncio.create_subprocess_exec(
+                *containers_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )  # nosec B603
+            containers_stdout, containers_stderr = await containers_proc.communicate()
 
-            if containers_result.returncode == 0 and containers_result.stdout.strip():
-                stopped_containers = containers_result.stdout.strip().split("\n")
+            if containers_proc.returncode == 0 and containers_stdout.strip():
+                stopped_containers = containers_stdout.decode().strip().split("\n")
                 details["stopped_containers"] = {
                     "count": len(stopped_containers),
                     "names": stopped_containers[:5],  # Show first 5
@@ -802,13 +833,15 @@ class CleanupService:
                 "--format",
                 "{{.Name}}",
             ]
-            networks_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(networks_cmd, check=False, capture_output=True, text=True),  # noqa: S603
-            )
+            networks_proc = await asyncio.create_subprocess_exec(
+                *networks_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )  # nosec B603
+            networks_stdout, networks_stderr = await networks_proc.communicate()
 
-            if networks_result.returncode == 0 and networks_result.stdout.strip():
-                unused_networks = networks_result.stdout.strip().split("\n")
+            if networks_proc.returncode == 0 and networks_stdout.strip():
+                unused_networks = networks_stdout.decode().strip().split("\n")
                 details["unused_networks"] = {
                     "count": len(unused_networks),
                     "names": unused_networks[:5],  # Show first 5
@@ -823,13 +856,15 @@ class CleanupService:
                 "--format",
                 "{{.Repository}}:{{.Tag}}",
             ]
-            images_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(images_cmd, check=False, capture_output=True, text=True),  # noqa: S603
-            )
+            images_proc = await asyncio.create_subprocess_exec(
+                *images_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )  # nosec B603
+            images_stdout, images_stderr = await images_proc.communicate()
 
-            if images_result.returncode == 0 and images_result.stdout.strip():
-                dangling_images = images_result.stdout.strip().split("\n")
+            if images_proc.returncode == 0 and images_stdout.strip():
+                dangling_images = images_stdout.decode().strip().split("\n")
                 details["dangling_images"]["count"] = len(dangling_images)
 
         except Exception as e:
@@ -1103,44 +1138,56 @@ class CleanupService:
         else:
             raise ValueError(f"Unsupported frequency: {frequency}")
 
-    async def _update_crontab(self, schedule_id: str, action: str, cron_entry: str = ""):
-        """Update system crontab for cleanup schedule."""
+    async def _update_crontab(
+        self, schedule_id: str, action: str, cron_entry: str = ""
+    ) -> dict[str, Any]:
+        """Update system crontab for cleanup schedule without invoking a shell."""
         try:
+            # Read current crontab (empty if none)
+            read_proc = await asyncio.create_subprocess_exec(
+                "crontab",
+                "-l",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )  # nosec B603
+            out, err = await read_proc.communicate()
+            current = out.decode() if read_proc.returncode == 0 else ""
+
+            marker = f"docker-mcp-{schedule_id}"
+            lines = [ln for ln in current.splitlines()]
+
             if action == "add":
-                # Add new cron entry
-                result = await asyncio.create_subprocess_shell(
-                    f"(crontab -l 2>/dev/null; echo '{cron_entry}') | crontab -",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await result.communicate()
-
+                if not any(marker in ln for ln in lines):
+                    lines.append(f"{cron_entry}")
             elif action == "remove":
-                # Remove cron entry
-                result = await asyncio.create_subprocess_shell(
-                    f"crontab -l 2>/dev/null | grep -v 'docker-mcp-{schedule_id}' | crontab -",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await result.communicate()
-
-            else:  # enable/disable
-                comment_char = "" if action == "enable" else "#"
-                result = await asyncio.create_subprocess_shell(
-                    f"crontab -l 2>/dev/null | sed 's/^#*\\(.*docker-mcp-{schedule_id}\\)/{comment_char}\\1/' | crontab -",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await result.communicate()
-
-            if result.returncode == 0:
-                return {"success": True, "message": f"Crontab updated for {action} action"}
+                lines = [ln for ln in lines if marker not in ln]
+            elif action in ("enable", "disable"):
+                enable = action == "enable"
+                new_lines = []
+                for ln in lines:
+                    if marker in ln:
+                        stripped = ln.lstrip("#").lstrip()
+                        new_lines.append(stripped if enable else f"# {stripped}")
+                    else:
+                        new_lines.append(ln)
+                lines = new_lines
             else:
-                error_msg = stderr.decode().strip() if stderr else f"Crontab {action} failed"
-                return {"success": False, "error": error_msg}
+                return {"success": False, "error": f"Unsupported crontab action: {action}"}
 
+            new_content = ("\n".join(lines) + "\n") if lines else "\n"
+            write_proc = await asyncio.create_subprocess_exec(
+                "crontab",
+                "-",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )  # nosec B603
+            w_out, w_err = await write_proc.communicate(input=new_content.encode())
+            if write_proc.returncode == 0:
+                return {"success": True, "message": f"Crontab updated for {action} action"}
+            return {"success": False, "error": (w_err.decode() or "Crontab update failed").strip()}
         except Exception as e:
-            return {"success": False, "error": f"Crontab update failed: {str(e)}"}
+            return {"success": False, "error": f"Crontab update failed: {e}"}
 
     def _generate_cleanup_command(self, schedule_config: dict) -> str:
         """Generate the command to run for scheduled cleanup."""

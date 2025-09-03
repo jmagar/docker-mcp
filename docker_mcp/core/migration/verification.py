@@ -26,6 +26,17 @@ class MigrationVerifier:
     def __init__(self):
         self.logger = logger.bind(component="migration_verifier")
 
+    async def _run_remote(self, cmd: list[str], description: str = "", timeout: int = 60):
+        """Run a remote SSH/Docker command with timeout and consistent annotation."""
+        self.logger.debug("exec_remote", description=description, cmd=cmd)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(  # nosec B603
+                cmd, capture_output=True, text=True, check=False, timeout=timeout
+            ),
+        )
+
     async def create_source_inventory(
         self,
         ssh_cmd: list[str],
@@ -54,36 +65,21 @@ class MigrationVerifier:
 
             # Get file count
             file_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f 2>/dev/null | wc -l"]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=file_count_cmd: subprocess.run(  # noqa: S603
-                    cmd, capture_output=True, text=True, check=False
-                ),
-            )
+            result = await self._run_remote(file_count_cmd, "file_count", timeout=60)
             path_inventory["file_count"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
             )
 
             # Get directory count
             dir_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type d 2>/dev/null | wc -l"]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=dir_count_cmd: subprocess.run(  # noqa: S603
-                    cmd, capture_output=True, text=True, check=False
-                ),
-            )
+            result = await self._run_remote(dir_count_cmd, "dir_count", timeout=60)
             path_inventory["dir_count"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
             )
 
             # Get total size in bytes
             size_cmd = ssh_cmd + [f"du -sb {shlex.quote(path)} 2>/dev/null | cut -f1"]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=size_cmd: subprocess.run(  # noqa: S603
-                    cmd, capture_output=True, text=True, check=False
-                ),
-            )
+            result = await self._run_remote(size_cmd, "size_check", timeout=60)
             path_inventory["total_size"] = (
                 int(result.stdout.strip()) if result.returncode == 0 else 0
             )
@@ -92,12 +88,7 @@ class MigrationVerifier:
             file_list_cmd = ssh_cmd + [
                 f"find {shlex.quote(path)} -type f -printf '%P\\n' 2>/dev/null | sort"
             ]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=file_list_cmd: subprocess.run(  # noqa: S603
-                    cmd, capture_output=True, text=True, check=False
-                ),
-            )
+            result = await self._run_remote(file_list_cmd, "file_listing", timeout=60)
             path_inventory["file_list"] = (
                 result.stdout.strip().split("\n") if result.returncode == 0 else []
             )
@@ -109,7 +100,7 @@ class MigrationVerifier:
             ]
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=critical_cmd: subprocess.run(  # noqa: S603
+                lambda cmd=critical_cmd: subprocess.run(  # nosec B603
                     cmd, capture_output=True, text=True, check=False
                 ),
             )
@@ -183,7 +174,7 @@ class MigrationVerifier:
         file_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=file_count_cmd: subprocess.run(  # noqa: S603
+            lambda cmd=file_count_cmd: subprocess.run(  # nosec B603
                 cmd, capture_output=True, text=True, check=False
             ),
         )
@@ -194,7 +185,7 @@ class MigrationVerifier:
         dir_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type d 2>/dev/null | wc -l"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=dir_count_cmd: subprocess.run(  # noqa: S603
+            lambda cmd=dir_count_cmd: subprocess.run(  # nosec B603
                 cmd, capture_output=True, text=True, check=False
             ),
         )
@@ -205,7 +196,7 @@ class MigrationVerifier:
         size_cmd = ssh_cmd + [f"du -sb {shlex.quote(target_path)} 2>/dev/null | cut -f1"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
         target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["size_found"] = target_size
@@ -216,7 +207,7 @@ class MigrationVerifier:
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=file_list_cmd: subprocess.run(  # noqa: S603
+            lambda cmd=file_list_cmd: subprocess.run(  # nosec B603
                 cmd, capture_output=True, text=True, check=False
             ),
         )
@@ -262,7 +253,7 @@ class MigrationVerifier:
 
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=checksum_cmd: subprocess.run(  # noqa: S603
+                lambda cmd=checksum_cmd: subprocess.run(  # nosec B603
                     cmd, capture_output=True, text=True, check=False
                 ),
             )
@@ -338,23 +329,23 @@ class MigrationVerifier:
         ]
         find_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=find_cmd: subprocess.run(  # noqa: S603
+            lambda cmd=find_cmd: subprocess.run(  # nosec B603
                 cmd, capture_output=True, text=True, check=False
             ),
         )
-        
+
         if find_result.returncode != 0 or not find_result.stdout.strip():
             return None
-        
+
         container_name = find_result.stdout.strip()
-        
+
         # Now inspect the actual container
         inspect_cmd = ssh_cmd + [
             f"docker inspect {shlex.quote(container_name)} 2>/dev/null"
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=inspect_cmd: subprocess.run(  # noqa: S603
+            lambda cmd=inspect_cmd: subprocess.run(  # nosec B603
                 cmd, capture_output=True, text=True, check=False
             ),
         )
@@ -387,20 +378,20 @@ class MigrationVerifier:
         ]
         find_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
-        
+
         if find_result.returncode != 0 or not find_result.stdout.strip():
             return False
-            
+
         container_name = find_result.stdout.strip()
-        
+
         test_cmd = ssh_cmd + [
             f"docker exec {shlex.quote(container_name)} ls /usr/share/nginx/html 2>/dev/null || docker exec {shlex.quote(container_name)} ls / 2>/dev/null"
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=test_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda cmd=test_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
         return result.returncode == 0
 
@@ -412,20 +403,20 @@ class MigrationVerifier:
         ]
         find_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
-        
+
         if find_result.returncode != 0 or not find_result.stdout.strip():
             return [f"Error response from daemon: No such container: {stack_name}"]  # This was the error we saw
-            
+
         container_name = find_result.stdout.strip()
-        
+
         logs_cmd = ssh_cmd + [
             f"docker logs {shlex.quote(container_name)} --tail 50 2>&1 | grep -i error || true"
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda cmd=logs_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda cmd=logs_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if result.stdout.strip():

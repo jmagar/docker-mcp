@@ -60,7 +60,7 @@ class BackupManager:
         check_cmd = ssh_cmd + [f"test -d {source_path} && echo 'EXISTS' || echo 'NOT_FOUND'"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if "NOT_FOUND" in result.stdout:
@@ -89,7 +89,7 @@ class BackupManager:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(backup_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(backup_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if "BACKUP_FAILED" in result.stdout or result.returncode != 0:
@@ -99,7 +99,7 @@ class BackupManager:
         size_cmd = ssh_cmd + [f"stat -c%s {backup_path} 2>/dev/null || echo '0'"]
         size_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         backup_size = int(size_result.stdout.strip()) if size_result.stdout.strip().isdigit() else 0
@@ -167,7 +167,7 @@ class BackupManager:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(snap_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(snap_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if result.returncode != 0:
@@ -177,7 +177,7 @@ class BackupManager:
         size_cmd = ssh_cmd + [f"zfs list -H -o used {full_snapshot} 2>/dev/null || echo '0'"]
         size_result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(size_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         # Parse ZFS size format (e.g., "1.2G", "512M", "4K")
@@ -250,7 +250,7 @@ class BackupManager:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(restore_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(restore_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if "RESTORE_FAILED" in result.stdout or result.returncode != 0:
@@ -290,7 +290,7 @@ class BackupManager:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(rollback_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+            lambda: subprocess.run(rollback_cmd, capture_output=True, text=True, check=False),  # nosec B603
         )
 
         if result.returncode != 0:

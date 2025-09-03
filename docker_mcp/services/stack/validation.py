@@ -176,7 +176,7 @@ class StackValidation:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(df_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+                lambda: subprocess.run(df_cmd, capture_output=True, text=True, check=False),  # nosec B603
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -238,7 +238,7 @@ class StackValidation:
                     None,
                     lambda cmd=check_cmd: subprocess.run(
                         cmd, capture_output=True, text=True, check=False
-                    ),  # noqa: S603
+                    ),  # nosec B603
                 )
 
                 is_available = result.returncode == 0 and "AVAILABLE" in result.stdout
@@ -348,7 +348,7 @@ class StackValidation:
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
-                    lambda cmd=check_cmd: subprocess.run(  # noqa: S603
+                    lambda cmd=check_cmd: subprocess.run(  # nosec B603
                         cmd, capture_output=True, text=True, check=False
                     ),
                 )
@@ -435,7 +435,7 @@ class StackValidation:
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
-                    lambda cmd=check_cmd: subprocess.run(  # noqa: S603
+                    lambda cmd=check_cmd: subprocess.run(  # nosec B603
                         cmd, capture_output=True, text=True, check=False
                     ),
                 )
@@ -468,7 +468,7 @@ class StackValidation:
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
-                    lambda cmd=check_cmd: subprocess.run(  # noqa: S603
+                    lambda cmd=check_cmd: subprocess.run(  # nosec B603
                         cmd, capture_output=True, text=True, check=False
                     ),
                 )

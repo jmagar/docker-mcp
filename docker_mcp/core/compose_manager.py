@@ -416,7 +416,7 @@ class ComposeManager:
 
             mkdir_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda cmd=mkdir_cmd: subprocess.run(  # noqa: S603
+                lambda cmd=mkdir_cmd: subprocess.run(  # nosec B603
                     cmd, check=False, capture_output=True, text=True, timeout=30
                 ),
             )
@@ -458,7 +458,7 @@ class ComposeManager:
 
             scp_result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603 - SCP command execution is intentional
+                lambda: subprocess.run(  # nosec B603 - SCP command execution is intentional
                     scp_cmd, check=False, capture_output=True, text=True, timeout=60
                 ),
             )
@@ -538,7 +538,7 @@ class ComposeManager:
             # Execute the command
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     ssh_cmd, check=False, capture_output=True, text=True, timeout=10
                 ),
             )
@@ -653,7 +653,7 @@ class ComposeManager:
             # Execute the command
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: subprocess.run(  # noqa: S603
+                lambda: subprocess.run(  # nosec B603
                     ssh_cmd, check=False, capture_output=True, text=True, timeout=10
                 ),
             )

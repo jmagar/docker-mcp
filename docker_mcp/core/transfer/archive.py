@@ -90,10 +90,14 @@ class ArchiveUtils:
         # For archiving, we want to archive the CONTENTS of directories
         # So we use the path itself as the parent and archive everything inside with "*"
         if len(path_objects) == 1:
-            # Single path - use the path itself as parent, archive its contents
-            parent = str(path_objects[0])
-            # Use "." to archive all contents of the directory
-            relative_paths = ["."]
+            # Single path - handle file vs directory case
+            p = path_objects[0]
+            if p.is_dir():
+                parent = str(p)
+                relative_paths = ["."]
+            else:
+                parent = str(p.parent)
+                relative_paths = [p.name]
         else:
             # Multiple paths - find their common parent
             try:
@@ -150,11 +154,11 @@ class ArchiveUtils:
         exclusions: list[str] | None = None,
     ) -> str:
         """Create tar.gz archive of volume data for BACKUP purposes.
-        
+
         WARNING: Do not use for migration! Migrations should use:
         - rsync for direct directory sync
         - ZFS send/receive for dataset transfers
-        
+
         This method is only for backup operations.
 
         Args:
@@ -206,7 +210,7 @@ class ArchiveUtils:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # noqa: S603
+            lambda: subprocess.run(  # nosec B603  # nosec B603
                 full_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -234,7 +238,7 @@ class ArchiveUtils:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # noqa: S603
+            lambda: subprocess.run(  # nosec B603  # nosec B603
                 verify_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -265,7 +269,7 @@ class ArchiveUtils:
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: subprocess.run(  # noqa: S603
+            lambda: subprocess.run(  # nosec B603  # nosec B603
                 extract_cmd, check=False, capture_output=True, text=True
             ),
         )
@@ -290,7 +294,7 @@ class ArchiveUtils:
         """
         try:
             success, message = await self.safety.safe_cleanup_archive(
-                ssh_cmd, archive_path, "Archive cleanup after migration"
+                ssh_cmd, archive_path, "Archive cleanup after backup"
             )
 
             if success:

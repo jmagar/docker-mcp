@@ -12,10 +12,10 @@ from fastmcp.tools.tool import ToolResult
 
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
+from .logs import LogsService
 from .stack.migration_orchestrator import StackMigrationOrchestrator
 from .stack.operations import StackOperations
 from .stack.validation import StackValidation
-from .logs import LogsService
 
 
 class StackService:
@@ -25,7 +25,7 @@ class StackService:
         self,
         config: DockerMCPConfig,
         context_manager: DockerContextManager,
-        logs_service: LogsService | None = None,
+        logs_service: LogsService,
     ):
         self.config = config
         self.context_manager = context_manager
@@ -35,7 +35,7 @@ class StackService:
         self.operations = StackOperations(config, context_manager)
         self.migration_orchestrator = StackMigrationOrchestrator(config, context_manager)
         self.validation = StackValidation()
-        self.logs_service = logs_service or LogsService(config, context_manager)
+        self.logs_service = logs_service
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
         """Validate host exists in configuration."""
@@ -396,9 +396,7 @@ class StackService:
                         "compose_discovery": discovery,
                     }
                 except Exception as e:
-                    self.logger.error(
-                        "compose discover error", host_id=host_id, error=str(e)
-                    )
+                    self.logger.error("compose discover error", host_id=host_id, error=str(e))
                     return {
                         "success": False,
                         "error": f"Failed to discover compose paths: {str(e)}",

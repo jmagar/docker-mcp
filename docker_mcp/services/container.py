@@ -633,12 +633,12 @@ class ContainerService:
                 info_result = await self.get_container_info(host_id, container_id)
                 # Extract structured content from ToolResult
                 info_data = info_result.structured_content if hasattr(info_result, 'structured_content') else info_result
-                
+
                 # Check for error in structured data
                 if isinstance(info_data, dict) and "error" not in info_data:
                     # Get the actual container info from structured content
                     container_info = info_data.get("info") or info_data
-                    
+
                     return {
                         "success": True,
                         HOST_ID: host_id,

@@ -40,8 +40,8 @@ class StackVolumeUtils:
                 if source_path.startswith("."):
                     source_path = f"{target_appdata}/{stack_name}/{source_path[2:]}"
                 elif not source_path.startswith("/"):
-                    # Named volume - needs resolution
-                    source_path = f"{target_appdata}/{stack_name}"
+                    # Named volume - cannot infer host path deterministically; skip normalization
+                    return None
 
                 return f"{source_path}:{container_path}"
 
