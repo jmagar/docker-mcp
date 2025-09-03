@@ -55,6 +55,17 @@ class StackOperations:
             )
 
             if result["success"]:
+                # Briefly wait for the project to become visible in list_stacks
+                try:
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(0.5)  # Initial delay for deployment to settle
+                    for _ in range(5):
+                        list_result = await self.stack_tools.list_stacks(host_id)
+                        if any(stack_name in str(s) for s in list_result.get("stacks", [])):
+                            break
+                        await _asyncio.sleep(1)
+                except Exception:
+                    pass
                 return ToolResult(
                     content=[
                         TextContent(

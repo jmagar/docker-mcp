@@ -630,14 +630,29 @@ class ContainerService:
                 if not container_id:
                     return {"success": False, "error": "container_id is required for info action"}
 
-                result = await self.get_container_info(host_id, container_id)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
+                info_result = await self.get_container_info(host_id, container_id)
+                # Extract structured content from ToolResult
+                info_data = info_result.structured_content if hasattr(info_result, 'structured_content') else info_result
+                
+                # Check for error in structured data
+                if isinstance(info_data, dict) and "error" not in info_data:
+                    # Get the actual container info from structured content
+                    container_info = info_data.get("info") or info_data
+                    
+                    return {
                         "success": True,
-                        "data": "No structured content",
+                        HOST_ID: host_id,
+                        CONTAINER_ID: container_id,
+                        "container": container_info,
+                        # Flattened fields for convenience + test expectations
+                        "image": container_info.get("image"),
+                        "status": container_info.get("status"),
+                        "created": container_info.get("created"),
+                        "name": container_info.get("name"),
+                        "id": container_info.get("container_id") or container_id,
                     }
-                return result
+                # Pass through error as-is
+                return info_data
 
             elif action in [
                 ContainerAction.START,

@@ -68,14 +68,17 @@ class StackMigrationExecutor:
             self.logger.error("Failed to retrieve compose file", error=str(e))
             return False, "", ""
 
-    async def create_data_archive(
+    async def create_backup_archive(
         self,
         source_host: DockerHost,
         volume_paths: list[str],
         stack_name: str,
         dry_run: bool = False,
     ) -> tuple[bool, str, dict]:
-        """Create archive of volume data.
+        """Create archive of volume data for BACKUP purposes only.
+        
+        WARNING: This method is for backup operations only, not migration!
+        Migrations use direct transfer methods (rsync/ZFS).
 
         Args:
             source_host: Source host configuration
@@ -132,20 +135,24 @@ class StackMigrationExecutor:
             self.logger.error("Failed to create data archive", error=str(e))
             return False, "", {"error": str(e)}
 
-    async def transfer_archive(
+    async def transfer_data(
         self,
         source_host: DockerHost,
         target_host: DockerHost,
-        archive_path: str,
+        volume_paths: list[str],
         stack_name: str,
         dry_run: bool = False,
     ) -> tuple[bool, dict]:
-        """Transfer archive between hosts.
+        """Transfer volume data directly between hosts (no archiving).
+
+        Uses optimal transfer method:
+        - rsync: Direct directory synchronization
+        - ZFS: Native dataset send/receive
 
         Args:
             source_host: Source host configuration
             target_host: Target host configuration
-            archive_path: Path to archive file
+            volume_paths: List of volume paths to transfer
             stack_name: Stack name
             dry_run: Whether this is a dry run
 
@@ -160,11 +167,11 @@ class StackMigrationExecutor:
             }
 
         try:
-            # Use migration manager for optimal transfer
+            # Use migration manager for optimal direct transfer
             transfer_result = await self.migration_manager.transfer_data(
                 source_host=source_host,
                 target_host=target_host,
-                source_paths=[archive_path],
+                source_paths=volume_paths,
                 target_path=f"{target_host.appdata_path or '/opt/docker-appdata'}/{stack_name}",
                 stack_name=stack_name,
                 dry_run=dry_run,
@@ -173,13 +180,16 @@ class StackMigrationExecutor:
             return transfer_result["success"], transfer_result
 
         except Exception as e:
-            self.logger.error("Failed to transfer archive", error=str(e))
+            self.logger.error("Failed to transfer data", error=str(e))
             return False, {"error": str(e)}
 
     async def extract_archive(
         self, target_host: DockerHost, archive_path: str, target_path: str, dry_run: bool = False
     ) -> tuple[bool, dict]:
-        """Extract archive on target host.
+        """Extract archive on target host for BACKUP/RESTORE operations only.
+        
+        WARNING: This method is for backup/restore operations only, not migration!
+        Migrations use direct transfer methods without archiving.
 
         Args:
             target_host: Target host configuration
@@ -273,6 +283,38 @@ class StackMigrationExecutor:
                         "start_error": start_result.get("error"),
                     }
 
+                # Wait for containers to fully start after deployment
+                try:
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(2)  # Initial delay for deployment to settle
+                    
+                    # Poll for container readiness
+                    for attempt in range(10):  # Up to 10 seconds
+                        # Check if container exists and is running
+                        target_host = self.config.hosts[host_id]
+                        ssh_cmd = build_ssh_command(target_host)
+                        check_cmd = ssh_cmd + [
+                            f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}' | grep -q . && echo 'RUNNING' || echo 'NOT_READY'"
+                        ]
+                        
+                        import subprocess
+                        result = await _asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # noqa: S603
+                        )
+                        
+                        if result.returncode == 0 and "RUNNING" in result.stdout:
+                            self.logger.info("Container ready for verification", stack_name=stack_name, attempt=attempt+1)
+                            break
+                            
+                        await _asyncio.sleep(1)
+                    else:
+                        self.logger.warning("Container may not be fully ready for verification", stack_name=stack_name)
+                        
+                except Exception as e:
+                    self.logger.warning("Container readiness check failed", error=str(e))
+                    # Continue anyway - verification will handle missing containers
+
             return True, {
                 "deploy_success": True,
                 "start_success": start_stack,
@@ -327,9 +369,10 @@ class StackMigrationExecutor:
                     ssh_cmd_target, source_inventory, f"{target_appdata}/{stack_name}"
                 )
 
-            overall_success = container_verification.get(
-                "overall_success", False
-            ) and data_verification.get("success", False)
+            # Extract the actual success from nested structure
+            container_success = container_verification.get("container_integration", {}).get("success", False)
+            data_success = data_verification.get("success", False)
+            overall_success = container_success and data_success
 
             return overall_success, {
                 "container_integration": container_verification,

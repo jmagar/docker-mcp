@@ -332,8 +332,25 @@ class MigrationVerifier:
         self, ssh_cmd: list[str], stack_name: str
     ) -> dict[str, Any] | None:
         """Run docker inspect and return parsed container info."""
+        # First, find the actual container name by project label (Docker Compose containers are named like stack-service-N)
+        find_cmd = ssh_cmd + [
+            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+        ]
+        find_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda cmd=find_cmd: subprocess.run(  # noqa: S603
+                cmd, capture_output=True, text=True, check=False
+            ),
+        )
+        
+        if find_result.returncode != 0 or not find_result.stdout.strip():
+            return None
+        
+        container_name = find_result.stdout.strip()
+        
+        # Now inspect the actual container
         inspect_cmd = ssh_cmd + [
-            f"docker inspect {shlex.quote(stack_name)} 2>/dev/null || echo 'NOT_FOUND'"
+            f"docker inspect {shlex.quote(container_name)} 2>/dev/null"
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -342,7 +359,7 @@ class MigrationVerifier:
             ),
         )
 
-        if result.returncode != 0 or "NOT_FOUND" in result.stdout:
+        if result.returncode != 0:
             return None
 
         try:
@@ -364,8 +381,22 @@ class MigrationVerifier:
 
     async def _check_in_container_access(self, ssh_cmd: list[str], stack_name: str) -> bool:
         """Check if data is accessible inside the container."""
+        # Find the actual container name first
+        find_cmd = ssh_cmd + [
+            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+        ]
+        find_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+        )
+        
+        if find_result.returncode != 0 or not find_result.stdout.strip():
+            return False
+            
+        container_name = find_result.stdout.strip()
+        
         test_cmd = ssh_cmd + [
-            f"docker exec {shlex.quote(stack_name)} ls /data 2>/dev/null || docker exec {shlex.quote(stack_name)} ls / 2>/dev/null"
+            f"docker exec {shlex.quote(container_name)} ls /usr/share/nginx/html 2>/dev/null || docker exec {shlex.quote(container_name)} ls / 2>/dev/null"
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -375,8 +406,22 @@ class MigrationVerifier:
 
     async def _collect_startup_errors(self, ssh_cmd: list[str], stack_name: str) -> list[str]:
         """Collect startup errors from container logs."""
+        # Find the actual container name first
+        find_cmd = ssh_cmd + [
+            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+        ]
+        find_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # noqa: S603
+        )
+        
+        if find_result.returncode != 0 or not find_result.stdout.strip():
+            return [f"Error response from daemon: No such container: {stack_name}"]  # This was the error we saw
+            
+        container_name = find_result.stdout.strip()
+        
         logs_cmd = ssh_cmd + [
-            f"docker logs {shlex.quote(stack_name)} --tail 50 2>&1 | grep -i error || true"
+            f"docker logs {shlex.quote(container_name)} --tail 50 2>&1 | grep -i error || true"
         ]
         result = await asyncio.get_event_loop().run_in_executor(
             None,

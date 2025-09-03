@@ -432,12 +432,13 @@ class StackService:
                 )
 
                 # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "Migration completed",
-                    }
-                return result
+                if hasattr(result, "structured_content") and result.structured_content:
+                    migration_result = result.structured_content.copy()
+                    # Map 'overall_success' to 'success' for consistency with other actions
+                    if "overall_success" in migration_result:
+                        migration_result["success"] = migration_result["overall_success"]
+                    return migration_result
+                return {"success": True, "data": "Migration completed"}
 
             elif action in [
                 ComposeAction.UP,

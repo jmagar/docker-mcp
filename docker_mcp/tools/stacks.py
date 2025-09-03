@@ -354,13 +354,15 @@ class StackTools:
         project_directory = str(compose_path.parent)
 
         # Build docker compose command to run on remote host
+        # Since we cd into the project directory, use relative path for compose file
+        compose_filename = compose_path.name
         compose_cmd = [
             "docker",
             "compose",
             "--project-name",
             project_name,
             "-f",
-            compose_file_path,
+            compose_filename,
         ]
         compose_cmd.extend(compose_args)
 
@@ -655,28 +657,9 @@ class StackTools:
             # Get the compose file path
             compose_file_path = compose_info["path"]
 
-            # Read the file content via SSH
+            # Read the file content via SSH using centralized command builder
             host = self.config.hosts[host_id]
-            ssh_cmd = [
-                "ssh",
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-            ]
-
-            # Add key file if specified
-            if host.identity_file:
-                ssh_cmd.extend(["-i", host.identity_file])
-
-            # Add port if not default
-            if host.port != 22:
-                ssh_cmd.extend(["-p", str(host.port)])
-
-            # SSH connection and cat command
-            ssh_cmd.append(f"{host.user}@{host.hostname}")
+            ssh_cmd = build_ssh_command(host)
             ssh_cmd.append(f"cat {compose_file_path}")
 
             result = await asyncio.get_event_loop().run_in_executor(
@@ -725,10 +708,12 @@ class StackTools:
             compose_file_path = await self.compose_manager.get_compose_file_path(
                 host_id, stack_name
             )
+            # Use just the filename since we cd into the project directory
+            compose_filename = Path(compose_file_path).name
             return {
                 "exists": True,
                 "path": compose_file_path,
-                "base_cmd": f"compose --project-name {stack_name} -f {compose_file_path}",
+                "base_cmd": f"compose --project-name {stack_name} -f {compose_filename}",
             }
         else:
             return {

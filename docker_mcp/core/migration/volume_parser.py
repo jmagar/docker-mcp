@@ -310,19 +310,15 @@ class VolumeParser:
                 target_path=target_appdata_path,
             )
 
-        # Replace bind mount paths (for any remaining literal paths)
-        for old_path in old_paths.values():
-            if old_path in updated_content:
-                # Extract relative path component
-                path_parts = old_path.split("/")
-                relative_name = path_parts[-1] if path_parts else "data"
-                new_path = f"{new_base_path}/{relative_name}"
-                updated_content = updated_content.replace(old_path, new_path)
+        # Replace bind mount paths using the source→target mapping
+        for source_path, target_path in old_paths.items():
+            if source_path in updated_content:
+                updated_content = updated_content.replace(source_path, target_path)
 
                 self.logger.debug(
                     "Updated compose path",
-                    old=old_path,
-                    new=new_path,
+                    old=source_path,
+                    new=target_path,
                 )
 
         return updated_content

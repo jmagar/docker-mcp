@@ -1,4 +1,16 @@
-"""Archive utilities for volume data compression and extraction."""
+"""
+Archive utilities for Docker MCP backup operations.
+
+IMPORTANT: These utilities are for BACKUP purposes only.
+Do NOT use for migration - migrations should use direct transfer methods:
+- rsync: Direct directory synchronization
+- ZFS: Native ZFS send/receive
+
+Archive operations are only used for:
+- Creating point-in-time backups before risky operations
+- Disaster recovery snapshots
+- Manual backup/restore operations
+"""
 
 import asyncio
 import subprocess
@@ -137,7 +149,13 @@ class ArchiveUtils:
         temp_dir: str | None = None,
         exclusions: list[str] | None = None,
     ) -> str:
-        """Create tar.gz archive of volume data on remote host.
+        """Create tar.gz archive of volume data for BACKUP purposes.
+        
+        WARNING: Do not use for migration! Migrations should use:
+        - rsync for direct directory sync
+        - ZFS send/receive for dataset transfers
+        
+        This method is only for backup operations.
 
         Args:
             ssh_cmd: SSH command parts for remote execution

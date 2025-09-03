@@ -119,9 +119,9 @@ class StackMigrationOrchestrator:
             # Step 3: Pre-flight checks
             migration_steps.append("🔍 Running pre-flight checks...")
 
-            # Extract volumes and estimate data size
+            # Extract volumes and estimate data size (use source host appdata for parsing)
             expected_mounts = self.volume_utils.extract_expected_mounts(
-                compose_content, target_host.appdata_path or "/opt/docker-appdata", stack_name
+                compose_content, source_host.appdata_path or "/opt/docker-appdata", stack_name
             )
             estimated_data_size = self.volume_utils.get_volume_size_estimate(expected_mounts)
             migration_data["estimated_data_size"] = estimated_data_size
@@ -208,16 +208,6 @@ class StackMigrationOrchestrator:
             if not dry_run:
                 migration_steps.append("🚀 Starting migration execution...")
 
-                # Create backup of target if data exists
-                target_path = f"{target_host.appdata_path or '/opt/docker-appdata'}/{stack_name}"
-                backup_success, backup_info = await self.executor.create_backup(
-                    target_host, target_path, stack_name, dry_run
-                )
-
-                if backup_success:
-                    migration_steps.append("💾 Target backup created")
-                    migration_data["backup_info"] = backup_info
-
                 # Stop source stack if not skipped
                 if not skip_stop_source:
                     stop_result = await self.executor.stack_tools.manage_stack(
@@ -228,47 +218,49 @@ class StackMigrationOrchestrator:
                     else:
                         migration_steps.append("⚠️  Failed to stop source stack")
 
-                # Create and transfer data archive
-                (
-                    archive_success,
-                    archive_path,
-                    archive_metadata,
-                ) = await self.executor.create_data_archive(
-                    source_host, expected_mounts, stack_name, dry_run
-                )
-
-                if not archive_success:
-                    return self._create_error_result(
-                        "Failed to create data archive", migration_data
-                    )
-
-                migration_steps.append("📦 Data archive created")
-
-                # Transfer archive
-                transfer_success, transfer_results = await self.executor.transfer_archive(
-                    source_host, target_host, archive_path, stack_name, dry_run
+                # Convert mount strings to source paths for transfer
+                source_paths = []
+                path_mappings = {}  # For compose file path updates
+                target_appdata_path = target_host.appdata_path or "/opt/docker-appdata"
+                
+                for mount in expected_mounts:
+                    if ":" in mount:
+                        source_path = mount.split(":", 1)[0]
+                        source_paths.append(source_path)
+                        
+                        # Create mapping from source path to target path for compose file updates
+                        # Extract the relative path under the stack directory
+                        if f"/{stack_name}/" in source_path:
+                            # Source: /mnt/appdata/test-mcp-simple/html
+                            # Target: /home/jmagar/appdata/test-mcp-simple/html
+                            relative_part = source_path.split(f"/{stack_name}/", 1)[1]
+                            target_path = f"{target_appdata_path}/{stack_name}/{relative_part}"
+                            path_mappings[source_path] = target_path
+                        else:
+                            # Fallback: assume entire source directory maps to target stack directory
+                            path_mappings[source_path] = f"{target_appdata_path}/{stack_name}"
+                
+                # Transfer data directly (no archiving)
+                transfer_success, transfer_results = await self.executor.transfer_data(
+                    source_host, target_host, source_paths, stack_name, dry_run
                 )
 
                 if not transfer_success:
                     return self._create_error_result("Data transfer failed", migration_data)
 
-                migration_steps.append("🚚 Data transfer completed")
-
-                # Extract archive on target
-                extract_success, extract_results = await self.executor.extract_archive(
-                    target_host, archive_path, target_path, dry_run
-                )
-
-                if not extract_success:
-                    return self._create_error_result("Archive extraction failed", migration_data)
-
-                migration_steps.append("📂 Data extraction completed")
+                migration_steps.append("🚚 Direct data transfer completed")
+                # Record transfer method for test assertions (zfs or rsync)
+                migration_data["transfer_type"] = transfer_results.get("transfer_type", "unknown")
+                if migration_data["transfer_type"] == "zfs":
+                    migration_steps.append("⚙️  Transfer method: ZFS send/receive")
+                elif migration_data["transfer_type"] == "rsync":
+                    migration_steps.append("⚙️  Transfer method: direct rsync sync")
 
                 # Update compose file for target environment
                 updated_compose = self.executor.update_compose_for_target(
                     compose_content,
-                    {},
-                    target_host.appdata_path or "/opt/docker-appdata",
+                    path_mappings,
+                    target_appdata_path,
                     stack_name,
                 )
 
@@ -282,9 +274,19 @@ class StackMigrationOrchestrator:
 
                 migration_steps.append("🎯 Stack deployed on target")
 
-                # Verify deployment
+                # Create target mount paths for verification (apply path mappings)
+                target_expected_mounts = []
+                for mount in expected_mounts:
+                    if ":" in mount:
+                        source_path, container_path = mount.split(":", 1)
+                        target_path = path_mappings.get(source_path, source_path)
+                        target_expected_mounts.append(f"{target_path}:{container_path}")
+                    else:
+                        target_expected_mounts.append(mount)
+
+                # Verify deployment using target paths
                 verify_success, verify_results = await self.executor.verify_deployment(
-                    target_host_id, stack_name, expected_mounts, None, dry_run
+                    target_host_id, stack_name, target_expected_mounts, None, dry_run
                 )
 
                 if verify_success:
@@ -305,9 +307,7 @@ class StackMigrationOrchestrator:
 
                 migration_data.update(
                     {
-                        "archive_metadata": archive_metadata,
                         "transfer_results": transfer_results,
-                        "extract_results": extract_results,
                         "deploy_results": deploy_results,
                         "verify_results": verify_results,
                     }

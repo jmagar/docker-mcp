@@ -1232,8 +1232,8 @@ class HostService:
                         }
 
                     if cleanup_type == "check":
-                        # Show disk usage for cleanup planning
-                        return await cleanup_service.docker_disk_usage(host_id)
+                        # Run structured cleanup analysis that explicitly includes type & message
+                        return await cleanup_service.docker_cleanup(host_id, "check")
                     else:
                         # Perform actual cleanup
                         return await cleanup_service.docker_cleanup(host_id, cleanup_type)

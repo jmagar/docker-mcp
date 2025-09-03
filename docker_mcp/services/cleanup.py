@@ -169,12 +169,13 @@ class CleanupService:
             "success": True,
             "host_id": host_id,
             "cleanup_type": "check",
+            "mode": "check",
             "summary": cleanup_summary,
             "cleanup_levels": cleanup_levels,
             "total_reclaimable": summary.get("totals", {}).get("total_reclaimable", "0B"),
             "reclaimable_percentage": summary.get("totals", {}).get("reclaimable_percentage", 0),
             "recommendations": disk_usage_data.get("recommendations", []),
-            "message": "📊 Cleanup Analysis Complete - No actual cleanup was performed",
+            "message": "📊 Cleanup (check) analysis complete - no actual cleanup was performed",
         }
 
     async def _safe_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -200,8 +201,9 @@ class CleanupService:
             "success": True,
             "host_id": host_id,
             "cleanup_type": "safe",
+            "mode": "safe",
             "results": results,
-            "message": "Safe cleanup completed (containers, networks, build cache)",
+            "message": "Safe cleanup completed - removed stopped containers, networks, and cleaned build cache",
         }
 
     async def _moderate_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -215,8 +217,9 @@ class CleanupService:
 
         safe_result["results"].append(images_result)
         safe_result["cleanup_type"] = "moderate"
+        safe_result["mode"] = "moderate"
         safe_result["message"] = (
-            "Moderate cleanup completed (containers, networks, build cache, unused images)"
+            "Moderate cleanup completed - removed unused containers, networks, build cache, and images"
         )
 
         return safe_result
@@ -232,8 +235,9 @@ class CleanupService:
 
         moderate_result["results"].append(volumes_result)
         moderate_result["cleanup_type"] = "aggressive"
+        moderate_result["mode"] = "aggressive"
         moderate_result["message"] = (
-            "⚠️  AGGRESSIVE cleanup completed (containers, networks, build cache, unused images, volumes)"
+            "⚠️  AGGRESSIVE cleanup completed - removed unused containers, networks, build cache, images, and volumes"
         )
 
         return moderate_result

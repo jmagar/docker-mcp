@@ -91,25 +91,21 @@ class StackVolumeUtils:
                 )
                 return expected_mounts
             else:
-                # Fallback to default if no mounts found
-                default_mount = f"{target_appdata}/{stack_name}:/data"
-                self.logger.warning(
-                    "No volume mounts found in compose file, using default",
+                # No volumes found - return empty list (don't create fake mounts)
+                self.logger.info(
+                    "No volume mounts found in compose file - stack has no persistent data",
                     stack=stack_name,
-                    default_mount=default_mount,
                 )
-                return [default_mount]
+                return []
 
         except Exception as e:
-            # Fallback on any parsing error
-            default_mount = f"{target_appdata}/{stack_name}:/data"
+            # Fallback on any parsing error - return empty list for safety
             self.logger.error(
-                "Failed to parse compose file for mounts, using default",
+                "Failed to parse compose file for mounts - assuming no volumes",
                 stack=stack_name,
                 error=str(e),
-                default_mount=default_mount,
             )
-            return [default_mount]
+            return []
 
     def resolve_volume_paths(self, volumes: list[str], base_path: str) -> list[str]:
         """Resolve volume paths to absolute paths.

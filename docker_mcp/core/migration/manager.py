@@ -209,58 +209,73 @@ class MigrationManager:
         )
 
         if transfer_type == "zfs":
-            # ZFS transfer works on datasets, not individual paths
-            # Use the configured datasets
-            return await transfer_instance.transfer(
+            # ZFS transfer - handle multiple service datasets individually
+            result = await transfer_instance.transfer_multiple_services(
                 source_host=source_host,
                 target_host=target_host,
-                source_path=source_host.appdata_path or "/opt/docker-appdata",
-                target_path=target_host.appdata_path or "/opt/docker-appdata",
-                source_dataset=source_host.zfs_dataset,
-                target_dataset=target_host.zfs_dataset,
+                service_paths=source_paths,  # Pass individual service paths
             )
+            
+            if isinstance(result, dict):
+                result.setdefault("transfer_type", "zfs")
+                result.setdefault("success", False)  # Ensure success key exists
+                return result
+            else:
+                # Handle non-dict return values
+                return {"success": False, "error": f"Invalid ZFS transfer result: {result}", "transfer_type": "zfs"}
         else:
-            # Rsync transfer - need to create archive first
+            # Rsync transfer - direct directory synchronization (no archiving)
             if dry_run:
                 return {
                     "success": True,
-                    "message": "Dry run - would transfer via rsync",
+                    "message": "Dry run - would transfer via direct rsync",
                     "transfer_type": "rsync",
                 }
 
-            # Create archive on source
-            ssh_cmd_source = build_ssh_command(source_host)
-            archive_path = await self.archive_utils.create_archive(
-                ssh_cmd_source, source_paths, f"{stack_name}_migration"
-            )
+            # For rsync, directly sync each source path to target
+            transfer_results = []
+            overall_success = True
+            
+            for source_path in source_paths:
+                try:
+                    # For rsync, sync directly to target_path (which already includes stack name from executor)
+                    # Don't append basename to avoid path duplication like /appdata/stack/stack
+                    
+                    result = await transfer_instance.transfer(
+                        source_host=source_host,
+                        target_host=target_host,
+                        source_path=source_path,
+                        target_path=target_path,  # Use target_path directly
+                        compress=True,
+                        delete=False,  # Safety: don't delete target files
+                    )
+                    
+                    transfer_results.append(result)
+                    if not result.get("success", False):
+                        overall_success = False
+                        
+                except Exception as e:
+                    overall_success = False
+                    transfer_results.append({
+                        "success": False,
+                        "error": str(e),
+                        "source_path": source_path
+                    })
 
-            # Transfer archive to target with random suffix for security
-            temp_suffix = os.urandom(8).hex()[:8]
-            temp_dir = tempfile.mkdtemp(prefix="docker_mcp_migration_")
-            target_archive_path = f"{temp_dir}/{stack_name}_migration_{temp_suffix}.tar.gz"
-
-            transfer_result = await transfer_instance.transfer(
-                source_host=source_host,
-                target_host=target_host,
-                source_path=archive_path,
-                target_path=target_archive_path,
-            )
-
-            if transfer_result["success"]:
-                # Extract on target
-                ssh_cmd_target = build_ssh_command(target_host)
-                extracted = await self.archive_utils.extract_archive(
-                    ssh_cmd_target, target_archive_path, target_path
-                )
-
-                if extracted:
-                    # Cleanup archive on target
-                    await self.archive_utils.cleanup_archive(ssh_cmd_target, target_archive_path)
-
-            # Cleanup archive on source
-            await self.archive_utils.cleanup_archive(ssh_cmd_source, archive_path)
-
-            return transfer_result
+            final_result = {
+                "success": overall_success,
+                "transfer_type": "rsync",
+                "transfers": transfer_results,
+                "paths_transferred": len([r for r in transfer_results if r.get("success", False)]),
+                "total_paths": len(source_paths),
+            }
+            
+            if not overall_success:
+                final_result["message"] = "Some rsync transfers failed"
+            else:
+                final_result["message"] = f"Successfully transferred {final_result['paths_transferred']} paths via rsync"
+            
+            return final_result
 
     # Delegate methods to focused components
     async def parse_compose_volumes(
