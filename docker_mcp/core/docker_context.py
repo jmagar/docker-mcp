@@ -6,6 +6,7 @@ It uses Docker's built-in context system for connection pooling and management.
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 from typing import Any
@@ -17,6 +18,9 @@ from .config_loader import DockerHost, DockerMCPConfig
 from .exceptions import DockerContextError
 
 logger = structlog.get_logger()
+
+# Docker SDK client timeout - configurable via environment variable
+DOCKER_CLIENT_TIMEOUT = int(os.getenv("DOCKER_CLIENT_TIMEOUT", "30"))
 
 
 def _normalize_hostname(hostname: str) -> str:
@@ -347,7 +351,7 @@ class DockerContextManager:
                     # Docker SDK with use_ssh_client=False uses paramiko directly for SSH connections.
                     # This is faster and more reliable than use_ssh_client=True which shells out
                     # to the system SSH command and can have timeout issues.
-                    client = docker.DockerClient(base_url=ssh_url, use_ssh_client=False, timeout=10)
+                    client = docker.DockerClient(base_url=ssh_url, use_ssh_client=False, timeout=DOCKER_CLIENT_TIMEOUT)
                     # Test the connection to ensure it's actually connected to the remote host
                     client.ping()
 
