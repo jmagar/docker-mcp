@@ -166,6 +166,141 @@ class ZFSTransfer(BaseTransfer):
             self.logger.warning("Failed to detect ZFS dataset", path=path, error=str(e))
             return None
 
+    async def ensure_service_dataset_exists(self, host: DockerHost, service_path: str) -> str:
+        """Ensure a service path exists as a ZFS dataset.
+
+        Args:
+            host: Host configuration
+            service_path: Full path to service directory (e.g., /mnt/appdata/authelia)
+
+        Returns:
+            Dataset name (e.g., rpool/appdata/authelia)
+        """
+        service_name = service_path.split("/")[-1]
+        expected_dataset = f"{host.zfs_dataset}/{service_name}"
+
+        # Check if dataset already exists
+        ssh_cmd = self.build_ssh_cmd(host)
+        check_cmd = ssh_cmd + [
+            f"zfs list {expected_dataset} >/dev/null 2>&1 && echo 'EXISTS' || echo 'MISSING'"
+        ]
+
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(  # nosec B603
+                check_cmd, capture_output=True, text=True, check=False
+            ),
+        )
+
+        if "EXISTS" in result.stdout:
+            self.logger.info("Dataset already exists", dataset=expected_dataset)
+            return expected_dataset
+
+        # Dataset doesn't exist - create it
+        self.logger.info(
+            "Creating dataset for service", service=service_name, dataset=expected_dataset
+        )
+
+        # Check if path exists as directory
+        path_check_cmd = ssh_cmd + [
+            f"test -d {shlex.quote(service_path)} && echo 'DIR_EXISTS' || echo 'NO_DIR'"
+        ]
+        path_result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(  # nosec B603
+                path_check_cmd, capture_output=True, text=True, check=False
+            ),
+        )
+
+        if "DIR_EXISTS" in path_result.stdout:
+            # Directory exists - convert to dataset
+            await self._convert_directory_to_dataset(host, service_path, expected_dataset)
+        else:
+            # No existing data - create empty dataset
+            create_cmd = ssh_cmd + [f"zfs create {expected_dataset}"]
+            create_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(  # nosec B603
+                    create_cmd, capture_output=True, text=True, check=False
+                ),
+            )
+
+            if create_result.returncode != 0:
+                raise ZFSError(
+                    f"Failed to create dataset {expected_dataset}: {create_result.stderr}"
+                )
+
+        return expected_dataset
+
+    async def _convert_directory_to_dataset(
+        self, host: DockerHost, dir_path: str, dataset_name: str
+    ) -> None:
+        """Convert existing directory to ZFS dataset while preserving data."""
+        ssh_cmd = self.build_ssh_cmd(host)
+        temp_path = f"{dir_path}.zfs_migration_temp"
+
+        self.logger.info("Converting directory to dataset", path=dir_path, dataset=dataset_name)
+
+        # 1. Move existing data to temp location
+        move_cmd = ssh_cmd + [f"mv {shlex.quote(dir_path)} {shlex.quote(temp_path)}"]
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(  # nosec B603
+                move_cmd, capture_output=True, text=True, check=False
+            ),
+        )
+
+        if result.returncode != 0:
+            raise ZFSError(f"Failed to backup directory {dir_path}: {result.stderr}")
+
+        try:
+            # 2. Create ZFS dataset
+            create_cmd = ssh_cmd + [f"zfs create {dataset_name}"]
+            create_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(  # nosec B603
+                    create_cmd, capture_output=True, text=True, check=False
+                ),
+            )
+
+            if create_result.returncode != 0:
+                raise ZFSError(f"Failed to create dataset {dataset_name}: {create_result.stderr}")
+
+            # 3. Move data back
+            restore_cmd = ssh_cmd + [f"cp -r {shlex.quote(temp_path)}/* {shlex.quote(dir_path)}/"]
+            restore_result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(  # nosec B603
+                    restore_cmd, capture_output=True, text=True, check=False
+                ),
+            )
+
+            if restore_result.returncode != 0:
+                raise ZFSError(f"Failed to restore data to {dir_path}: {restore_result.stderr}")
+
+            # 4. Cleanup temp directory
+            cleanup_cmd = ssh_cmd + [f"rm -rf {shlex.quote(temp_path)}"]
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(  # nosec B603
+                    cleanup_cmd, capture_output=True, text=True, check=False
+                ),
+            )
+
+            self.logger.info("Successfully converted directory to dataset", dataset=dataset_name)
+
+        except Exception as e:
+            # Rollback on failure
+            self.logger.error("Dataset creation failed, rolling back", error=str(e))
+            rollback_cmd = ssh_cmd + [f"mv {shlex.quote(temp_path)} {shlex.quote(dir_path)}"]
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(  # nosec B603
+                    rollback_cmd, capture_output=True, text=True, check=False
+                ),
+            )
+            raise
+
     async def create_snapshot(
         self, host: DockerHost, dataset: str, snapshot_name: str, recursive: bool = False
     ) -> str:
@@ -354,8 +489,11 @@ class ZFSTransfer(BaseTransfer):
         # Build the ZFS send command - be careful with -R flag
         # Use -R (recursive) only if specifically requested, default to single snapshot
         import shlex
+
         send_flags = "-R" if getattr(self, "_use_recursive_send", False) else ""
-        send_cmd = " ".join(source_ssh_cmd) + f" \"zfs send {send_flags} {shlex.quote(full_snapshot)}\""
+        send_cmd = (
+            " ".join(source_ssh_cmd) + f' "zfs send {send_flags} {shlex.quote(full_snapshot)}"'
+        )
 
         # Clean up target dataset completely before receive to eliminate race condition
         # This runs as a separate command to avoid pipe complications
@@ -369,7 +507,9 @@ class ZFSTransfer(BaseTransfer):
         await self._prepare_target_dataset(target_host, target_dataset)
 
         # Build simple ZFS receive command
-        recv_cmd = " ".join(target_ssh_cmd) + f" \"zfs recv {recv_flags} {shlex.quote(target_dataset)}\""
+        recv_cmd = (
+            " ".join(target_ssh_cmd) + f' "zfs recv {recv_flags} {shlex.quote(target_dataset)}"'
+        )
 
         # Combine with pipe (send | receive)
         full_cmd = f"{send_cmd} | {recv_cmd}"
@@ -539,15 +679,15 @@ class ZFSTransfer(BaseTransfer):
         **kwargs,
     ) -> dict[str, Any]:
         """Transfer multiple service datasets individually.
-        
+
         This method handles multi-service stacks by finding the unique datasets that
         contain all the service paths and transferring each dataset once.
-        
+
         Args:
             source_host: Source host configuration
-            target_host: Target host configuration  
+            target_host: Target host configuration
             service_paths: List of service paths to transfer (e.g., ['/mnt/appdata/test-mcp-simple/html', '/mnt/appdata/test-mcp-simple/config'])
-            
+
         Returns:
             Transfer result with per-service statistics
         """
@@ -559,7 +699,7 @@ class ZFSTransfer(BaseTransfer):
             services_count=len(service_paths),
             source_host=source_host.hostname,
             target_host=target_host.hostname,
-            service_paths=service_paths
+            service_paths=service_paths,
         )
 
         # Group paths by their containing dataset to avoid duplicate transfers
@@ -567,42 +707,41 @@ class ZFSTransfer(BaseTransfer):
 
         for service_path in service_paths:
             try:
-                # Determine source dataset from service path
-                source_dataset = await self.get_dataset_for_path(source_host, service_path)
-                if not source_dataset:
-                    # If path isn't on ZFS, skip with warning
-                    service_name = service_path.split('/')[-1]
-                    self.logger.warning(
-                        "Service path is not on ZFS dataset, skipping",
-                        service_path=service_path,
-                        service=service_name
-                    )
-                    transfer_results.append({
-                        "success": False,
-                        "service_name": service_name,
-                        "service_path": service_path,
-                        "error": f"Path {service_path} is not on a ZFS dataset",
-                        "skipped": True
-                    })
-                    continue
+                # Ensure dataset exists on source side
+                source_dataset = await self.ensure_service_dataset_exists(source_host, service_path)
+
+                # Calculate target service path
+                target_service_path = service_path.replace(
+                    source_host.appdata_path, target_host.appdata_path
+                )
+
+                # Ensure dataset exists on target side
+                target_dataset = await self.ensure_service_dataset_exists(
+                    target_host, target_service_path
+                )
 
                 # Group by dataset - all paths in same dataset will be transferred together
                 if source_dataset not in datasets_to_transfer:
                     datasets_to_transfer[source_dataset] = {
                         "paths": [],
-                        "dataset": source_dataset
+                        "dataset": source_dataset,
+                        "target_dataset": target_dataset,
                     }
                 datasets_to_transfer[source_dataset]["paths"].append(service_path)
 
             except Exception as e:
-                service_name = service_path.split('/')[-1]
-                self.logger.error("Failed to determine dataset for path", service_path=service_path, error=str(e))
-                transfer_results.append({
-                    "success": False,
-                    "service_name": service_name,
-                    "service_path": service_path,
-                    "error": str(e)
-                })
+                service_name = service_path.split("/")[-1]
+                self.logger.error(
+                    "Failed to determine dataset for path", service_path=service_path, error=str(e)
+                )
+                transfer_results.append(
+                    {
+                        "success": False,
+                        "service_name": service_name,
+                        "service_path": service_path,
+                        "error": str(e),
+                    }
+                )
 
         # Transfer each unique dataset
         for source_dataset, dataset_info in datasets_to_transfer.items():
@@ -612,28 +751,19 @@ class ZFSTransfer(BaseTransfer):
                 if not dataset_base_path:
                     raise ZFSError(f"Could not determine mountpoint for dataset {source_dataset}")
 
-                # Calculate target dataset name - extract service name from dataset
-                # e.g., rpool/appdata/test-mcp-simple -> test-mcp-simple
-                dataset_parts = source_dataset.split('/')
-                service_dataset_name = dataset_parts[-1] if len(dataset_parts) > 1 else source_dataset
-
-                # Target dataset path
-                if target_host.zfs_dataset:
-                    target_dataset = f"{target_host.zfs_dataset}/{service_dataset_name}"
-                else:
-                    raise ZFSError(f"Target host {target_host.hostname} has no zfs_dataset configured")
+                # Use the pre-determined target dataset
+                target_dataset = dataset_info["target_dataset"]
 
                 # Target path (mountpoint)
                 target_service_path = dataset_base_path.replace(
-                    source_host.appdata_path,
-                    target_host.appdata_path
+                    source_host.appdata_path, target_host.appdata_path
                 )
 
                 self.logger.info(
                     "Transferring dataset",
                     source_dataset=source_dataset,
                     target_dataset=target_dataset,
-                    paths_included=dataset_info["paths"]
+                    paths_included=dataset_info["paths"],
                 )
 
                 # Transfer the dataset
@@ -649,60 +779,77 @@ class ZFSTransfer(BaseTransfer):
                 # Mark all paths in this dataset as transferred
                 if result.get("success", False):
                     for path in dataset_info["paths"]:
-                        path_name = path.split('/')[-1]
-                        transfer_results.append({
-                            "success": True,
-                            "service_name": path_name,
-                            "service_path": path,
-                            "source_dataset": source_dataset,
-                            "target_dataset": target_dataset,
-                            "dataset_transfer": True  # Indicates this was part of dataset transfer
-                        })
+                        path_name = path.split("/")[-1]
+                        transfer_results.append(
+                            {
+                                "success": True,
+                                "service_name": path_name,
+                                "service_path": path,
+                                "source_dataset": source_dataset,
+                                "target_dataset": target_dataset,
+                                "dataset_transfer": True,  # Indicates this was part of dataset transfer
+                            }
+                        )
 
                     self.logger.info(
                         "Dataset transfer completed successfully",
                         source_dataset=source_dataset,
                         target_dataset=target_dataset,
-                        paths_transferred=len(dataset_info["paths"])
+                        paths_transferred=len(dataset_info["paths"]),
                     )
                 else:
                     overall_success = False
                     for path in dataset_info["paths"]:
-                        path_name = path.split('/')[-1]
-                        transfer_results.append({
-                            "success": False,
-                            "service_name": path_name,
-                            "service_path": path,
-                            "source_dataset": source_dataset,
-                            "target_dataset": target_dataset,
-                            "error": result.get("error", "Dataset transfer failed")
-                        })
+                        path_name = path.split("/")[-1]
+                        transfer_results.append(
+                            {
+                                "success": False,
+                                "service_name": path_name,
+                                "service_path": path,
+                                "source_dataset": source_dataset,
+                                "target_dataset": target_dataset,
+                                "error": result.get("error", "Dataset transfer failed"),
+                            }
+                        )
 
                     self.logger.error(
                         "Dataset transfer failed",
                         source_dataset=source_dataset,
-                        error=result.get("error", "Unknown error")
+                        error=result.get("error", "Unknown error"),
                     )
 
             except Exception as e:
                 overall_success = False
-                self.logger.error("Dataset transfer failed", source_dataset=source_dataset, error=str(e))
+                self.logger.error(
+                    "Dataset transfer failed", source_dataset=source_dataset, error=str(e)
+                )
 
                 # Mark all paths in this dataset as failed
                 for path in dataset_info["paths"]:
-                    path_name = path.split('/')[-1]
-                    transfer_results.append({
-                        "success": False,
-                        "service_name": path_name,
-                        "service_path": path,
-                        "source_dataset": source_dataset,
-                        "error": str(e)
-                    })
+                    path_name = path.split("/")[-1]
+                    transfer_results.append(
+                        {
+                            "success": False,
+                            "service_name": path_name,
+                            "service_path": path,
+                            "source_dataset": source_dataset,
+                            "error": str(e),
+                        }
+                    )
 
         # Calculate final statistics
         successful_services = [r for r in transfer_results if r.get("success", False)]
         failed_services = [r for r in transfer_results if not r.get("success", False)]
-        datasets_transferred = len([d for d in datasets_to_transfer.keys() if any(r.get("success", False) and r.get("source_dataset") == d for r in transfer_results)])
+        datasets_transferred = len(
+            [
+                d
+                for d in datasets_to_transfer.keys()
+                if any(
+                    r.get("success", False) and r.get("source_dataset") == d
+                    for r in transfer_results
+                )
+            ]
+        )
 
         result = {
             "success": overall_success,
@@ -716,10 +863,16 @@ class ZFSTransfer(BaseTransfer):
         }
 
         if overall_success:
-            result["message"] = f"Successfully transferred {datasets_transferred} datasets containing {len(successful_services)} service paths"
+            result["message"] = (
+                f"Successfully transferred {datasets_transferred} datasets containing {len(successful_services)} service paths"
+            )
         else:
-            result["message"] = f"Transfer completed with errors: {datasets_transferred}/{len(datasets_to_transfer)} datasets transferred"
-            result["errors"] = [r.get("error", "Unknown error") for r in failed_services if r.get("error")]
+            result["message"] = (
+                f"Transfer completed with errors: {datasets_transferred}/{len(datasets_to_transfer)} datasets transferred"
+            )
+            result["errors"] = [
+                r.get("error", "Unknown error") for r in failed_services if r.get("error")
+            ]
 
         self.logger.info(
             "Multi-service ZFS transfer completed",
@@ -728,23 +881,25 @@ class ZFSTransfer(BaseTransfer):
             services_failed=len(failed_services),
             datasets_transferred=datasets_transferred,
             total_services=len(service_paths),
-            total_datasets=len(datasets_to_transfer)
+            total_datasets=len(datasets_to_transfer),
         )
 
         return result
 
     async def _get_dataset_mountpoint(self, host: DockerHost, dataset: str) -> str | None:
         """Get the mountpoint for a ZFS dataset.
-        
+
         Args:
             host: Host configuration
             dataset: ZFS dataset name
-            
+
         Returns:
             Mountpoint path or None if not found
         """
         ssh_cmd = self.build_ssh_cmd(host)
-        cmd = ssh_cmd + [f"zfs get -H -o value mountpoint {shlex.quote(dataset)} 2>/dev/null || echo 'NOT_FOUND'"]
+        cmd = ssh_cmd + [
+            f"zfs get -H -o value mountpoint {shlex.quote(dataset)} 2>/dev/null || echo 'NOT_FOUND'"
+        ]
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -760,10 +915,10 @@ class ZFSTransfer(BaseTransfer):
 
     async def _cleanup_target_snapshots(self, host: DockerHost, dataset: str) -> None:
         """Clean up existing snapshots on target dataset to prepare for migration.
-        
+
         This prevents ZFS receive failures due to existing snapshots on the target.
         In migration scenarios, we want to completely replace the target dataset.
-        
+
         Args:
             host: Target host configuration
             dataset: Target dataset name
@@ -771,7 +926,9 @@ class ZFSTransfer(BaseTransfer):
         ssh_cmd = self.build_ssh_cmd(host)
 
         # List existing snapshots for this dataset
-        list_cmd = ssh_cmd + [f"zfs list -H -t snapshot -o name {shlex.quote(dataset)} 2>/dev/null || true"]
+        list_cmd = ssh_cmd + [
+            f"zfs list -H -t snapshot -o name {shlex.quote(dataset)} 2>/dev/null || true"
+        ]
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -779,29 +936,33 @@ class ZFSTransfer(BaseTransfer):
         )
 
         if result.returncode == 0 and result.stdout.strip():
-            snapshots = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+            snapshots = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
 
             if snapshots:
                 self.logger.info(
                     "Cleaning up existing snapshots on target dataset for migration",
                     dataset=dataset,
                     snapshots_to_remove=len(snapshots),
-                    snapshots=snapshots[:3]  # Log first 3 for reference
+                    snapshots=snapshots[:3],  # Log first 3 for reference
                 )
 
                 # Destroy each snapshot
                 for snapshot in snapshots:
-                    destroy_cmd = ssh_cmd + [f"zfs destroy {shlex.quote(snapshot)} 2>/dev/null || true"]
+                    destroy_cmd = ssh_cmd + [
+                        f"zfs destroy {shlex.quote(snapshot)} 2>/dev/null || true"
+                    ]
                     destroy_result = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: subprocess.run(destroy_cmd, capture_output=True, text=True, check=False),  # nosec B603
+                        lambda: subprocess.run(
+                            destroy_cmd, capture_output=True, text=True, check=False
+                        ),  # nosec B603
                     )
 
                     if destroy_result.returncode != 0:
                         self.logger.warning(
                             "Failed to destroy snapshot, continuing anyway",
                             snapshot=snapshot,
-                            error=destroy_result.stderr.strip()
+                            error=destroy_result.stderr.strip(),
                         )
 
                 self.logger.info("Target dataset snapshot cleanup completed", dataset=dataset)
@@ -810,10 +971,10 @@ class ZFSTransfer(BaseTransfer):
 
     async def _prepare_target_dataset(self, host: DockerHost, dataset: str) -> None:
         """Prepare target dataset for migration by checking if it exists and destroying it if needed.
-        
+
         This prevents ZFS receive failures due to existing datasets/snapshots on the target.
         For migrations, we want to completely replace the target dataset.
-        
+
         Args:
             host: Target host configuration
             dataset: Target dataset name
@@ -821,7 +982,9 @@ class ZFSTransfer(BaseTransfer):
         ssh_cmd = self.build_ssh_cmd(host)
 
         # Check if target dataset exists
-        check_cmd = ssh_cmd + [f"zfs list {shlex.quote(dataset)} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"]
+        check_cmd = ssh_cmd + [
+            f"zfs list {shlex.quote(dataset)} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
+        ]
 
         result = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -832,7 +995,7 @@ class ZFSTransfer(BaseTransfer):
             self.logger.info(
                 "Target dataset exists, destroying it for clean migration",
                 dataset=dataset,
-                host=host.hostname
+                host=host.hostname,
             )
 
             # Destroy the entire dataset (this also removes all snapshots)
@@ -848,11 +1011,11 @@ class ZFSTransfer(BaseTransfer):
                 self.logger.warning(
                     "Failed to destroy target dataset, will attempt force receive",
                     dataset=dataset,
-                    error=destroy_result.stderr.strip()
+                    error=destroy_result.stderr.strip(),
                 )
         else:
             self.logger.info(
                 "Target dataset does not exist, ready for clean receive",
                 dataset=dataset,
-                host=host.hostname
+                host=host.hostname,
             )
