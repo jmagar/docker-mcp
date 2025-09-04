@@ -414,6 +414,8 @@ class DockerMCPServer:
             str, Field(default="", description="Application data storage path")
         ] = "",
         enabled: Annotated[bool, Field(default=True, description="Whether host is enabled")] = True,
+        zfs_capable: Annotated[bool, Field(default=False, description="Whether host has ZFS available")] = False,
+        zfs_dataset: Annotated[str, Field(default="", description="ZFS dataset path for appdata")] = "",
         ssh_config_path: Annotated[
             str, Field(default="", description="Path to SSH config file")
         ] = "",
@@ -430,7 +432,7 @@ class DockerMCPServer:
         port: Annotated[
             int, Field(default=0, ge=0, le=65535, description="Port number to check availability")
         ] = 0,
-    ) -> dict[str, Any]:
+    ) -> ToolResult | dict[str, Any]:
         """Simplified Docker hosts management tool.
 
         Actions:
@@ -468,7 +470,7 @@ class DockerMCPServer:
 
         • edit: Modify host configuration
           - Required: host_id
-          - Optional: ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, compose_path, appdata_path, enabled
+          - Optional: ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, compose_path, appdata_path, enabled, zfs_capable, zfs_dataset
 
         • remove: Remove host from configuration
           - Required: host_id
@@ -487,6 +489,8 @@ class DockerMCPServer:
                 compose_path=compose_path if compose_path else None,
                 appdata_path=appdata_path if appdata_path else None,
                 enabled=enabled,
+                zfs_capable=zfs_capable,
+                zfs_dataset=zfs_dataset,
                 port=port,
                 cleanup_type=cleanup_type if cleanup_type else None,
                 frequency=frequency if frequency else None,
@@ -516,6 +520,8 @@ class DockerMCPServer:
             compose_path=compose_path,
             appdata_path=appdata_path,
             enabled=enabled,
+            zfs_capable=zfs_capable,
+            zfs_dataset=zfs_dataset,
             port=port,
             cleanup_type=cleanup_type,
             frequency=frequency,
@@ -544,7 +550,7 @@ class DockerMCPServer:
         timeout: Annotated[
             int, Field(default=10, ge=1, le=300, description="Operation timeout in seconds")
         ] = 10,
-    ) -> dict[str, Any]:
+    ) -> ToolResult | dict[str, Any]:
         """Consolidated Docker container management tool.
 
         Actions:
@@ -650,7 +656,7 @@ class DockerMCPServer:
         start_target: Annotated[
             bool, Field(default=True, description="Start target stack after migration")
         ] = True,
-    ) -> dict[str, Any]:
+    ) -> ToolResult | dict[str, Any]:
         """Consolidated Docker Compose stack management tool.
 
         Actions:

@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 
 from ..constants import APPDATA_PATH, COMPOSE_PATH, DOCKER_COMPOSE_WORKING_DIR, HOST_ID
-from ..core.config_loader import DockerHost, DockerMCPConfig, save_config
+from ..core.config_loader import DockerHost, DockerMCPConfig, load_config, save_config
 from ..utils import build_ssh_command
 
 
@@ -125,7 +125,28 @@ class HostService:
                     }
                 )
 
-            return {"success": True, "hosts": hosts, "count": len(hosts)}
+            # Create human-readable summary for efficient display
+            summary_lines = [
+                f"Docker Hosts ({len(hosts)} configured)",
+                f"{'Host':<12} {'Address':<20} {'ZFS':<3} {'Dataset':<20}",
+                f"{'-'*12:<12} {'-'*20:<20} {'-'*3:<3} {'-'*20:<20}",
+            ]
+            
+            for host_data in hosts:
+                zfs_indicator = "✓" if host_data.get('zfs_capable') else "✗"
+                address = f"{host_data['hostname']}:{host_data['port']}"
+                dataset = host_data.get('zfs_dataset', '-') or '-'
+                
+                summary_lines.append(
+                    f"{host_data[HOST_ID]:<12} {address:<20} {zfs_indicator:<3} {dataset[:20]:<20}"
+                )
+            
+            return {
+                "success": True, 
+                "hosts": hosts, 
+                "count": len(hosts),
+                "summary": "\n".join(summary_lines)
+            }
 
         except Exception as e:
             self.logger.error("Failed to list hosts", error=str(e))
@@ -166,6 +187,8 @@ class HostService:
         tags: list[str] | None = None,
         compose_path: str | None = None,
         appdata_path: str | None = None,
+        zfs_capable: bool | None = None,
+        zfs_dataset: str | None = None,
         enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Edit an existing Docker host configuration.
@@ -180,6 +203,8 @@ class HostService:
             tags: Tags for host categorization (optional update)
             compose_path: Path where compose files are stored (optional update)
             appdata_path: Path where container data is stored (optional update)
+            zfs_capable: Whether ZFS is available on the host (optional update)
+            zfs_dataset: ZFS dataset path for appdata (optional update)
             enabled: Whether the host is enabled (optional update)
 
         Returns:
@@ -209,8 +234,10 @@ class HostService:
                 APPDATA_PATH: appdata_path
                 if appdata_path is not None and appdata_path != ""
                 else current_host.appdata_path,
-                "zfs_capable": current_host.zfs_capable,
-                "zfs_dataset": current_host.zfs_dataset,
+                "zfs_capable": zfs_capable if zfs_capable is not None else current_host.zfs_capable,
+                "zfs_dataset": zfs_dataset
+                if zfs_dataset is not None and zfs_dataset != ""
+                else current_host.zfs_dataset,
                 "enabled": enabled if enabled is not None else current_host.enabled,
             }
 
@@ -249,7 +276,7 @@ class HostService:
                     k
                     for k, v in locals().items()
                     if k.startswith(
-                        ("ssh_", "description", "tags", "compose_", "appdata_", "enabled")
+                        ("ssh_", "description", "tags", "compose_", "appdata_", "zfs_", "enabled")
                     )
                     and v is not None
                 ],
@@ -391,6 +418,23 @@ class HostService:
             Discovery results with recommendations
         """
         try:
+            # Force reload configuration from disk to avoid stale in-memory state
+            try:
+                config_file_path = getattr(self.config, "config_file", None)
+                fresh_config = load_config(config_file_path)
+                self.config = fresh_config
+                self.logger.info(
+                    "Reloaded configuration from disk before discovery",
+                    host_id=host_id,
+                    config_file_path=config_file_path
+                )
+            except Exception as reload_error:
+                self.logger.warning(
+                    "Failed to reload config from disk, using in-memory config",
+                    host_id=host_id,
+                    error=str(reload_error)
+                )
+            
             # Check if host exists
             if host_id not in self.config.hosts:
                 return {"success": False, "error": f"Host '{host_id}' not found", HOST_ID: host_id}
@@ -460,37 +504,90 @@ class HostService:
             if zfs_result["capable"]:
                 # Auto-add 'zfs' tag to host if not already present
                 host = self.config.hosts[host_id]
+                tag_added = False
+                config_changed = False
+                
                 if "zfs" not in host.tags:
                     host.tags.append("zfs")
-                    host.zfs_capable = True
-                    if zfs_result.get("dataset"):
-                        host.zfs_dataset = zfs_result.get("dataset")
+                    tag_added = True
+                    config_changed = True
                     self.logger.info("Auto-added 'zfs' tag to host", host_id=host_id)
 
-                    # Save configuration after adding tag
+                # Always update ZFS capabilities and dataset if discovered (even if tag existed)
+                if not host.zfs_capable:
+                    host.zfs_capable = True
+                    config_changed = True
+                    self.logger.info("Updated zfs_capable to True", host_id=host_id)
+                
+                discovered_dataset = zfs_result.get("dataset")
+                current_dataset = host.zfs_dataset
+                
+                self.logger.info(
+                    "Comparing ZFS datasets",
+                    host_id=host_id,
+                    current_dataset=current_dataset,
+                    current_dataset_type=type(current_dataset).__name__,
+                    discovered_dataset=discovered_dataset,
+                    discovered_dataset_type=type(discovered_dataset).__name__,
+                    datasets_equal=(current_dataset == discovered_dataset)
+                )
+                
+                if discovered_dataset and current_dataset != discovered_dataset:
+                    old_dataset = current_dataset
+                    host.zfs_dataset = discovered_dataset
+                    config_changed = True
+                    self.logger.info(
+                        "Updated zfs_dataset", 
+                        host_id=host_id, 
+                        old_dataset=old_dataset, 
+                        new_dataset=host.zfs_dataset
+                    )
+
+                # Save configuration if any changes were made
+                save_success = True
+                save_error = None
+                if config_changed:
                     try:
-                        save_config(self.config, getattr(self.config, "config_file", None))
-                        tag_added = True
-                    except Exception as e:
-                        self.logger.error(
-                            "Failed to save config after adding zfs tag",
+                        config_file_path = getattr(self.config, "config_file", None)
+                        self.logger.info(
+                            "Attempting to save config after ZFS updates",
                             host_id=host_id,
+                            config_file_path=config_file_path,
+                            zfs_dataset=host.zfs_dataset
+                        )
+                        save_config(self.config, config_file_path)
+                        self.logger.info(
+                            "Successfully saved config after ZFS updates",
+                            host_id=host_id,
+                            config_file_path=config_file_path
+                        )
+                    except Exception as e:
+                        save_success = False
+                        save_error = str(e)
+                        self.logger.error(
+                            "Failed to save config after ZFS updates",
+                            host_id=host_id,
+                            config_file_path=getattr(self.config, "config_file", None),
                             error=str(e),
                         )
-                        tag_added = False
-                else:
-                    tag_added = False  # Tag already existed
 
-                capabilities["recommendations"].append(
-                    {
-                        "type": "zfs_config",
-                        "message": "ZFS support detected and 'zfs' tag automatically added"
-                        if tag_added
-                        else "ZFS support detected ('zfs' tag already present)",
-                        "zfs_dataset": zfs_result.get("dataset"),
-                        "tag_added": tag_added,
-                    }
-                )
+                zfs_recommendation = {
+                    "type": "zfs_config",
+                    "message": "ZFS support detected and 'zfs' tag automatically added"
+                    if tag_added
+                    else "ZFS support detected ('zfs' tag already present)",
+                    "zfs_dataset": zfs_result.get("dataset"),
+                    "tag_added": tag_added,
+                }
+                
+                # Add save status if config was changed
+                if config_changed:
+                    zfs_recommendation["config_saved"] = save_success
+                    if not save_success:
+                        zfs_recommendation["save_error"] = save_error
+                        zfs_recommendation["message"] += f" (WARNING: Config save failed: {save_error})"
+                        
+                capabilities["recommendations"].append(zfs_recommendation)
 
             # Add overall guidance if discovery found nothing useful
             total_paths_found = len(compose_result["paths"]) + len(appdata_result["paths"])
@@ -778,7 +875,7 @@ class HostService:
 
             # Fallback to file system search if no running containers with compose labels
             fallback_cmd = ssh_cmd + [
-                "find /opt /srv /home -maxdepth 3 \\( -name 'docker-compose.*' -o -name 'compose.*' \\) 2>/dev/null | head -10"
+                "find /opt /srv /home /mnt -maxdepth 3 \\( -name 'docker-compose.*' -o -name 'compose.*' \\) 2>/dev/null | head -10"
             ]
 
             process = await asyncio.create_subprocess_exec(
@@ -912,13 +1009,48 @@ class HostService:
             pools_stdout, _ = await process.communicate()
             pools = [p.strip() for p in pools_stdout.decode().strip().split("\n") if p.strip()]
 
-            # Suggest dataset name
+            # Suggest dataset name with intelligent pool selection
             dataset = None
             if pools:
-                # Look for existing appdata datasets or suggest one
+                # System pools to avoid for appdata storage
+                system_pools = ['bpool', 'boot-pool', 'boot']
+
+                # First, check for existing appdata datasets on any pool
                 for pool in pools:
-                    dataset = f"{pool}/appdata"
-                    break
+                    if pool not in system_pools:
+                        # Check if appdata dataset already exists on this pool
+                        check_existing_cmd = ssh_cmd + [
+                            f"zfs list {pool}/appdata >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
+                        ]
+                        try:
+                            process = await asyncio.create_subprocess_exec(
+                                *check_existing_cmd,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE
+                            )
+                            stdout, _ = await process.communicate()
+                            if process.returncode == 0 and "EXISTS" in stdout.decode():
+                                dataset = f"{pool}/appdata"
+                                break
+                        except Exception:
+                            # Continue if check fails
+                            pass
+
+                # If no existing appdata dataset found, use intelligent pool selection
+                if not dataset:
+                    # Prefer 'rpool' if available and not a system pool
+                    if 'rpool' in pools and 'rpool' not in system_pools:
+                        dataset = 'rpool/appdata'
+                    else:
+                        # Use first non-system pool
+                        for pool in pools:
+                            if pool not in system_pools:
+                                dataset = f"{pool}/appdata"
+                                break
+
+                    # Last resort: use first available pool even if it's a system pool
+                    if not dataset and pools:
+                        dataset = f"{pools[0]}/appdata"
 
             return {
                 "capable": True,
@@ -931,20 +1063,39 @@ class HostService:
             return {"capable": False, "reason": f"ZFS check failed: {str(e)}"}
 
     def _recommend_compose_path(self, paths: list[str]) -> str | None:
-        """Recommend the best compose path from discovered options."""
+        """Recommend the best compose path from discovered options using smart detection."""
         if not paths:
             return None
-
-        # Prioritize paths (most preferred first)
-        priorities = ["/opt/docker", "/opt/compose", "/srv/docker", "/srv/compose"]
-
-        for priority_path in priorities:
-            for path in paths:
-                if priority_path in path:
-                    return path
-
-        # Return first available path
-        return paths[0] if paths else None
+            
+        # If only one path, return it
+        if len(paths) == 1:
+            return paths[0]
+            
+        # Prefer persistent storage paths over system paths
+        persistent_storage_paths = []
+        system_paths = []
+        
+        for path in paths:
+            # Persistent storage locations (more reliable for user data)
+            if any(path.startswith(prefix) for prefix in ["/mnt/", "/data/", "/srv/"]):
+                persistent_storage_paths.append(path)
+            # System paths (less preferred for user data)
+            elif any(path.startswith(prefix) for prefix in ["/opt/", "/home/"]):
+                system_paths.append(path)
+            else:
+                # Unknown path, treat as persistent storage
+                persistent_storage_paths.append(path)
+        
+        # Prefer persistent storage paths
+        if persistent_storage_paths:
+            return persistent_storage_paths[0]
+            
+        # Fall back to system paths
+        if system_paths:
+            return system_paths[0]
+            
+        # Final fallback
+        return paths[0]
 
     async def handle_action(self, action, **params) -> dict[str, Any]:
         """Unified action handler for all host operations.
@@ -957,7 +1108,16 @@ class HostService:
 
             # Route to appropriate handler with validation
             if action == HostAction.LIST:
-                return await self.list_docker_hosts()
+                result = await self.list_docker_hosts()
+                # Convert dict with summary to ToolResult for proper formatting
+                if isinstance(result, dict) and "summary" in result:
+                    from fastmcp.tools.tool import ToolResult
+                    from mcp.types import TextContent
+                    return ToolResult(
+                        content=[TextContent(type="text", text=result["summary"])],
+                        structured_content=result
+                    )
+                return result
 
             elif action == HostAction.ADD:
                 # Extract parameters
@@ -1019,6 +1179,8 @@ class HostService:
                 tags = params.get("tags")
                 compose_path = params.get("compose_path")
                 appdata_path = params.get("appdata_path")
+                zfs_capable = params.get("zfs_capable")
+                zfs_dataset = params.get("zfs_dataset")
                 enabled = params.get("enabled")
 
                 # Validate required parameters for edit action
@@ -1035,6 +1197,8 @@ class HostService:
                     tags,
                     compose_path,
                     appdata_path,
+                    zfs_capable,
+                    zfs_dataset,
                     enabled,
                 )
 
@@ -1097,12 +1261,7 @@ class HostService:
                 else:
                     # List all ports (simplified - always include stopped containers)
                     result = await container_service.list_host_ports(host_id)
-                    # Convert ToolResult to dict for consistency
-                    if hasattr(result, "structured_content"):
-                        return result.structured_content or {
-                            "success": True,
-                            "data": "No structured content",
-                        }
+                    # Return the full ToolResult to preserve formatting
                     return result
 
             elif action == HostAction.IMPORT_SSH:
@@ -1118,7 +1277,7 @@ class HostService:
                 selected_hosts = params.get("selected_hosts")
 
                 result = await config_service.import_ssh_config(ssh_config_path, selected_hosts)
-                # Convert ToolResult to dict for consistency
+                # Extract structured content for processing but preserve original ToolResult
                 if hasattr(result, "structured_content"):
                     import_result = result.structured_content or {
                         "success": True,

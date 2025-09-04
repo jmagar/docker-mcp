@@ -207,23 +207,39 @@ class StackOperations:
             )
 
     def _format_stacks_list(self, result: dict[str, Any], host_id: str) -> list[str]:
-        """Format stacks list for display."""
+        """Format stacks list for display - compact table format."""
         stacks = result["stacks"]
+        
+        # Count stacks by status
+        status_counts = {}
+        for stack in stacks:
+            status = stack.get("status", "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        status_summary = ", ".join(f"{status}: {count}" for status, count in status_counts.items())
+        
         summary_lines = [
-            f"Docker Compose Stacks on {host_id}",
-            f"Found {len(stacks)} stacks",
+            f"Docker Compose Stacks on {host_id} ({len(stacks)} total)",
+            f"Status breakdown: {status_summary}",
             "",
+            f"{'':1} {'Stack':<25} {'Status':<10} {'Services':<15}",
+            f"{'':1} {'-'*25:<25} {'-'*10:<10} {'-'*15:<15}",
         ]
 
         for stack in stacks:
-            status_indicator = "●" if "running" in stack.get("status", "").lower() else "○"
+            status_indicator = {"running": "●", "partial": "◐", "stopped": "○"}.get(
+                stack.get("status", "unknown"), "?"
+            )
             services = stack.get("services", [])
-            services_info = f" ({len(services)} services)" if services else ""
+            services_display = f"[{len(services)}] {','.join(services[:2])}" if services else "[0]"
+            if len(services) > 2:
+                services_display += f"..."
+                
+            stack_name = stack["name"][:24]  # Truncate long names
+            status = stack.get("status", "unknown")[:9]  # Truncate status
 
             summary_lines.append(
-                f"{status_indicator} {stack['name']}{services_info}\n"
-                f"    Status: {stack.get('status', 'Unknown')}\n"
-                f"    Created: {stack.get('created', 'Unknown')}"
+                f"{status_indicator} {stack_name:<25} {status:<10} {services_display[:15]:<15}"
             )
 
         return summary_lines

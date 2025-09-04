@@ -255,12 +255,7 @@ class StackService:
                     return {"success": False, "error": "host_id is required for list action"}
 
                 result = await self.list_stacks(host_id)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
+                # Return the full ToolResult to preserve formatting
                 return result
 
             elif action == ComposeAction.VIEW:
@@ -271,12 +266,7 @@ class StackService:
                     return {"success": False, "error": "stack_name is required for view action"}
 
                 result = await self.get_stack_compose_file(host_id, stack_name)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
+                # Return the full ToolResult to preserve formatting
                 return result
 
             elif action == ComposeAction.DEPLOY:
@@ -301,12 +291,7 @@ class StackService:
                 result = await self.deploy_stack(
                     host_id, stack_name, compose_content, environment, pull_images, recreate
                 )
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
+                # Return the full ToolResult to preserve formatting
                 return result
 
             elif action in ["up", "down", "restart", "build", "pull"]:
@@ -320,12 +305,7 @@ class StackService:
                     }
 
                 result = await self.manage_stack(host_id, stack_name, action, options)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
+                # Return the full ToolResult to preserve formatting
                 return result
 
             elif action == ComposeAction.LOGS:

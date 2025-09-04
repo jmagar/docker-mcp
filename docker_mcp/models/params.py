@@ -44,6 +44,8 @@ class DockerHostsParams(BaseModel):
     compose_path: str | None = Field(default=None, description="Docker Compose file path")
     appdata_path: str | None = Field(default=None, description="Application data storage path")
     enabled: bool = Field(default=True, description="Whether host is enabled")
+    zfs_capable: bool = Field(default=False, description="Whether host has ZFS available")
+    zfs_dataset: str = Field(default="", description="ZFS dataset path for appdata")
     ssh_config_path: str | None = Field(default=None, description="Path to SSH config file")
     selected_hosts: str | None = Field(
         default=None, description="Comma-separated list of hosts to select"

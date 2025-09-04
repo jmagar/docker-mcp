@@ -104,6 +104,8 @@ class ContainerService:
                 f"Docker Containers on {host_id}",
                 f"Showing {pagination['returned']} of {pagination['total']} containers",
                 "",
+                f"{'':1} {'Container':<25} {'Ports':<20} {'Project':<15}",
+                f"{'':1} {'-'*25:<25} {'-'*20:<20} {'-'*15:<15}",
             ]
 
             for container in containers:
@@ -132,30 +134,30 @@ class ContainerService:
             )
 
     def _format_container_summary(self, container: dict[str, Any]) -> list[str]:
-        """Format container information for display."""
+        """Format container information for display - compact single line format."""
         status_indicator = "●" if container["state"] == "running" else "○"
-        ports_info = f" | Ports: {', '.join(container['ports'])}" if container["ports"] else ""
-
-        # Show volume and network info if available
-        volume_info = (
-            f" | Volumes: {len(container.get('volumes', []))}" if container.get("volumes") else ""
-        )
-        network_info = (
-            f" | Networks: {', '.join(container.get('networks', []))}"
-            if container.get("networks")
-            else ""
-        )
-        compose_info = (
-            f" | Project: {container.get('compose_project')}"
-            if container.get("compose_project")
-            else ""
-        )
-
-        return [
-            f"{status_indicator} {container['name']} ({container['id']})\n"
-            f"    Image: {container['image']}\n"
-            f"    Status: {container['status']}{ports_info}{volume_info}{network_info}{compose_info}"
-        ]
+        
+        # Extract first 3 host ports for compact display
+        ports = container.get("ports", [])
+        if ports:
+            # Extract host ports from format like "0.0.0.0:8012→8000/tcp"
+            host_ports = []
+            for port in ports[:3]:  # Show max 3 ports
+                if ":" in port and "→" in port:
+                    host_port = port.split(":")[1].split("→")[0]
+                    host_ports.append(host_port)
+            ports_display = ",".join(host_ports)
+            if len(ports) > 3:
+                ports_display += f"+{len(ports)-3}"
+        else:
+            ports_display = "-"
+        
+        # Truncate names for alignment
+        name = container["name"][:25] 
+        project = container.get("compose_project", "-")[:15]
+        
+        # Safe formatting without alignment to debug format string error
+        return [f"{status_indicator} {name} | {ports_display} | {project}"]
 
     async def get_container_info(self, host_id: str, container_id: str) -> ToolResult:
         """Get detailed information about a specific container."""
@@ -485,43 +487,44 @@ class ContainerService:
         return lines
 
     def _format_port_mapping_details(self, port_mappings: list[dict[str, Any]]) -> list[str]:
-        """Format detailed port mapping information."""
+        """Format port mapping information grouped by container for efficiency."""
+        if not port_mappings:
+            return ["No exposed ports found."]
+            
         lines = ["PORT MAPPINGS:"]
-
-        # Sort by host port for better readability
-        sorted_mappings = sorted(
-            port_mappings,
-            key=lambda x: (
-                x["host_ip"],
-                int(x["host_port"]) if x["host_port"].isdigit() else 0,
-            ),
-        )
-
-        for mapping in sorted_mappings:
-            conflict_indicator = "⚠️ " if mapping["is_conflict"] else "  "
-            host_mapping = f"{mapping['host_ip']}:{mapping['host_port']}"
-            container_mapping = f"{mapping['container_port']}/{mapping['protocol']}"
-            container_info = f"{mapping['container_name']} ({mapping['container_id']})"
-
-            lines.append(
-                f"{conflict_indicator}{host_mapping} → {container_mapping} | {container_info}"
-            )
-
-            # Show image and compose project if available
-            details = []
-            if mapping.get("image"):
-                details.append(f"Image: {mapping['image']}")
-            if mapping.get("compose_project"):
-                details.append(f"Project: {mapping['compose_project']}")
-
-            if details:
-                lines.append(f"    {' | '.join(details)}")
-
-            # Show conflict details
-            if mapping["is_conflict"] and mapping.get("conflict_with"):
-                conflict_with = ", ".join(mapping["conflict_with"])
-                lines.append(f"    Conflicts with: {conflict_with}")
-
+        
+        # Group ports by container for efficient display
+        by_container = {}
+        conflicts_found = []
+        
+        for mapping in port_mappings:
+            container_key = mapping['container_name']
+            if container_key not in by_container:
+                by_container[container_key] = {
+                    'ports': [],
+                    'compose_project': mapping.get('compose_project', ''),
+                    'container_id': mapping['container_id']
+                }
+            
+            # Format: host_port→container_port/protocol
+            port_str = f"{mapping['host_port']}→{mapping['container_port']}/{mapping['protocol'].lower()}"
+            if mapping['is_conflict']:
+                port_str = f"⚠️{port_str}"
+                conflicts_found.append(f"{mapping['host_port']}/{mapping['protocol']}")
+            
+            by_container[container_key]['ports'].append(port_str)
+        
+        # Display grouped by container
+        for container_name, container_data in sorted(by_container.items()):
+            ports_str = ', '.join(container_data['ports'])
+            project_info = f" [{container_data['compose_project']}]" if container_data['compose_project'] else ""
+            lines.append(f"  {container_name}{project_info}: {ports_str}")
+        
+        # Add conflicts summary if any
+        if conflicts_found:
+            lines.append("")
+            lines.append(f"⚠️  Conflicts detected on ports: {', '.join(conflicts_found)}")
+        
         return lines
 
     async def check_port_availability(self, host_id: str, port: int) -> dict[str, Any]:
@@ -615,12 +618,7 @@ class ContainerService:
                     return {"success": False, "error": "offset must be >= 0"}
 
                 result = await self.list_containers(host_id, all_containers, limit, offset)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
+                # Return the full ToolResult to preserve formatting
                 return result
 
             elif action == ContainerAction.INFO:
@@ -631,28 +629,8 @@ class ContainerService:
                     return {"success": False, "error": "container_id is required for info action"}
 
                 info_result = await self.get_container_info(host_id, container_id)
-                # Extract structured content from ToolResult
-                info_data = info_result.structured_content if hasattr(info_result, 'structured_content') else info_result
-
-                # Check for error in structured data
-                if isinstance(info_data, dict) and "error" not in info_data:
-                    # Get the actual container info from structured content
-                    container_info = info_data.get("info") or info_data
-
-                    return {
-                        "success": True,
-                        HOST_ID: host_id,
-                        CONTAINER_ID: container_id,
-                        "container": container_info,
-                        # Flattened fields for convenience + test expectations
-                        "image": container_info.get("image"),
-                        "status": container_info.get("status"),
-                        "created": container_info.get("created"),
-                        "name": container_info.get("name"),
-                        "id": container_info.get("container_id") or container_id,
-                    }
-                # Pass through error as-is
-                return info_data
+                # Return the full ToolResult to preserve formatting
+                return info_result
 
             elif action in [
                 ContainerAction.START,
@@ -677,12 +655,7 @@ class ContainerService:
                 result = await self.manage_container(
                     host_id, container_id, action.value, force, timeout
                 )
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
+                # Return the full ToolResult to preserve formatting
                 return result
 
             elif action == ContainerAction.LOGS:
@@ -751,12 +724,7 @@ class ContainerService:
 
                 # For pull, container_id is actually the image name
                 result = await self.pull_image(host_id, container_id)
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": "No structured content",
-                    }
+                # Return the full ToolResult to preserve formatting
                 return result
 
             else:
