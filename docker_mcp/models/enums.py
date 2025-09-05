@@ -45,8 +45,4 @@ class ComposeAction(Enum):
     MIGRATE = "migrate"
 
 
-class Protocol(Enum):
-    """Network protocols for port operations."""
-
-    TCP = "TCP"
-    UDP = "UDP"
+# Removed unused Protocol enum; protocol strings are handled directly where needed.

@@ -4,19 +4,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-
-class ContainerInfo(BaseModel):
-    """Information about a Docker container."""
-
-    container_id: str
-    name: str
-    image: str
-    status: str
-    state: str
-    created: str
-    ports: list[dict[str, Any]] = Field(default_factory=list)
-    labels: dict[str, str] = Field(default_factory=dict)
-    host_id: str
+"""
+Removed legacy ContainerInfo in favor of dict-shaped responses from services.
+"""
 
 
 class ContainerStats(BaseModel):
@@ -57,15 +47,9 @@ class StackInfo(BaseModel):
     compose_file: str | None = None
 
 
-class DeployStackRequest(BaseModel):
-    """Request to deploy a Docker Compose stack."""
-
-    host_id: str
-    stack_name: str
-    compose_content: str
-    environment: dict[str, str] = Field(default_factory=dict)
-    pull_images: bool = True
-    recreate: bool = False
+"""
+Removed unused DeployStackRequest; server validates compose params directly.
+"""
 
 
 class ContainerAction(BaseModel):
@@ -113,13 +97,6 @@ class PortConflict(BaseModel):
     container_details: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class PortListResponse(BaseModel):
-    """Complete port listing response with summary and conflict detection."""
-
-    host_id: str
-    total_ports: int
-    total_containers: int
-    port_mappings: list[PortMapping]
-    conflicts: list[PortConflict] = Field(default_factory=list)
-    summary: dict[str, Any] = Field(default_factory=dict)
-    timestamp: str
+"""
+Removed unused PortListResponse; resources return plain dicts with metadata.
+"""
