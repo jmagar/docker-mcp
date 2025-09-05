@@ -1018,7 +1018,7 @@ class ContainerTools:
                         host_ip=host_ip,
                         host_port=host_port,
                         container_port=container_port_clean,
-                        protocol=protocol.upper(),
+                        protocol=protocol.lower(),  # type: ignore[arg-type]
                         container_id=container_id,
                         container_name=container_name,
                         image=image,
@@ -1082,7 +1082,7 @@ class ContainerTools:
 
         return PortConflict(
             host_port=host_port,
-            protocol=protocol,
+            protocol=protocol,  # type: ignore[arg-type]
             host_ip=host_ip,
             affected_containers=container_names,
             container_details=container_details,

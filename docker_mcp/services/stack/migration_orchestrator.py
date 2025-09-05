@@ -1,9 +1,13 @@
 """Stack migration orchestrator."""
 
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
 
 from ...core.config_loader import DockerMCPConfig
 from ...core.docker_context import DockerContextManager
@@ -22,7 +26,11 @@ class StackMigrationOrchestrator:
     deployment verification, and rollback capabilities.
     """
 
-    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+    def __init__(
+        self,
+        config: DockerMCPConfig,
+        context_manager: "DockerContextManager",
+    ):
         """Initialize migration orchestrator and its dependencies."""
         self.config = config
         # Build internal module instances
@@ -124,7 +132,9 @@ class StackMigrationOrchestrator:
             self.logger.error("Migration orchestration failed", error=str(e))
             return self._create_error_result(f"Migration failed: {str(e)}", migration_data)
 
-    async def _validate_hosts(self, source_host_id: str, target_host_id: str, migration_steps: list):
+    async def _validate_hosts(
+        self, source_host_id: str, target_host_id: str, migration_steps: list[str]
+    ) -> ToolResult | tuple[Any, Any]:
         """Validate source and target hosts."""
         for host_id in [source_host_id, target_host_id]:
             is_valid, error_msg = self._validate_host(host_id)
@@ -189,7 +199,10 @@ class StackMigrationOrchestrator:
         migration_data["tool_availability"] = tool_details
         return expected_mounts, estimated_data_size
 
-    async def _test_network_connectivity(self, source_host, target_host, estimated_data_size: int, migration_steps: list, migration_data: dict, dry_run: bool):
+    async def _test_network_connectivity(
+        self, source_host, target_host, estimated_data_size: int,
+        migration_steps: list[str], migration_data: dict, dry_run: bool
+    ) -> ToolResult | bool:
         """Test network connectivity between hosts."""
         migration_steps.append("🌐 Testing network connectivity...")
         connectivity_ok, network_details = await self.network.test_network_connectivity(source_host, target_host)
@@ -234,7 +247,12 @@ class StackMigrationOrchestrator:
         migration_data["risk_assessment"] = risks
         return risks
 
-    async def _execute_migration(self, source_host_id: str, target_host_id: str, source_host, target_host, stack_name: str, skip_stop_source: bool, start_target: bool, remove_source: bool, expected_mounts: list, compose_content: str, compose_path: str, migration_steps: list, migration_data: dict):
+    async def _execute_migration(
+        self, source_host_id: str, target_host_id: str, source_host, target_host,
+        stack_name: str, skip_stop_source: bool, start_target: bool, remove_source: bool,
+        expected_mounts: list[str], compose_content: str, compose_path: str,
+        migration_steps: list[str], migration_data: dict
+    ) -> bool | dict[str, Any]:
         """Execute the actual migration process."""
         migration_steps.append("🚀 Starting migration execution...")
 
@@ -307,7 +325,11 @@ class StackMigrationOrchestrator:
 
         return transfer_results
 
-    async def _deploy_target_stack(self, target_host_id: str, stack_name: str, compose_content: str, path_mappings: dict, target_host, start_target: bool, migration_steps: list):
+    async def _deploy_target_stack(
+        self, target_host_id: str, stack_name: str, compose_content: str,
+        path_mappings: dict[str, str], target_host, start_target: bool,
+        migration_steps: list[str]
+    ) -> ToolResult | dict[str, Any]:
         """Deploy stack on target host."""
         target_appdata_path = target_host.appdata_path or "/opt/docker-appdata"
         updated_compose = self.executor.update_compose_for_target(compose_content, path_mappings, target_appdata_path, stack_name)
@@ -360,7 +382,7 @@ class StackMigrationOrchestrator:
 
     def _create_final_result(self, stack_name: str, source_host_id: str, target_host_id: str, dry_run: bool, migration_steps: list, migration_data: dict) -> ToolResult:
         """Create final migration result."""
-        final_message = "\\n".join([
+        final_message = "\n".join([
             f"{'🧪 DRY RUN - ' if dry_run else ''}Stack Migration: {stack_name}",
             f"Source: {source_host_id} → Target: {target_host_id}",
             "",

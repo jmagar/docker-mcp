@@ -4,9 +4,25 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-"""
-Removed legacy ContainerInfo in favor of dict-shaped responses from services.
-"""
+from .enums import ProtocolLiteral
+
+
+# Minimal Pydantic models for type safety (matches current dict shapes)
+class ContainerInfo(BaseModel):
+    """Information about a Docker container (minimal for type safety)."""
+
+    container_id: str
+    name: str
+    host_id: str
+    image: str | None = None
+    status: str | None = None
+    state: str | None = None
+    ports: list[dict[str, Any]] = Field(default_factory=list)
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Convert to dict for backward compatibility."""
+        kwargs.setdefault('exclude_none', True)
+        return super().model_dump(**kwargs)
 
 
 class ContainerStats(BaseModel):
@@ -47,9 +63,21 @@ class StackInfo(BaseModel):
     compose_file: str | None = None
 
 
-"""
-Removed unused DeployStackRequest; server validates compose params directly.
-"""
+# Minimal request model for type safety
+class DeployStackRequest(BaseModel):
+    """Request to deploy a Docker Compose stack (minimal for type safety)."""
+
+    host_id: str
+    stack_name: str
+    compose_content: str
+    environment: dict[str, str] = Field(default_factory=dict)
+    pull_images: bool = True
+    recreate: bool = False
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Convert to dict for backward compatibility."""
+        kwargs.setdefault('exclude_none', True)
+        return super().model_dump(**kwargs)
 
 
 class ContainerAction(BaseModel):
@@ -78,7 +106,7 @@ class PortMapping(BaseModel):
     host_ip: str
     host_port: str
     container_port: str
-    protocol: str
+    protocol: ProtocolLiteral
     container_id: str
     container_name: str
     image: str
@@ -91,12 +119,24 @@ class PortConflict(BaseModel):
     """Port conflict information."""
 
     host_port: str
-    protocol: str
+    protocol: ProtocolLiteral
     host_ip: str
     affected_containers: list[str]
     container_details: list[dict[str, Any]] = Field(default_factory=list)
 
 
-"""
-Removed unused PortListResponse; resources return plain dicts with metadata.
-"""
+class PortListResponse(BaseModel):
+    """Port listing response (minimal for type safety)."""
+
+    host_id: str
+    total_ports: int
+    total_containers: int
+    port_mappings: list[dict[str, Any]] = Field(default_factory=list)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    timestamp: str | None = None
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Convert to dict for backward compatibility."""
+        kwargs.setdefault('exclude_none', True)
+        return super().model_dump(**kwargs)

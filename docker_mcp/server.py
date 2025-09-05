@@ -10,7 +10,11 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
+    from docker_mcp.services import ContainerService, HostService, StackService
 
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
@@ -276,12 +280,12 @@ class DockerMCPServer:
         # Initialize service layer
         from .services.logs import LogsService
 
-        self.logs_service = LogsService(config, self.context_manager)
-        self.host_service = HostService(config, self.context_manager)
-        self.container_service = ContainerService(
+        self.logs_service: LogsService = LogsService(config, self.context_manager)
+        self.host_service: HostService = HostService(config, self.context_manager)
+        self.container_service: ContainerService = ContainerService(
             config, self.context_manager, self.logs_service
         )
-        self.stack_service = StackService(config, self.context_manager, self.logs_service)
+        self.stack_service: StackService = StackService(config, self.context_manager, self.logs_service)
         self.config_service = ConfigService(config, self.context_manager)
         self.cleanup_service = CleanupService(config)
 
@@ -485,15 +489,21 @@ class DockerMCPServer:
         except ValueError:
             timeout = None
 
-        # Build provider with either explicit env creds or ellipsis (provider can read env directly)
-        provider = GoogleProvider(
-            client_id=client_id or ...,
-            client_secret=client_secret or ...,
-            base_url=base_url,
-            required_scopes=required_scopes,
-            redirect_path=redirect_path,
-            timeout_seconds=timeout or ...,
-        )
+        # Build provider with explicit env creds or let provider use defaults
+        kwargs: dict[str, Any] = {
+            "base_url": base_url,
+            "required_scopes": required_scopes,
+            "redirect_path": redirect_path,
+        }
+
+        if client_id:
+            kwargs["client_id"] = client_id
+        if client_secret:
+            kwargs["client_secret"] = client_secret
+        if timeout is not None:
+            kwargs["timeout_seconds"] = timeout
+
+        provider = GoogleProvider(**kwargs)  # type: ignore[arg-type]
 
         # Optional hardening: restrict allowed client redirect URIs
         allowed_redirects = os.getenv(
@@ -677,24 +687,24 @@ class DockerMCPServer:
         # Delegate to service layer for business logic
         return await self.host_service.handle_action(
             action,
-            host_id=host_id,
-            ssh_host=ssh_host,
-            ssh_user=ssh_user,
-            ssh_port=ssh_port,
-            ssh_key_path=ssh_key_path,
-            description=description,
-            tags=tags,
-            compose_path=compose_path,
-            appdata_path=appdata_path,
-            enabled=enabled,
-            zfs_capable=zfs_capable,
-            zfs_dataset=zfs_dataset,
-            port=port,
-            cleanup_type=cleanup_type,
-            frequency=frequency,
-            time=time,
-            ssh_config_path=ssh_config_path,
-            selected_hosts=selected_hosts,
+            host_id=params.host_id,
+            ssh_host=params.ssh_host,
+            ssh_user=params.ssh_user,
+            ssh_port=params.ssh_port,
+            ssh_key_path=params.ssh_key_path,
+            description=params.description,
+            tags=params.tags,
+            compose_path=params.compose_path,
+            appdata_path=params.appdata_path,
+            enabled=params.enabled,
+            zfs_capable=params.zfs_capable,
+            zfs_dataset=params.zfs_dataset,
+            port=params.port,
+            cleanup_type=params.cleanup_type,
+            frequency=params.frequency,
+            time=params.time,
+            ssh_config_path=params.ssh_config_path,
+            selected_hosts=params.selected_hosts,
         )
 
     async def docker_container(
@@ -780,15 +790,15 @@ class DockerMCPServer:
         # Delegate to service layer for business logic
         return await self.container_service.handle_action(
             action,
-            host_id=host_id,
-            container_id=container_id,
-            all_containers=all_containers,
-            limit=limit,
-            offset=offset,
-            follow=follow,
-            lines=lines,
-            force=force,
-            timeout=timeout,
+            host_id=params.host_id,
+            container_id=params.container_id,
+            all_containers=params.all_containers,
+            limit=params.limit,
+            offset=params.offset,
+            follow=params.follow,
+            lines=params.lines,
+            force=params.force,
+            timeout=params.timeout,
         )
 
     async def docker_compose(
@@ -892,20 +902,20 @@ class DockerMCPServer:
         # Delegate to service layer for business logic
         return await self.stack_service.handle_action(
             action,
-            host_id=host_id,
-            stack_name=stack_name,
-            compose_content=compose_content,
-            environment=environment,
-            pull_images=pull_images,
-            recreate=recreate,
-            follow=follow,
-            lines=lines,
-            dry_run=dry_run,
-            options=options,
-            target_host_id=target_host_id,
-            remove_source=remove_source,
-            skip_stop_source=skip_stop_source,
-            start_target=start_target,
+            host_id=params.host_id,
+            stack_name=params.stack_name,
+            compose_content=params.compose_content,
+            environment=params.environment,
+            pull_images=params.pull_images,
+            recreate=params.recreate,
+            follow=params.follow,
+            lines=params.lines,
+            dry_run=params.dry_run,
+            options=params.options,
+            target_host_id=params.target_host_id,
+            remove_source=params.remove_source,
+            skip_stop_source=params.skip_stop_source,
+            start_target=params.start_target,
         )
 
     async def add_docker_host(

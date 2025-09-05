@@ -247,6 +247,8 @@ rm -f ~/.fastmcp/oauth-mcp-client-cache/*_{client_info,tokens}.json
 
 ## References
 
-- Project docs: `docs/GOOGLE_OAUTH.md`, `docs/OAUTH_PROXY.md`, `docs/AUTHENTICATION.md`
-- FastMCP docs: https://gofastmcp.com (Authentication, OAuth Proxy, Google Provider)
-- Google OAuth: https://console.cloud.google.com/apis/credentials
+- [Project docs: GOOGLE_OAUTH.md](./GOOGLE_OAUTH.md)
+- [Project docs: OAUTH_PROXY.md](./OAUTH_PROXY.md)
+- [Project docs: AUTHENTICATION.md](./AUTHENTICATION.md)
+- [FastMCP docs](https://gofastmcp.com) (Authentication, OAuth Proxy, Google Provider)
+- [Google OAuth Console](https://console.cloud.google.com/apis/credentials)

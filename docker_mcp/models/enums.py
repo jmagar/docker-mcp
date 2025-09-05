@@ -1,6 +1,10 @@
 """Enum definitions for Docker MCP tools."""
 
 from enum import Enum
+from typing import Literal
+
+# Type alias for protocol strings
+ProtocolLiteral = Literal["tcp", "udp", "sctp"]
 
 
 class HostAction(Enum):
