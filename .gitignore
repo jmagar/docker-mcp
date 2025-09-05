@@ -22,6 +22,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 element_clones
+docker-mcp-pr*
 
 # PyInstaller
 *.manifest
@@ -89,9 +90,7 @@ tmp/
 
 # Cache directories
 .cache/
-
-# Fix files
-*-fixes.md
+.uv-cache/
 
 # Tests (exclude from git tracking)
 tests/

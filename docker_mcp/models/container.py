@@ -17,7 +17,7 @@ class ContainerInfo(BaseModel):
     image: str | None = None
     status: str | None = None
     state: str | None = None
-    ports: list[dict[str, Any]] = Field(default_factory=list)
+    ports: list[str] = Field(default_factory=list)
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         """Convert to dict for backward compatibility."""
@@ -131,8 +131,8 @@ class PortListResponse(BaseModel):
     host_id: str
     total_ports: int
     total_containers: int
-    port_mappings: list[dict[str, Any]] = Field(default_factory=list)
-    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    port_mappings: list[PortMapping] = Field(default_factory=list)
+    conflicts: list[PortConflict] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
     timestamp: str | None = None
 

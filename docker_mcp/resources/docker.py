@@ -5,7 +5,11 @@ information using the docker:// URI scheme.
 """
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
+    from docker_mcp.services import ContainerService, HostService, StackService
 
 import docker
 import structlog
@@ -22,7 +26,7 @@ class DockerInfoResource(FunctionResource):
     version details, and configuration.
     """
 
-    def __init__(self, context_manager, host_service):
+    def __init__(self, context_manager: "DockerContextManager", host_service: "HostService"):
         """Initialize the Docker info resource.
 
         Args:
@@ -45,11 +49,9 @@ class DockerInfoResource(FunctionResource):
 
                 # Get Docker client and retrieve info/version using Docker SDK
                 client = await context_manager.get_client(host_id)
-                loop = asyncio.get_event_loop()
-
                 # Get Docker system info and version using SDK
-                docker_info = await loop.run_in_executor(None, client.info)
-                docker_version = await loop.run_in_executor(None, client.version)
+                docker_info = await asyncio.to_thread(client.info)
+                docker_version = await asyncio.to_thread(client.version)
 
                 # Get host configuration from our host service
                 host_config = {}
@@ -109,7 +111,7 @@ class DockerInfoResource(FunctionResource):
             title="Docker host system information and configuration",
             description="Provides comprehensive Docker host information including version, system info, and configuration details",
             mime_type="application/json",
-            tags={"docker", "system", "info"},  # type: ignore[arg-type]
+            tags={"docker", "system", "info"},
         )
 
 
@@ -123,7 +125,7 @@ class DockerContainersResource(FunctionResource):
     - offset: Pagination offset (default: 0)
     """
 
-    def __init__(self, container_service):
+    def __init__(self, container_service: "ContainerService"):
         """Initialize the Docker containers resource.
 
         Args:
@@ -202,7 +204,7 @@ class DockerContainersResource(FunctionResource):
             title="List of Docker containers on a host",
             description="Provides comprehensive container information including status, networks, volumes, and compose project details",
             mime_type="application/json",
-            tags={"docker", "containers"},  # type: ignore[arg-type]
+            tags={"docker", "containers"},
         )
 
 
@@ -213,7 +215,7 @@ class DockerComposeResource(FunctionResource):
     Provides information about Docker Compose stacks and projects on a host.
     """
 
-    def __init__(self, stack_service):
+    def __init__(self, stack_service: "StackService"):
         """Initialize the Docker Compose resource.
 
         Args:
@@ -300,5 +302,5 @@ class DockerComposeResource(FunctionResource):
             title="Docker Compose stacks and projects",
             description="Provides information about Docker Compose stacks, projects, and their configurations on a host",
             mime_type="application/json",
-            tags={"docker", "compose", "stacks"},  # type: ignore[arg-type]
+            tags={"docker", "compose", "stacks"},
         )

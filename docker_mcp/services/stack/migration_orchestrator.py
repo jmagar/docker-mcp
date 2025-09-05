@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
 
 from ...core.config_loader import DockerMCPConfig
-from ...core.docker_context import DockerContextManager
 from ...utils import format_size
 from .migration_executor import StackMigrationExecutor
 from .network import StackNetwork

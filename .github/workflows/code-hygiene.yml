@@ -1,5 +1,7 @@
 name: Code Hygiene
-on: [pull_request]
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
 jobs:
   analyze:
     runs-on: ubuntu-latest
@@ -9,3 +11,11 @@ jobs:
       - run: uv run python scripts/analyze_codebase.py --out CODE_HEALTH_DUPLICATES_DEAD_CODE.md --json report.json
       - run: |
           jq '.duplicates.files + .duplicates.blocks + .unreferenced.count' report.json | awk '{exit ($1>0)}'
+          echo
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: code-hygiene-report
+          path: |
+            CODE_HEALTH_DUPLICATES_DEAD_CODE.md
+            report.json
