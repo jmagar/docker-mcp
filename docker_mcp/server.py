@@ -362,6 +362,8 @@ class DockerMCPServer:
             async def whoami() -> dict:
                 """Return identity claims for the authenticated user."""
                 token = get_access_token()
+                if token is None:
+                    return {}
                 # token.claims should contain standard OIDC-style claims
                 return {
                     "iss": token.claims.get("iss"),
@@ -375,6 +377,8 @@ class DockerMCPServer:
             async def get_user_info() -> dict:
                 """Return simplified user info for authenticated Google user."""
                 token = get_access_token()
+                if token is None:
+                    return {}
                 return {
                     "google_id": token.claims.get("sub"),
                     "email": token.claims.get("email"),
@@ -383,7 +387,11 @@ class DockerMCPServer:
                 }
         except Exception:
             # If dependencies are unavailable (e.g., auth not enabled), skip these helpers
-            pass
+            # Log at debug level to avoid noisy errors when auth isn't configured
+            self.logger.debug(
+                "Auth helpers unavailable; skipping whoami/get_user_info tools",
+                exc_info=True,
+            )
 
         # Register consolidated tools (3 tools replace 13 individual tools)
         self.app.tool(
@@ -477,14 +485,14 @@ class DockerMCPServer:
         except ValueError:
             timeout = None
 
-        # Build provider with either explicit env creds or None (provider can read env directly)
+        # Build provider with either explicit env creds or ellipsis (provider can read env directly)
         provider = GoogleProvider(
-            client_id=client_id,
-            client_secret=client_secret,
+            client_id=client_id or ...,
+            client_secret=client_secret or ...,
             base_url=base_url,
             required_scopes=required_scopes,
             redirect_path=redirect_path,
-            timeout_seconds=timeout,
+            timeout_seconds=timeout or ...,
         )
 
         # Optional hardening: restrict allowed client redirect URIs
@@ -495,9 +503,13 @@ class DockerMCPServer:
             try:
                 # property exists in FastMCP 2.12.x
                 patterns = [p.strip() for p in allowed_redirects.split(",") if p.strip()]
-                setattr(provider, "allowed_client_redirect_uris", patterns)
+                provider.allowed_client_redirect_uris = patterns
             except Exception:
-                pass
+                # Older FastMCP versions may not support this; log and continue
+                self.logger.debug(
+                    "Skipping allowed_client_redirect_uris; provider does not support or failed to set",
+                    exc_info=True,
+                )
 
         return provider
 

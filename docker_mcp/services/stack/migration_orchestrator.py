@@ -2,17 +2,17 @@
 
 
 import structlog
-from mcp.types import TextContent
 from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 from ...core.config_loader import DockerMCPConfig
 from ...core.docker_context import DockerContextManager
+from ...utils import format_size
 from .migration_executor import StackMigrationExecutor
 from .network import StackNetwork
 from .risk_assessment import StackRiskAssessment
 from .validation import StackValidation
 from .volume_utils import StackVolumeUtils
-from ...utils import format_size
 
 
 class StackMigrationOrchestrator:
