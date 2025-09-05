@@ -64,8 +64,9 @@ class StackOperations:
                         if any(stack_name in str(s) for s in list_result.get("stacks", [])):
                             break
                         await _asyncio.sleep(1)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.debug("Stack deployment verification failed",
+                                    host_id=host_id, stack_name=stack_name, error=str(e))
                 return ToolResult(
                     content=[
                         TextContent(
@@ -209,15 +210,15 @@ class StackOperations:
     def _format_stacks_list(self, result: dict[str, Any], host_id: str) -> list[str]:
         """Format stacks list for display - compact table format."""
         stacks = result["stacks"]
-        
+
         # Count stacks by status
         status_counts = {}
         for stack in stacks:
             status = stack.get("status", "unknown")
             status_counts[status] = status_counts.get(status, 0) + 1
-        
+
         status_summary = ", ".join(f"{status}: {count}" for status, count in status_counts.items())
-        
+
         summary_lines = [
             f"Docker Compose Stacks on {host_id} ({len(stacks)} total)",
             f"Status breakdown: {status_summary}",
@@ -233,8 +234,8 @@ class StackOperations:
             services = stack.get("services", [])
             services_display = f"[{len(services)}] {','.join(services[:2])}" if services else "[0]"
             if len(services) > 2:
-                services_display += f"..."
-                
+                services_display += "..."
+
             stack_name = stack["name"][:24]  # Truncate long names
             status = stack.get("status", "unknown")[:9]  # Truncate status
 

@@ -130,11 +130,11 @@ class RateLimitingMiddleware(Middleware):
         # Check global rate limit
         if self.enable_global_limit:
             if not await self._check_client_rate_limit(client_id):
-                await self._handle_rate_limit_exceeded(client_id, method, "global")
+                await self._handle_rate_limit_exceeded(client_id, method or "unknown", "global")
                 return
 
         # Check per-method rate limit
-        if method in self.per_method_limits:
+        if method and method in self.per_method_limits:
             if not await self._check_method_rate_limit(client_id, method):
                 await self._handle_rate_limit_exceeded(client_id, method, "method")
                 return
@@ -348,7 +348,7 @@ class RateLimitingMiddleware(Middleware):
         if client_id not in self.client_stats:
             return None
 
-        status = {
+        status: dict[str, Any] = {
             "client_id": client_id,
             "stats": self.client_stats[client_id].copy(),
             "global_bucket": None,

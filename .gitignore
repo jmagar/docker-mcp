@@ -78,6 +78,9 @@ config/hosts.yml
 ssh_keys/
 logs/
 
+# Google OAuth credentials
+client_secret_*.apps.googleusercontent.com.json
+
 # Temporary files
 *.tmp
 *.temp

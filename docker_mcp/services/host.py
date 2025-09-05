@@ -6,7 +6,7 @@ Business logic for Docker host management operations.
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -131,19 +131,20 @@ class HostService:
                 f"{'Host':<12} {'Address':<20} {'ZFS':<3} {'Dataset':<20}",
                 f"{'-'*12:<12} {'-'*20:<20} {'-'*3:<3} {'-'*20:<20}",
             ]
-            
+
             for host_data in hosts:
+                host_data = cast(dict[str, Any], host_data)  # Type hint for mypy
                 zfs_indicator = "✓" if host_data.get('zfs_capable') else "✗"
                 address = f"{host_data['hostname']}:{host_data['port']}"
-                dataset = host_data.get('zfs_dataset', '-') or '-'
-                
+                dataset: str = host_data.get('zfs_dataset', '-') or '-'
+
                 summary_lines.append(
-                    f"{host_data[HOST_ID]:<12} {address:<20} {zfs_indicator:<3} {dataset[:20]:<20}"
+                    f"{host_data.get(HOST_ID, 'unknown'):<12} {address:<20} {zfs_indicator:<3} {dataset[:20]:<20}"
                 )
-            
+
             return {
-                "success": True, 
-                "hosts": hosts, 
+                "success": True,
+                "hosts": hosts,
                 "count": len(hosts),
                 "summary": "\n".join(summary_lines)
             }
@@ -219,7 +220,7 @@ class HostService:
             current_host = self.config.hosts[host_id]
 
             # Update only provided values (treat empty strings as None)
-            updated_config = {
+            updated_config: dict[str, Any] = {
                 "hostname": ssh_host if ssh_host is not None and ssh_host != "" else current_host.hostname,
                 "user": ssh_user if ssh_user is not None and ssh_user != "" else current_host.user,
                 "port": ssh_port if ssh_port is not None else current_host.port,
@@ -243,7 +244,7 @@ class HostService:
 
             # Create and validate the new host configuration before updating
             try:
-                new_host_config = DockerHost(**updated_config)
+                new_host_config = DockerHost(**updated_config)  # type: ignore[arg-type]
             except Exception as validation_error:
                 return {
                     "success": False,
@@ -419,60 +420,23 @@ class HostService:
         """
         try:
             # Force reload configuration from disk to avoid stale in-memory state
-            try:
-                config_file_path = getattr(self.config, "config_file", None)
-                fresh_config = load_config(config_file_path)
-                self.config = fresh_config
-                self.logger.info(
-                    "Reloaded configuration from disk before discovery",
-                    host_id=host_id,
-                    config_file_path=config_file_path
-                )
-            except Exception as reload_error:
-                self.logger.warning(
-                    "Failed to reload config from disk, using in-memory config",
-                    host_id=host_id,
-                    error=str(reload_error)
-                )
-            
+            self._reload_config(host_id)
+
             # Check if host exists
             if host_id not in self.config.hosts:
                 return {"success": False, "error": f"Host '{host_id}' not found", HOST_ID: host_id}
 
             host = self.config.hosts[host_id]
 
-            # Run discovery operations in parallel with individual timeout
-            try:
-                results = await asyncio.wait_for(
-                    asyncio.gather(
-                        self._discover_compose_paths(host),
-                        self._discover_appdata_paths(host),
-                        self._discover_zfs_capability(host),
-                        return_exceptions=True,
-                    ),
-                    timeout=30.0,  # 30 second timeout per host
-                )
-            except asyncio.TimeoutError:
-                self.logger.warning(f"Discovery timed out for host {host_id}")
-                return {
-                    "success": False,
-                    "error": "Discovery timed out after 30 seconds",
-                    HOST_ID: host_id,
-                }
+            # Run discovery operations in parallel with timeout
+            discovery_results = await self._run_parallel_discovery(host, host_id)
+            if "error" in discovery_results:
+                return discovery_results
 
-            compose_result = (
-                results[0]
-                if not isinstance(results[0], Exception)
-                else {"paths": [], "recommended": None}
-            )
-            appdata_result = (
-                results[1]
-                if not isinstance(results[1], Exception)
-                else {"paths": [], "recommended": None}
-            )
-            zfs_result = results[2] if not isinstance(results[2], Exception) else {"capable": False}
+            # Process discovery results
+            compose_result, appdata_result, zfs_result = self._process_discovery_results(discovery_results)
 
-            # Compile results
+            # Compile base capabilities
             capabilities = {
                 "success": True,
                 HOST_ID: host_id,
@@ -483,131 +447,10 @@ class HostService:
             }
 
             # Generate recommendations
-            if compose_result["recommended"]:
-                capabilities["recommendations"].append(
-                    {
-                        "type": COMPOSE_PATH,
-                        "message": f"Set compose_path to '{compose_result['recommended']}'",
-                        "value": compose_result["recommended"],
-                    }
-                )
+            self._generate_recommendations(capabilities, compose_result, appdata_result, zfs_result, host_id)
 
-            if appdata_result["recommended"]:
-                capabilities["recommendations"].append(
-                    {
-                        "type": APPDATA_PATH,
-                        "message": f"Set appdata_path to '{appdata_result['recommended']}'",
-                        "value": appdata_result["recommended"],
-                    }
-                )
-
-            if zfs_result["capable"]:
-                # Auto-add 'zfs' tag to host if not already present
-                host = self.config.hosts[host_id]
-                tag_added = False
-                config_changed = False
-                
-                if "zfs" not in host.tags:
-                    host.tags.append("zfs")
-                    tag_added = True
-                    config_changed = True
-                    self.logger.info("Auto-added 'zfs' tag to host", host_id=host_id)
-
-                # Always update ZFS capabilities and dataset if discovered (even if tag existed)
-                if not host.zfs_capable:
-                    host.zfs_capable = True
-                    config_changed = True
-                    self.logger.info("Updated zfs_capable to True", host_id=host_id)
-                
-                discovered_dataset = zfs_result.get("dataset")
-                current_dataset = host.zfs_dataset
-                
-                self.logger.info(
-                    "Comparing ZFS datasets",
-                    host_id=host_id,
-                    current_dataset=current_dataset,
-                    current_dataset_type=type(current_dataset).__name__,
-                    discovered_dataset=discovered_dataset,
-                    discovered_dataset_type=type(discovered_dataset).__name__,
-                    datasets_equal=(current_dataset == discovered_dataset)
-                )
-                
-                if discovered_dataset and current_dataset != discovered_dataset:
-                    old_dataset = current_dataset
-                    host.zfs_dataset = discovered_dataset
-                    config_changed = True
-                    self.logger.info(
-                        "Updated zfs_dataset", 
-                        host_id=host_id, 
-                        old_dataset=old_dataset, 
-                        new_dataset=host.zfs_dataset
-                    )
-
-                # Save configuration if any changes were made
-                save_success = True
-                save_error = None
-                if config_changed:
-                    try:
-                        config_file_path = getattr(self.config, "config_file", None)
-                        self.logger.info(
-                            "Attempting to save config after ZFS updates",
-                            host_id=host_id,
-                            config_file_path=config_file_path,
-                            zfs_dataset=host.zfs_dataset
-                        )
-                        save_config(self.config, config_file_path)
-                        self.logger.info(
-                            "Successfully saved config after ZFS updates",
-                            host_id=host_id,
-                            config_file_path=config_file_path
-                        )
-                    except Exception as e:
-                        save_success = False
-                        save_error = str(e)
-                        self.logger.error(
-                            "Failed to save config after ZFS updates",
-                            host_id=host_id,
-                            config_file_path=getattr(self.config, "config_file", None),
-                            error=str(e),
-                        )
-
-                zfs_recommendation = {
-                    "type": "zfs_config",
-                    "message": "ZFS support detected and 'zfs' tag automatically added"
-                    if tag_added
-                    else "ZFS support detected ('zfs' tag already present)",
-                    "zfs_dataset": zfs_result.get("dataset"),
-                    "tag_added": tag_added,
-                }
-                
-                # Add save status if config was changed
-                if config_changed:
-                    zfs_recommendation["config_saved"] = save_success
-                    if not save_success:
-                        zfs_recommendation["save_error"] = save_error
-                        zfs_recommendation["message"] += f" (WARNING: Config save failed: {save_error})"
-                        
-                capabilities["recommendations"].append(zfs_recommendation)
-
-            # Add overall guidance if discovery found nothing useful
-            total_paths_found = len(compose_result["paths"]) + len(appdata_result["paths"])
-            has_useful_discovery = (
-                total_paths_found > 0
-                or zfs_result["capable"]
-                or len(capabilities["recommendations"]) > 0
-            )
-
-            if not has_useful_discovery:
-                capabilities["overall_guidance"] = (
-                    "Discovery found no automatic configuration. This is common for:\n"
-                    "• New hosts with no containers yet\n"
-                    "• Hosts using Docker volumes instead of bind mounts\n"
-                    "• Custom deployment methods\n\n"
-                    "Next steps:\n"
-                    f"1. Deploy containers: docker_compose deploy {host_id} <stack_name>\n"
-                    f"2. Manually configure paths: docker_hosts edit {host_id} compose_path /path appdata_path /path\n"
-                    "3. Check the guidance in compose_discovery and appdata_discovery for specific suggestions"
-                )
+            # Add overall guidance if needed
+            self._add_overall_guidance(capabilities, compose_result, appdata_result, zfs_result, host_id)
 
             self.logger.info(
                 "Host capabilities discovered",
@@ -615,7 +458,6 @@ class HostService:
                 compose_paths_found=len(compose_result["paths"]),
                 appdata_paths_found=len(appdata_result["paths"]),
                 zfs_capable=zfs_result["capable"],
-                has_useful_discovery=has_useful_discovery,
             )
 
             return capabilities
@@ -627,6 +469,187 @@ class HostService:
                 "error": f"Discovery failed: {str(e)}",
                 HOST_ID: host_id,
             }
+
+    def _reload_config(self, host_id: str) -> None:
+        """Reload configuration from disk to avoid stale in-memory state."""
+        try:
+            config_file_path = getattr(self.config, "config_file", None)
+            fresh_config = load_config(config_file_path)
+            self.config = fresh_config
+            self.logger.info(
+                "Reloaded configuration from disk before discovery",
+                host_id=host_id,
+                config_file_path=config_file_path
+            )
+        except Exception as reload_error:
+            self.logger.warning(
+                "Failed to reload config from disk, using in-memory config",
+                host_id=host_id,
+                error=str(reload_error)
+            )
+
+    async def _run_parallel_discovery(self, host, host_id: str) -> dict[str, Any]:
+        """Run discovery operations in parallel with timeout."""
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    self._discover_compose_paths(host),
+                    self._discover_appdata_paths(host),
+                    self._discover_zfs_capability(host),
+                    return_exceptions=True,
+                ),
+                timeout=30.0,  # 30 second timeout per host
+            )
+            return {"results": results}
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Discovery timed out for host {host_id}")
+            return {
+                "success": False,
+                "error": "Discovery timed out after 30 seconds",
+                HOST_ID: host_id,
+            }
+
+    def _process_discovery_results(self, discovery_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Process discovery results into structured data."""
+        results = discovery_data["results"]
+
+        compose_result: dict[str, Any] = (
+            results[0]
+            if not isinstance(results[0], Exception)
+            else {"paths": [], "recommended": None}
+        )
+        appdata_result: dict[str, Any] = (
+            results[1]
+            if not isinstance(results[1], Exception)
+            else {"paths": [], "recommended": None}
+        )
+        zfs_result: dict[str, Any] = results[2] if not isinstance(results[2], Exception) else {"capable": False}
+
+        return compose_result, appdata_result, zfs_result
+
+    def _generate_recommendations(self, capabilities: dict[str, Any], compose_result: dict[str, Any], appdata_result: dict[str, Any], zfs_result: dict[str, Any], host_id: str) -> None:
+        """Generate configuration recommendations."""
+        # Add compose path recommendation
+        if compose_result["recommended"]:
+            capabilities["recommendations"].append({
+                "type": COMPOSE_PATH,
+                "message": f"Set compose_path to '{compose_result['recommended']}'",
+                "value": compose_result["recommended"],
+            })
+
+        # Add appdata path recommendation
+        if appdata_result["recommended"]:
+            capabilities["recommendations"].append({
+                "type": APPDATA_PATH,
+                "message": f"Set appdata_path to '{appdata_result['recommended']}'",
+                "value": appdata_result["recommended"],
+            })
+
+        # Add ZFS recommendation and handle configuration updates
+        if zfs_result["capable"]:
+            zfs_recommendation = self._handle_zfs_configuration(zfs_result, host_id)
+            capabilities["recommendations"].append(zfs_recommendation)
+
+    def _handle_zfs_configuration(self, zfs_result: dict[str, Any], host_id: str) -> dict[str, Any]:
+        """Handle ZFS configuration updates and return recommendation."""
+        host = self.config.hosts[host_id]
+        tag_added = False
+        config_changed = False
+
+        # Auto-add 'zfs' tag to host if not already present
+        if "zfs" not in host.tags:
+            host.tags.append("zfs")
+            tag_added = True
+            config_changed = True
+            self.logger.info("Auto-added 'zfs' tag to host", host_id=host_id)
+
+        # Always update ZFS capabilities and dataset if discovered
+        if not host.zfs_capable:
+            host.zfs_capable = True
+            config_changed = True
+            self.logger.info("Updated zfs_capable to True", host_id=host_id)
+
+        # Update dataset if different
+        discovered_dataset = zfs_result.get("dataset")
+        if discovered_dataset and host.zfs_dataset != discovered_dataset:
+            old_dataset = host.zfs_dataset
+            host.zfs_dataset = discovered_dataset
+            config_changed = True
+            self.logger.info(
+                "Updated zfs_dataset",
+                host_id=host_id,
+                old_dataset=old_dataset,
+                new_dataset=host.zfs_dataset
+            )
+
+        # Save configuration if any changes were made
+        save_success, save_error = self._save_config_changes(config_changed, host_id)
+
+        # Build recommendation
+        message = "ZFS support detected and 'zfs' tag automatically added" if tag_added else "ZFS support detected ('zfs' tag already present)"
+        zfs_recommendation: dict[str, Any] = {
+            "type": "zfs_config",
+            "message": message,
+            "zfs_dataset": zfs_result.get("dataset"),
+            "tag_added": tag_added,
+        }
+
+        # Add save status if config was changed
+        if config_changed:
+            zfs_recommendation["config_saved"] = save_success
+            if not save_success:
+                zfs_recommendation["save_error"] = save_error
+                zfs_recommendation["message"] += f" (WARNING: Config save failed: {save_error or 'unknown error'})"
+
+        return zfs_recommendation
+
+    def _save_config_changes(self, config_changed: bool, host_id: str) -> tuple[bool, str | None]:
+        """Save configuration changes and return success status."""
+        if not config_changed:
+            return True, None
+
+        try:
+            config_file_path = getattr(self.config, "config_file", None)
+            self.logger.info(
+                "Attempting to save config after ZFS updates",
+                host_id=host_id,
+                config_file_path=config_file_path
+            )
+            save_config(self.config, config_file_path)
+            self.logger.info(
+                "Successfully saved config after ZFS updates",
+                host_id=host_id,
+                config_file_path=config_file_path
+            )
+            return True, None
+        except Exception as e:
+            self.logger.error(
+                "Failed to save config after ZFS updates",
+                host_id=host_id,
+                error=str(e)
+            )
+            return False, str(e)
+
+    def _add_overall_guidance(self, capabilities: dict[str, Any], compose_result: dict[str, Any], appdata_result: dict[str, Any], zfs_result: dict[str, Any], host_id: str) -> None:
+        """Add overall guidance if discovery found nothing useful."""
+        total_paths_found = len(cast(list, compose_result["paths"])) + len(cast(list, appdata_result["paths"]))
+        has_useful_discovery = (
+            total_paths_found > 0
+            or zfs_result["capable"]
+            or len(cast(list, capabilities["recommendations"])) > 0
+        )
+
+        if not has_useful_discovery:
+            capabilities["overall_guidance"] = (
+                "Discovery found no automatic configuration. This is common for:\n"
+                "• New hosts with no containers yet\n"
+                "• Hosts using Docker volumes instead of bind mounts\n"
+                "• Custom deployment methods\n\n"
+                "Next steps:\n"
+                f"1. Deploy containers: docker_compose deploy {host_id} <stack_name>\n"
+                f"2. Manually configure paths: docker_hosts edit {host_id} compose_path /path appdata_path /path\n"
+                "3. Check the guidance in compose_discovery and appdata_discovery for specific suggestions"
+            )
 
     async def discover_all_hosts(self) -> dict[str, Any]:
         """Discover capabilities for all configured hosts.
@@ -683,6 +706,7 @@ class HostService:
                     failed_discoveries += 1
                     self.logger.error("Host discovery failed", host_id=host_id, error=str(result))
                 else:
+                    result = cast(dict[str, Any], result)
                     discoveries[host_id] = result
                     if result.get("success", False):
                         successful_discoveries += 1
@@ -716,109 +740,27 @@ class HostService:
 
     async def discover_all_hosts_sequential(self) -> dict[str, Any]:
         """Discover capabilities for all hosts SEQUENTIALLY to avoid timeouts.
-        
+
         Processes hosts one at a time to prevent SSH channel exhaustion
         and avoid parallel processing overload that causes timeouts.
-        
+
         Returns:
             Discovery results for all hosts with summary
         """
         try:
             self.logger.info("Starting sequential discovery for all hosts", total_hosts=len(self.config.hosts))
 
-            discoveries = {}
-            successful_discoveries = 0
-            failed_discoveries = 0
-            enabled_hosts = []
-
             # Collect enabled hosts first
-            for host_id, host_config in self.config.hosts.items():
-                if host_config.enabled:
-                    enabled_hosts.append(host_id)
-
+            enabled_hosts = self._collect_enabled_hosts()
             if not enabled_hosts:
-                return {
-                    "success": True,
-                    "action": "discover_all",
-                    "total_hosts": 0,
-                    "successful_discoveries": 0,
-                    "failed_discoveries": 0,
-                    "discoveries": {},
-                    "summary": "No enabled hosts to discover",
-                }
+                return self._create_empty_discovery_result()
 
-            # Process each host one at a time
-            for i, host_id in enumerate(enabled_hosts, 1):
-                self.logger.info(
-                    f"Starting discovery for host {host_id} ({i}/{len(enabled_hosts)})"
-                )
+            # Process each host sequentially
+            discoveries, successful_discoveries, failed_discoveries = await self._process_hosts_sequentially(enabled_hosts)
 
-                try:
-                    # Set a reasonable timeout for single host discovery
-                    result = await asyncio.wait_for(
-                        self.discover_host_capabilities(host_id),
-                        timeout=30.0  # 30 seconds per host
-                    )
-
-                    discoveries[host_id] = result
-                    if result.get("success"):
-                        successful_discoveries += 1
-                        self.logger.info(f"Discovery completed successfully for host {host_id}")
-                    else:
-                        failed_discoveries += 1
-                        self.logger.warning(f"Discovery failed for host {host_id}: {result.get('error', 'Unknown error')}")
-
-                except asyncio.TimeoutError:
-                    error_msg = "Discovery timed out after 30 seconds"
-                    self.logger.error(f"Discovery timed out for host {host_id}")
-                    discoveries[host_id] = {
-                        "success": False,
-                        "error": error_msg,
-                        "host_id": host_id
-                    }
-                    failed_discoveries += 1
-
-                except Exception as e:
-                    error_msg = str(e)
-                    self.logger.error(f"Discovery failed for host {host_id}: {error_msg}")
-                    discoveries[host_id] = {
-                        "success": False,
-                        "error": error_msg,
-                        "host_id": host_id
-                    }
-                    failed_discoveries += 1
-
-            # Calculate summary statistics
-            total_recommendations = 0
-            zfs_capable_hosts = 0
-            total_paths_found = 0
-
-            for discovery in discoveries.values():
-                if discovery.get("success") and discovery.get("recommendations"):
-                    total_recommendations += len(discovery["recommendations"])
-                if discovery.get("zfs_discovery", {}).get("capable"):
-                    zfs_capable_hosts += 1
-                if discovery.get("compose_discovery", {}).get("paths"):
-                    total_paths_found += len(discovery["compose_discovery"]["paths"])
-                if discovery.get("appdata_discovery", {}).get("paths"):
-                    total_paths_found += len(discovery["appdata_discovery"]["paths"])
-
-            # Return comprehensive results
-            return {
-                "success": True,
-                "action": "discover_all",
-                "total_hosts": len(enabled_hosts),
-                "successful_discoveries": successful_discoveries,
-                "failed_discoveries": failed_discoveries,
-                "discoveries": discoveries,
-                "summary": f"Discovered {successful_discoveries}/{len(enabled_hosts)} hosts successfully",
-                "discovery_summary": {
-                    "total_hosts_discovered": len(discoveries),
-                    "total_recommendations": total_recommendations,
-                    "zfs_capable_hosts": zfs_capable_hosts,
-                    "total_paths_found": total_paths_found,
-                }
-            }
+            # Calculate summary statistics and return results
+            discovery_stats = self._calculate_discovery_statistics(discoveries)
+            return self._create_discovery_summary(enabled_hosts, successful_discoveries, failed_discoveries, discoveries, discovery_stats)
 
         except Exception as e:
             self.logger.error("Sequential discovery failed", error=str(e))
@@ -827,6 +769,112 @@ class HostService:
                 "error": f"Sequential discovery failed: {str(e)}",
                 "action": "discover_all",
             }
+
+    def _collect_enabled_hosts(self) -> list[str]:
+        """Collect list of enabled hosts."""
+        enabled_hosts = []
+        for host_id, host_config in self.config.hosts.items():
+            if host_config.enabled:
+                enabled_hosts.append(host_id)
+        return enabled_hosts
+
+    def _create_empty_discovery_result(self) -> dict[str, Any]:
+        """Create result for when no enabled hosts are found."""
+        return {
+            "success": True,
+            "action": "discover_all",
+            "total_hosts": 0,
+            "successful_discoveries": 0,
+            "failed_discoveries": 0,
+            "discoveries": {},
+            "summary": "No enabled hosts to discover",
+        }
+
+    async def _process_hosts_sequentially(self, enabled_hosts: list[str]) -> tuple[dict[str, Any], int, int]:
+        """Process each host discovery sequentially."""
+        discoveries = {}
+        successful_discoveries = 0
+        failed_discoveries = 0
+
+        for i, host_id in enumerate(enabled_hosts, 1):
+            self.logger.info(f"Starting discovery for host {host_id} ({i}/{len(enabled_hosts)})")
+
+            result, success = await self._process_single_host_discovery(host_id)
+            discoveries[host_id] = result
+
+            if success:
+                successful_discoveries += 1
+                self.logger.info(f"Discovery completed successfully for host {host_id}")
+            else:
+                failed_discoveries += 1
+                self.logger.warning(f"Discovery failed for host {host_id}: {result.get('error', 'Unknown error')}")
+
+        return discoveries, successful_discoveries, failed_discoveries
+
+    async def _process_single_host_discovery(self, host_id: str) -> tuple[dict[str, Any], bool]:
+        """Process discovery for a single host with error handling."""
+        try:
+            result = await asyncio.wait_for(
+                self.discover_host_capabilities(host_id),
+                timeout=30.0  # 30 seconds per host
+            )
+            return result, result.get("success", False)
+
+        except asyncio.TimeoutError:
+            error_msg = "Discovery timed out after 30 seconds"
+            self.logger.error(f"Discovery timed out for host {host_id}")
+            return {
+                "success": False,
+                "error": error_msg,
+                "host_id": host_id
+            }, False
+
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error(f"Discovery failed for host {host_id}: {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg,
+                "host_id": host_id
+            }, False
+
+    def _calculate_discovery_statistics(self, discoveries: dict[str, Any]) -> dict[str, int]:
+        """Calculate summary statistics from discovery results."""
+        total_recommendations = 0
+        zfs_capable_hosts = 0
+        total_paths_found = 0
+
+        for discovery in discoveries.values():
+            if discovery.get("success") and discovery.get("recommendations"):
+                total_recommendations += len(discovery["recommendations"])
+            if discovery.get("zfs_discovery", {}).get("capable"):
+                zfs_capable_hosts += 1
+            if discovery.get("compose_discovery", {}).get("paths"):
+                total_paths_found += len(discovery["compose_discovery"]["paths"])
+            if discovery.get("appdata_discovery", {}).get("paths"):
+                total_paths_found += len(discovery["appdata_discovery"]["paths"])
+
+        return {
+            "total_recommendations": total_recommendations,
+            "zfs_capable_hosts": zfs_capable_hosts,
+            "total_paths_found": total_paths_found,
+        }
+
+    def _create_discovery_summary(self, enabled_hosts: list[str], successful: int, failed: int, discoveries: dict[str, Any], stats: dict[str, int]) -> dict[str, Any]:
+        """Create comprehensive discovery results summary."""
+        return {
+            "success": True,
+            "action": "discover_all",
+            "total_hosts": len(enabled_hosts),
+            "successful_discoveries": successful,
+            "failed_discoveries": failed,
+            "discoveries": discoveries,
+            "summary": f"Discovered {successful}/{len(enabled_hosts)} hosts successfully",
+            "discovery_summary": {
+                "total_hosts_discovered": len(discoveries),
+                **stats
+            }
+        }
 
     async def _discover_compose_paths(self, host: DockerHost) -> dict[str, Any]:
         """Discover Docker Compose file locations from running containers."""
@@ -913,68 +961,13 @@ class HostService:
         try:
             ssh_cmd = build_ssh_command(host)
 
-            # Get bind mount sources from all containers
-            inspect_cmd = ssh_cmd + [
-                "docker ps -aq --no-trunc | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Source}}{{\"\\n\"}}{{end}}{{end}}' 2>/dev/null | grep -v '^$' | sort | uniq"
-            ]
-
-            process = await asyncio.create_subprocess_exec(
-                *inspect_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-
-            stdout, _ = await process.communicate()
-
-            if process.returncode == 0 and stdout:
-                # Extract bind mount paths
-                bind_mounts = [m.strip() for m in stdout.decode().strip().split("\n") if m.strip()]
-
-                if bind_mounts:
-                    # Find common base paths by analyzing mount points
-                    base_path_counts = {}
-                    for mount_path in bind_mounts:
-                        # Skip system paths and temporary mounts
-                        if mount_path.startswith(("/proc", "/sys", "/dev", "/tmp", "/var/run")):  # noqa: S108
-                            continue
-
-                        # Find potential base appdata paths
-                        path_parts = Path(mount_path).parts
-                        for i in range(2, min(5, len(path_parts))):  # Check 2-4 levels deep
-                            potential_base = str(Path(*path_parts[:i]))
-                            if potential_base not in ["/", "/home", "/opt", "/srv", "/mnt"]:
-                                base_path_counts[potential_base] = (
-                                    base_path_counts.get(potential_base, 0) + 1
-                                )
-
-                    if base_path_counts:
-                        # Recommend the path with most mounted volumes
-                        recommended = max(base_path_counts.items(), key=lambda x: x[1])[0]
-                        return {"paths": list(base_path_counts.keys()), "recommended": recommended}
+            # First try to discover from container bind mounts
+            result = await self._discover_from_bind_mounts(ssh_cmd)
+            if result:
+                return result
 
             # Fallback to checking common appdata locations
-            search_paths = [
-                "/opt/appdata",
-                "/srv/docker",
-                "/data",
-                "/mnt/appdata",
-                "/mnt/docker",
-                "/opt/docker-data",
-            ]
-
-            existing_paths = []
-            for path in search_paths:
-                test_cmd = ssh_cmd + [f"test -d {path} && test -w {path} && echo '{path}'"]
-
-                process = await asyncio.create_subprocess_exec(
-                    *test_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-
-                stdout, _ = await process.communicate()
-
-                if process.returncode == 0 and stdout.strip():
-                    existing_paths.append(path)
-
-            recommended = existing_paths[0] if existing_paths else None
-            return {"paths": existing_paths, "recommended": recommended}
+            return await self._discover_from_common_paths(ssh_cmd)
 
         except Exception as e:
             self.logger.warning(
@@ -982,79 +975,101 @@ class HostService:
             )
             return {"paths": [], "recommended": None}
 
+    async def _discover_from_bind_mounts(self, ssh_cmd: list[str]) -> dict[str, Any] | None:
+        """Discover appdata paths by analyzing container bind mounts."""
+        inspect_cmd = ssh_cmd + [
+            "docker ps -aq --no-trunc | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Source}}{{\"\\n\"}}{{end}}{{end}}' 2>/dev/null | grep -v '^$' | sort | uniq"
+        ]
+
+        process = await asyncio.create_subprocess_exec(
+            *inspect_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+
+        stdout, _ = await process.communicate()
+
+        if process.returncode == 0 and stdout:
+            bind_mounts = [m.strip() for m in stdout.decode().strip().split("\n") if m.strip()]
+
+            if bind_mounts:
+                base_path_counts = self._analyze_bind_mount_paths(bind_mounts)
+
+                if base_path_counts:
+                    # Recommend the path with most mounted volumes
+                    recommended = max(base_path_counts.items(), key=lambda x: x[1])[0]
+                    return {"paths": list(base_path_counts.keys()), "recommended": recommended}
+
+        return None
+
+    def _analyze_bind_mount_paths(self, bind_mounts: list[str]) -> dict[str, int]:
+        """Analyze bind mount paths to find common base paths."""
+        base_path_counts = {}
+
+        for mount_path in bind_mounts:
+            # Skip system paths and temporary mounts
+            if mount_path.startswith(("/proc", "/sys", "/dev", "/tmp", "/var/run")):
+                continue
+
+            # Find potential base appdata paths
+            path_parts = Path(mount_path).parts
+            for i in range(2, min(5, len(path_parts))):  # Check 2-4 levels deep
+                potential_base = str(Path(*path_parts[:i]))
+                if potential_base not in ["/", "/home", "/opt", "/srv", "/mnt"]:
+                    base_path_counts[potential_base] = (
+                        base_path_counts.get(potential_base, 0) + 1
+                    )
+
+        return base_path_counts
+
+    async def _discover_from_common_paths(self, ssh_cmd: list[str]) -> dict[str, Any]:
+        """Discover appdata paths by checking common locations."""
+        search_paths = [
+            "/opt/appdata",
+            "/srv/docker",
+            "/data",
+            "/mnt/appdata",
+            "/mnt/docker",
+            "/opt/docker-data",
+        ]
+
+        existing_paths = []
+        for path in search_paths:
+            if await self._test_path_exists_writable(ssh_cmd, path):
+                existing_paths.append(path)
+
+        recommended = existing_paths[0] if existing_paths else None
+        return {"paths": existing_paths, "recommended": recommended}
+
+    async def _test_path_exists_writable(self, ssh_cmd: list[str], path: str) -> bool:
+        """Test if a path exists and is writable."""
+        test_cmd = ssh_cmd + [f"test -d {path} && test -w {path} && echo '{path}'"]
+
+        process = await asyncio.create_subprocess_exec(
+            *test_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+
+        stdout, _ = await process.communicate()
+
+        return process.returncode == 0 and bool(stdout.strip())
+
     async def _discover_zfs_capability(self, host: DockerHost) -> dict[str, Any]:
         """Discover ZFS capabilities on the host."""
         try:
             ssh_cmd = build_ssh_command(host)
 
             # Check if ZFS is available
-            zfs_cmd = ssh_cmd + ["which zfs >/dev/null 2>&1 && zfs version | head -1"]
-
-            process = await asyncio.create_subprocess_exec(
-                *zfs_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-
-            version_stdout, _ = await process.communicate()
-
-            if process.returncode != 0:
+            version = await self._check_zfs_availability(ssh_cmd)
+            if not version:
                 return {"capable": False, "reason": "ZFS not available"}
 
             # Get ZFS pools
-            pools_cmd = ssh_cmd + ["zpool list -H -o name 2>/dev/null || true"]
+            pools = await self._get_zfs_pools(ssh_cmd)
 
-            process = await asyncio.create_subprocess_exec(
-                *pools_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-
-            pools_stdout, _ = await process.communicate()
-            pools = [p.strip() for p in pools_stdout.decode().strip().split("\n") if p.strip()]
-
-            # Suggest dataset name with intelligent pool selection
-            dataset = None
-            if pools:
-                # System pools to avoid for appdata storage
-                system_pools = ['bpool', 'boot-pool', 'boot']
-
-                # First, check for existing appdata datasets on any pool
-                for pool in pools:
-                    if pool not in system_pools:
-                        # Check if appdata dataset already exists on this pool
-                        check_existing_cmd = ssh_cmd + [
-                            f"zfs list {pool}/appdata >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
-                        ]
-                        try:
-                            process = await asyncio.create_subprocess_exec(
-                                *check_existing_cmd,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE
-                            )
-                            stdout, _ = await process.communicate()
-                            if process.returncode == 0 and "EXISTS" in stdout.decode():
-                                dataset = f"{pool}/appdata"
-                                break
-                        except Exception:
-                            # Continue if check fails
-                            pass
-
-                # If no existing appdata dataset found, use intelligent pool selection
-                if not dataset:
-                    # Prefer 'rpool' if available and not a system pool
-                    if 'rpool' in pools and 'rpool' not in system_pools:
-                        dataset = 'rpool/appdata'
-                    else:
-                        # Use first non-system pool
-                        for pool in pools:
-                            if pool not in system_pools:
-                                dataset = f"{pool}/appdata"
-                                break
-
-                    # Last resort: use first available pool even if it's a system pool
-                    if not dataset and pools:
-                        dataset = f"{pools[0]}/appdata"
+            # Find optimal dataset
+            dataset = await self._find_optimal_zfs_dataset(ssh_cmd, pools) if pools else None
 
             return {
                 "capable": True,
-                "version": version_stdout.decode().strip() if version_stdout else "unknown",
+                "version": version,
                 "pools": pools,
                 "dataset": dataset,
             }
@@ -1062,19 +1077,94 @@ class HostService:
         except Exception as e:
             return {"capable": False, "reason": f"ZFS check failed: {str(e)}"}
 
+    async def _check_zfs_availability(self, ssh_cmd: list[str]) -> str | None:
+        """Check if ZFS is available and return version."""
+        zfs_cmd = ssh_cmd + ["which zfs >/dev/null 2>&1 && zfs version | head -1"]
+
+        process = await asyncio.create_subprocess_exec(
+            *zfs_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+
+        version_stdout, _ = await process.communicate()
+
+        if process.returncode != 0:
+            return None
+
+        return version_stdout.decode().strip() if version_stdout else "unknown"
+
+    async def _get_zfs_pools(self, ssh_cmd: list[str]) -> list[str]:
+        """Get list of available ZFS pools."""
+        pools_cmd = ssh_cmd + ["zpool list -H -o name 2>/dev/null || true"]
+
+        process = await asyncio.create_subprocess_exec(
+            *pools_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+
+        pools_stdout, _ = await process.communicate()
+        return [p.strip() for p in pools_stdout.decode().strip().split("\n") if p.strip()]
+
+    async def _find_optimal_zfs_dataset(self, ssh_cmd: list[str], pools: list[str]) -> str | None:
+        """Find the optimal ZFS dataset for appdata storage."""
+        system_pools = ['bpool', 'boot-pool', 'boot']
+
+        # First, check for existing appdata datasets
+        for pool in pools:
+            if pool not in system_pools:
+                if dataset := await self._check_existing_appdata_dataset(ssh_cmd, pool):
+                    return dataset
+
+        # If no existing dataset, use intelligent pool selection
+        return self._select_optimal_pool(pools, system_pools)
+
+    async def _check_existing_appdata_dataset(self, ssh_cmd: list[str], pool: str) -> str | None:
+        """Check if appdata dataset already exists on a pool."""
+        check_existing_cmd = ssh_cmd + [
+            f"zfs list {pool}/appdata >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *check_existing_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await process.communicate()
+            if process.returncode == 0 and "EXISTS" in stdout.decode():
+                return f"{pool}/appdata"
+        except Exception as e:
+            self.logger.debug("ZFS dataset check failed", pool=pool, error=str(e))
+
+        return None
+
+    def _select_optimal_pool(self, pools: list[str], system_pools: list[str]) -> str | None:
+        """Select the best pool for appdata storage."""
+        # Prefer 'rpool' if available and not a system pool
+        if 'rpool' in pools and 'rpool' not in system_pools:
+            return 'rpool/appdata'
+
+        # Use first non-system pool
+        for pool in pools:
+            if pool not in system_pools:
+                return f"{pool}/appdata"
+
+        # Last resort: use first available pool even if it's a system pool
+        if pools:
+            return f"{pools[0]}/appdata"
+
+        return None
+
     def _recommend_compose_path(self, paths: list[str]) -> str | None:
         """Recommend the best compose path from discovered options using smart detection."""
         if not paths:
             return None
-            
+
         # If only one path, return it
         if len(paths) == 1:
             return paths[0]
-            
+
         # Prefer persistent storage paths over system paths
         persistent_storage_paths = []
         system_paths = []
-        
+
         for path in paths:
             # Persistent storage locations (more reliable for user data)
             if any(path.startswith(prefix) for prefix in ["/mnt/", "/data/", "/srv/"]):
@@ -1085,15 +1175,15 @@ class HostService:
             else:
                 # Unknown path, treat as persistent storage
                 persistent_storage_paths.append(path)
-        
+
         # Prefer persistent storage paths
         if persistent_storage_paths:
             return persistent_storage_paths[0]
-            
+
         # Fall back to system paths
         if system_paths:
             return system_paths[0]
-            
+
         # Final fallback
         return paths[0]
 
@@ -1103,319 +1193,214 @@ class HostService:
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
         try:
-            # Import dependencies for this handler
-            from ..models.enums import HostAction
 
-            # Route to appropriate handler with validation
-            if action == HostAction.LIST:
-                result = await self.list_docker_hosts()
-                # Convert dict with summary to ToolResult for proper formatting
-                if isinstance(result, dict) and "summary" in result:
-                    from fastmcp.tools.tool import ToolResult
-                    from mcp.types import TextContent
-                    return ToolResult(
-                        content=[TextContent(type="text", text=result["summary"])],
-                        structured_content=result
-                    )
-                return result
+            # Get action handlers mapping
+            handlers = self._get_action_handlers()
+            handler = handlers.get(action)
 
-            elif action == HostAction.ADD:
-                # Extract parameters
-                host_id = params.get("host_id", "")
-                ssh_host = params.get("ssh_host", "")
-                ssh_user = params.get("ssh_user", "")
-                ssh_port = params.get("ssh_port", 22)
-                ssh_key_path = params.get("ssh_key_path")
-                description = params.get("description", "")
-                tags = params.get("tags", [])
-                compose_path = params.get("compose_path")
-                enabled = params.get("enabled", True)
-
-                # Validate required parameters for add action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for add action"}
-                if not ssh_host:
-                    return {"success": False, "error": "ssh_host is required for add action"}
-                if not ssh_user:
-                    return {"success": False, "error": "ssh_user is required for add action"}
-
-                # Validate port range
-                if not (1 <= ssh_port <= 65535):
-                    return {
-                        "success": False,
-                        "error": f"ssh_port must be between 1 and 65535, got {ssh_port}",
-                    }
-
-                # Add host with auto-discovery
-                result = await self.add_docker_host(
-                    host_id,
-                    ssh_host,
-                    ssh_user,
-                    ssh_port,
-                    ssh_key_path,
-                    description,
-                    tags,
-                    compose_path,
-                    enabled,
-                )
-
-                # Auto-run discovery if host was added successfully (always enabled)
-                if result.get("success"):
-                    discovery_result = await self.discover_host_capabilities(host_id)
-                    if discovery_result.get("success") and discovery_result.get("recommendations"):
-                        result["discovery"] = discovery_result
-                        result["message"] += " (Discovery completed - check recommendations)"
-
-                return result
-
-            elif action == HostAction.EDIT:
-                # Extract parameters
-                host_id = params.get("host_id", "")
-                ssh_host = params.get("ssh_host")
-                ssh_user = params.get("ssh_user")
-                ssh_port = params.get("ssh_port")
-                ssh_key_path = params.get("ssh_key_path")
-                description = params.get("description")
-                tags = params.get("tags")
-                compose_path = params.get("compose_path")
-                appdata_path = params.get("appdata_path")
-                zfs_capable = params.get("zfs_capable")
-                zfs_dataset = params.get("zfs_dataset")
-                enabled = params.get("enabled")
-
-                # Validate required parameters for edit action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for edit action"}
-
-                return await self.edit_docker_host(
-                    host_id,
-                    ssh_host,
-                    ssh_user,
-                    ssh_port,
-                    ssh_key_path,
-                    description,
-                    tags,
-                    compose_path,
-                    appdata_path,
-                    zfs_capable,
-                    zfs_dataset,
-                    enabled,
-                )
-
-            elif action == HostAction.REMOVE:
-                # Extract parameters
-                host_id = params.get("host_id", "")
-
-                # Validate required parameters for remove action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for remove action"}
-
-                return await self.remove_docker_host(host_id)
-
-            elif action == HostAction.TEST_CONNECTION:
-                # Extract parameters
-                host_id = params.get("host_id", "")
-
-                # Validate required parameters for test_connection action
-                if not host_id:
-                    return {
-                        "success": False,
-                        "error": "host_id is required for test_connection action",
-                    }
-
-                return await self.test_connection(host_id)
-
-            elif action == HostAction.DISCOVER:
-                # Extract parameters
-                host_id = params.get("host_id", "")
-
-                # Support both 'all' and specific host_id
-                if host_id == "all" or not host_id:
-                    # Sequential discovery for all hosts (prevents timeouts)
-                    result = await self.discover_all_hosts_sequential()
-                    return self._format_discover_all_result(result)
-                else:
-                    # Single host discovery (fast)
-                    result = await self.discover_host_capabilities(host_id)
-                    return self._format_discover_result(result, host_id)
-
-            elif action == HostAction.PORTS:
-                # Import container service dependency
-                from ..services import ContainerService
-
-                container_service = ContainerService(self.config, self.context_manager)
-
-                # Extract parameters
-                host_id = params.get("host_id", "")
-                port = params.get("port", 0)
-
-                # Validate required parameters for ports action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for ports action"}
-
-                # Handle sub-actions: "list" (default) or "check"
-                # For ports check, port parameter must be provided
-                if port > 0:
-                    # Check specific port availability
-                    return await container_service.check_port_availability(host_id, port)
-                else:
-                    # List all ports (simplified - always include stopped containers)
-                    result = await container_service.list_host_ports(host_id)
-                    # Return the full ToolResult to preserve formatting
-                    return result
-
-            elif action == HostAction.IMPORT_SSH:
-                # Import config service dependency
-                from ..services import ConfigService
-
-                config_service = ConfigService(
-                    self.config, None
-                )  # Context manager not needed for config
-
-                # Extract parameters
-                ssh_config_path = params.get("ssh_config_path")
-                selected_hosts = params.get("selected_hosts")
-
-                result = await config_service.import_ssh_config(ssh_config_path, selected_hosts)
-                # Extract structured content for processing but preserve original ToolResult
-                if hasattr(result, "structured_content"):
-                    import_result = result.structured_content or {
-                        "success": True,
-                        "data": str(result.content),
-                    }
-                else:
-                    import_result = result
-
-                # Auto-run discovery on imported hosts if import was successful
-                if import_result.get("success") and import_result.get("imported_hosts"):
-                    discovered_hosts = []
-                    for host_info in import_result["imported_hosts"]:
-                        host_id = host_info["host_id"]
-
-                        # Run test_connection and discover for each imported host
-                        try:
-                            test_result = await self.test_connection(host_id)
-                            discovery_result = await self.discover_host_capabilities(host_id)
-
-                            discovered_hosts.append(
-                                {
-                                    "host_id": host_id,
-                                    "connection_test": test_result.get("success", False),
-                                    "discovery": discovery_result.get("success", False),
-                                    "recommendations": discovery_result.get("recommendations", []),
-                                }
-                            )
-                        except Exception as e:
-                            self.logger.error(
-                                "Auto-discovery failed for imported host",
-                                host_id=host_id,
-                                error=str(e),
-                            )
-                            discovered_hosts.append(
-                                {
-                                    "host_id": host_id,
-                                    "connection_test": False,
-                                    "discovery": False,
-                                    "error": str(e),
-                                }
-                            )
-
-                    # Add discovery results to import result
-                    import_result["auto_discovery"] = {
-                        "completed": True,
-                        "results": discovered_hosts,
-                    }
-                    import_result["message"] = (
-                        import_result.get("message", "")
-                        + " (Auto-discovery completed for imported hosts)"
-                    )
-
-                return import_result
-
-            elif action == HostAction.CLEANUP:
-                # Import cleanup service dependency
-                from ..services import CleanupService
-
-                cleanup_service = CleanupService(self.config)
-
-                # Extract parameters
-                host_id = params.get("host_id", "")
-                cleanup_type = params.get("cleanup_type")
-                frequency = params.get("frequency")
-                time = params.get("time")
-
-                # Handle cleanup sub-actions:
-                # - "cleanup check <host_id>" -> Check disk usage
-                # - "cleanup <cleanup_type> <host_id>" -> Execute cleanup
-                # - "cleanup schedule" with frequency/time -> Add schedule
-                # - "cleanup schedule" without frequency/time -> List or remove schedules
-
-                # Handle schedule operations when frequency is provided (add schedule)
-                if frequency and time:
-                    if not host_id or not cleanup_type:
-                        return {
-                            "success": False,
-                            "error": "host_id and cleanup_type required for scheduling",
-                        }
-                    if cleanup_type not in ["safe", "moderate"]:
-                        return {
-                            "success": False,
-                            "error": "Only 'safe' and 'moderate' cleanup types can be scheduled",
-                        }
-                    return await cleanup_service.add_schedule(
-                        host_id, cleanup_type, frequency, time
-                    )
-
-                # Handle schedule list when no host_id but no frequency (list all schedules)
-                elif not host_id and not frequency and not cleanup_type:
-                    return await cleanup_service.list_schedules()
-
-                # Handle schedule remove when host_id but no frequency/cleanup_type
-                elif host_id and not frequency and not cleanup_type:
-                    return await cleanup_service.remove_schedule(host_id)
-
-                # Handle cleanup operations
-                else:
-                    if not host_id:
-                        return {"success": False, "error": "host_id is required for cleanup action"}
-                    if not cleanup_type:
-                        return {
-                            "success": False,
-                            "error": "cleanup_type is required for cleanup action",
-                        }
-                    if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
-                        return {
-                            "success": False,
-                            "error": "cleanup_type must be one of: check, safe, moderate, aggressive",
-                        }
-
-                    if cleanup_type == "check":
-                        # Run structured cleanup analysis that explicitly includes type & message
-                        return await cleanup_service.docker_cleanup(host_id, "check")
-                    else:
-                        # Perform actual cleanup
-                        return await cleanup_service.docker_cleanup(host_id, cleanup_type)
-
+            if handler:
+                return await handler(**params)
             else:
                 return {
                     "success": False,
                     "error": f"Unknown action: {action}",
-                    "valid_actions": [
-                        "list",
-                        "add",
-                        "edit",
-                        "remove",
-                        "test_connection",
-                        "discover",
-                        "ports",
-                        "import_ssh",
-                        "cleanup",
-                    ],
+                    "valid_actions": ["list", "add", "edit", "remove", "test_connection", "discover", "ports", "import_ssh", "cleanup"],
                 }
-
         except Exception as e:
             self.logger.error("host service action error", action=action, error=str(e))
             return {"success": False, "error": f"Service action failed: {str(e)}", "action": action}
+
+    def _get_action_handlers(self) -> dict:
+        """Get mapping of actions to handler methods."""
+        from ..models.enums import HostAction
+
+        return {
+            HostAction.LIST: self._handle_list_action,
+            HostAction.ADD: self._handle_add_action,
+            HostAction.EDIT: self._handle_edit_action,
+            HostAction.REMOVE: self._handle_remove_action,
+            HostAction.TEST_CONNECTION: self._handle_test_connection_action,
+            HostAction.DISCOVER: self._handle_discover_action,
+            HostAction.PORTS: self._handle_ports_action,
+            HostAction.IMPORT_SSH: self._handle_import_ssh_action,
+            HostAction.CLEANUP: self._handle_cleanup_action,
+        }
+
+    async def _handle_list_action(self, **params) -> dict[str, Any]:
+        """Handle LIST action."""
+        result = await self.list_docker_hosts()
+        return result if isinstance(result, dict) else {"success": False, "error": "Invalid result format"}
+
+    async def _handle_add_action(self, **params) -> dict[str, Any]:
+        """Handle ADD action."""
+        host_id = params.get("host_id", "")
+        ssh_host = params.get("ssh_host", "")
+        ssh_user = params.get("ssh_user", "")
+        ssh_port = params.get("ssh_port", 22)
+        ssh_key_path = params.get("ssh_key_path")
+        description = params.get("description", "")
+        tags = params.get("tags", [])
+        compose_path = params.get("compose_path")
+        enabled = params.get("enabled", True)
+
+        if not host_id:
+            return {"success": False, "error": "host_id is required for add action"}
+        if not ssh_host:
+            return {"success": False, "error": "ssh_host is required for add action"}
+        if not ssh_user:
+            return {"success": False, "error": "ssh_user is required for add action"}
+        if not (1 <= ssh_port <= 65535):
+            return {"success": False, "error": f"ssh_port must be between 1 and 65535, got {ssh_port}"}
+
+        result = await self.add_docker_host(host_id, ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, compose_path, enabled)
+
+        # Auto-run discovery if host was added successfully
+        if result.get("success"):
+            discovery_result = await self.discover_host_capabilities(host_id)
+            if discovery_result.get("success") and discovery_result.get("recommendations"):
+                result["discovery"] = discovery_result
+                result["message"] += " (Discovery completed - check recommendations)"
+
+        return result
+
+    async def _handle_edit_action(self, **params) -> dict[str, Any]:
+        """Handle EDIT action."""
+        host_id = params.get("host_id", "")
+        if not host_id:
+            return {"success": False, "error": "host_id is required for edit action"}
+
+        return await self.edit_docker_host(
+            host_id,
+            params.get("ssh_host"),
+            params.get("ssh_user"),
+            params.get("ssh_port"),
+            params.get("ssh_key_path"),
+            params.get("description"),
+            params.get("tags"),
+            params.get("compose_path"),
+            params.get("appdata_path"),
+            params.get("zfs_capable"),
+            params.get("zfs_dataset"),
+            params.get("enabled"),
+        )
+
+    async def _handle_remove_action(self, **params) -> dict[str, Any]:
+        """Handle REMOVE action."""
+        host_id = params.get("host_id", "")
+        if not host_id:
+            return {"success": False, "error": "host_id is required for remove action"}
+        return await self.remove_docker_host(host_id)
+
+    async def _handle_test_connection_action(self, **params) -> dict[str, Any]:
+        """Handle TEST_CONNECTION action."""
+        host_id = params.get("host_id", "")
+        if not host_id:
+            return {"success": False, "error": "host_id is required for test_connection action"}
+        return await self.test_connection(host_id)
+
+    async def _handle_discover_action(self, **params) -> dict[str, Any]:
+        """Handle DISCOVER action."""
+        host_id = params.get("host_id", "")
+
+        if host_id == "all" or not host_id:
+            result = await self.discover_all_hosts_sequential()
+            return self._format_discover_all_result(result)
+        else:
+            result = await self.discover_host_capabilities(host_id)
+            return self._format_discover_result(result, host_id)
+
+    async def _handle_ports_action(self, **params) -> dict[str, Any]:
+        """Handle PORTS action."""
+        from ..services import ContainerService
+
+        host_id = params.get("host_id", "")
+        port = params.get("port", 0)
+
+        if not host_id:
+            return {"success": False, "error": "host_id is required for ports action"}
+
+        container_service = ContainerService(self.config, self.context_manager)
+
+        if port > 0:
+            result = await container_service.check_port_availability(host_id, port)
+            return cast(dict[str, Any], result.structured_content)
+        else:
+            result = await container_service.list_host_ports(host_id)
+            return cast(dict[str, Any], result.structured_content)
+
+    async def _handle_import_ssh_action(self, **params) -> dict[str, Any]:
+        """Handle IMPORT_SSH action."""
+        from ..services import ConfigService
+
+        ssh_config_path = params.get("ssh_config_path")
+        selected_hosts = params.get("selected_hosts")
+
+        config_service = ConfigService(self.config, self.context_manager)  # type: ignore[arg-type]
+        result = await config_service.import_ssh_config(ssh_config_path, selected_hosts)
+
+        if hasattr(result, "structured_content"):
+            import_result = result.structured_content or {"success": True, "data": str(result.content)}
+        else:
+            import_result = result
+
+        # Auto-run discovery on imported hosts if import was successful
+        if import_result.get("success") and import_result.get("imported_hosts"):
+            discovered_hosts = []
+            for host_info in import_result["imported_hosts"]:
+                host_id = host_info["host_id"]
+                try:
+                    test_result = await self.test_connection(host_id)
+                    discovery_result = await self.discover_host_capabilities(host_id)
+                    discovered_hosts.append({
+                        "host_id": host_id,
+                        "connection_test": test_result.get("success", False),
+                        "discovery": discovery_result.get("success", False),
+                        "recommendations": discovery_result.get("recommendations", []),
+                    })
+                except Exception as e:
+                    self.logger.error("Auto-discovery failed for imported host", host_id=host_id, error=str(e))
+                    discovered_hosts.append({"host_id": host_id, "connection_test": False, "discovery": False, "error": str(e)})
+
+            import_result["auto_discovery"] = {"completed": True, "results": discovered_hosts}
+            import_result["message"] = import_result.get("message", "") + " (Auto-discovery completed for imported hosts)"
+
+        return import_result
+
+    async def _handle_cleanup_action(self, **params) -> dict[str, Any]:
+        """Handle CLEANUP action."""
+        from ..services import CleanupService
+
+        host_id = params.get("host_id", "")
+        cleanup_type = params.get("cleanup_type")
+        frequency = params.get("frequency")
+        time = params.get("time")
+
+        cleanup_service = CleanupService(self.config)
+
+        # Handle schedule operations
+        if frequency and time:
+            if not host_id or not cleanup_type:
+                return {"success": False, "error": "host_id and cleanup_type required for scheduling"}
+            if cleanup_type not in ["safe", "moderate"]:
+                return {"success": False, "error": "Only 'safe' and 'moderate' cleanup types can be scheduled"}
+            return await cleanup_service.add_schedule(host_id, cleanup_type, frequency, time)
+
+        # Handle schedule list/remove
+        elif not host_id and not frequency and not cleanup_type:
+            return await cleanup_service.list_schedules()
+        elif host_id and not frequency and not cleanup_type:
+            return await cleanup_service.remove_schedule(host_id)
+
+        # Handle cleanup operations
+        else:
+            if not host_id:
+                return {"success": False, "error": "host_id is required for cleanup action"}
+            if not cleanup_type:
+                return {"success": False, "error": "cleanup_type is required for cleanup action"}
+            if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
+                return {"success": False, "error": "cleanup_type must be one of: check, safe, moderate, aggressive"}
+
+            return await cleanup_service.docker_cleanup(host_id, cleanup_type)
 
     def _format_discover_result(self, result: dict[str, Any], host_id: str) -> dict[str, Any]:
         """Format discovery result for single host."""

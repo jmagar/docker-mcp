@@ -51,7 +51,7 @@ class MigrationVerifier:
         Returns:
             Dictionary containing complete source inventory
         """
-        inventory = {
+        inventory: dict[str, Any] = {
             "total_files": 0,
             "total_dirs": 0,
             "total_size": 0,
@@ -61,7 +61,7 @@ class MigrationVerifier:
         }
 
         for path in volume_paths:
-            path_inventory = {}
+            path_inventory: dict[str, Any] = {}
 
             # Get file count
             file_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f 2>/dev/null | wc -l"]
@@ -105,7 +105,7 @@ class MigrationVerifier:
                 ),
             )
 
-            critical_files = {}
+            critical_files: dict[str, str] = {}
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().split("\n"):
                     if line:
@@ -151,7 +151,7 @@ class MigrationVerifier:
         Returns:
             Dictionary containing verification results
         """
-        verification = {
+        verification: dict[str, Any] = {
             "data_transfer": {
                 "success": True,
                 "files_expected": source_inventory["total_files"],
@@ -238,7 +238,7 @@ class MigrationVerifier:
             )
 
         # Verify critical files checksums
-        critical_files_verified = {}
+        critical_files_verified: dict[str, Any] = {}
         for rel_path, source_checksum in source_inventory["critical_files"].items():
             target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
             qfile = shlex.quote(target_file_path)
@@ -276,7 +276,7 @@ class MigrationVerifier:
         verification["data_transfer"]["critical_files_verified"] = critical_files_verified
 
         # Determine overall success and collect issues
-        issues = []
+        issues: list[str] = []
 
         # File count mismatch
         if target_files != source_inventory["total_files"]:
@@ -444,7 +444,39 @@ class MigrationVerifier:
         Returns:
             Dictionary containing container integration verification results
         """
-        verification = {
+        verification = self._create_verification_template(expected_volumes)
+
+        # Get container info and check if container exists
+        container_info = await self._inspect_container(ssh_cmd, stack_name)
+        if not container_info:
+            verification["issues"].append(f"Container '{stack_name}' not found")
+            verification["container_integration"]["success"] = False
+            return verification
+
+        verification["container_integration"]["container_exists"] = True
+
+        # Verify container state and health
+        self._verify_container_state(verification, container_info)
+
+        # Verify mount configuration
+        self._verify_container_mounts(
+            verification, container_info, expected_volumes, expected_appdata_path
+        )
+
+        # Test runtime accessibility if container is running
+        if verification["container_integration"]["container_running"]:
+            await self._verify_runtime_accessibility(verification, ssh_cmd, stack_name)
+
+        # Collect all issues and determine overall success
+        self._collect_verification_issues(verification)
+
+        self._log_verification_results(verification)
+
+        return verification
+
+    def _create_verification_template(self, expected_volumes: list[str]) -> dict[str, Any]:
+        """Create the initial verification result structure."""
+        return {
             "container_integration": {
                 "success": True,
                 "container_exists": False,
@@ -460,31 +492,27 @@ class MigrationVerifier:
             "issues": [],
         }
 
-        # Use helper to inspect container
-        container_info = await self._inspect_container(ssh_cmd, stack_name)
-
-        if not container_info:
-            verification["issues"].append(f"Container '{stack_name}' not found")
-            verification["container_integration"]["success"] = False
-            return verification
-
-        verification["container_integration"]["container_exists"] = True
-
-        # Check container state
+    def _verify_container_state(self, verification: dict[str, Any], container_info: dict[str, Any]) -> None:
+        """Verify container running state and health status."""
         state = container_info.get("State", {})
         verification["container_integration"]["container_running"] = state.get("Running", False)
 
-        # Check health status
         health = state.get("Health", {})
         health_status = health.get("Status")
         verification["container_integration"]["health_status"] = health_status
         verification["container_integration"]["container_healthy"] = health_status == "healthy"
 
-        # Get mount information using helper
+    def _verify_container_mounts(
+        self,
+        verification: dict[str, Any],
+        container_info: dict[str, Any],
+        expected_volumes: list[str],
+        expected_appdata_path: str
+    ) -> None:
+        """Verify container mount configuration matches expectations."""
         actual_mounts = self._collect_mounts(container_info)
         verification["container_integration"]["actual_mounts"] = actual_mounts
 
-        # Check if expected mounts are present
         mount_matches = 0
         for expected_mount in expected_volumes:
             if expected_mount in actual_mounts:
@@ -508,49 +536,52 @@ class MigrationVerifier:
             mount_matches == len(expected_volumes) if expected_volumes else True
         )
 
-        # Test data accessibility inside container if container is running
-        if verification["container_integration"]["container_running"]:
-            verification["container_integration"][
-                "data_accessible"
-            ] = await self._check_in_container_access(ssh_cmd, stack_name)
-            verification["container_integration"][
-                "startup_errors"
-            ] = await self._collect_startup_errors(ssh_cmd, stack_name)
+    async def _verify_runtime_accessibility(
+        self, verification: dict[str, Any], ssh_cmd: list[str], stack_name: str
+    ) -> None:
+        """Test data accessibility and collect startup errors for running containers."""
+        verification["container_integration"][
+            "data_accessible"
+        ] = await self._check_in_container_access(ssh_cmd, stack_name)
+        verification["container_integration"][
+            "startup_errors"
+        ] = await self._collect_startup_errors(ssh_cmd, stack_name)
 
-        # Collect integration issues
+    def _collect_verification_issues(self, verification: dict[str, Any]) -> None:
+        """Collect all verification issues and set overall success status."""
         issues = []
+        integration = verification["container_integration"]
 
-        if not verification["container_integration"]["container_running"]:
+        if not integration["container_running"]:
             issues.append("Container is not running")
 
-        if not verification["container_integration"]["mount_paths_correct"]:
+        if not integration["mount_paths_correct"]:
             issues.append("Container mount paths do not match expected")
 
-        if (
-            verification["container_integration"]["container_running"]
-            and not verification["container_integration"]["data_accessible"]
-        ):
+        if integration["container_running"] and not integration["data_accessible"]:
             issues.append("Data not accessible inside container")
 
-        if verification["container_integration"]["startup_errors"]:
+        if integration["startup_errors"]:
             issues.append(
-                f"Container has {len(verification['container_integration']['startup_errors'])} startup errors"
+                f"Container has {len(integration['startup_errors'])} startup errors"
             )
 
+        health_status = integration["health_status"]
         if health_status and health_status not in ["healthy", "none"]:
             issues.append(f"Container health check failed: {health_status}")
 
         verification["issues"] = issues
         verification["container_integration"]["success"] = len(issues) == 0
 
+    def _log_verification_results(self, verification: dict[str, Any]) -> None:
+        """Log the container integration verification results."""
+        integration = verification["container_integration"]
         self.logger.info(
             "Container integration verification",
-            success=verification["container_integration"]["success"],
-            running=verification["container_integration"]["container_running"],
-            healthy=verification["container_integration"]["container_healthy"],
-            mounts_correct=verification["container_integration"]["mount_paths_correct"],
-            data_accessible=verification["container_integration"]["data_accessible"],
-            issues=len(issues),
+            success=integration["success"],
+            running=integration["container_running"],
+            healthy=integration["container_healthy"],
+            mounts_correct=integration["mount_paths_correct"],
+            data_accessible=integration["data_accessible"],
+            issues=len(verification["issues"]),
         )
-
-        return verification

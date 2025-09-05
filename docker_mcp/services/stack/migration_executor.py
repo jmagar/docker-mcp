@@ -76,7 +76,7 @@ class StackMigrationExecutor:
         dry_run: bool = False,
     ) -> tuple[bool, str, dict]:
         """Create archive of volume data for BACKUP purposes only.
-        
+
         WARNING: This method is for backup operations only, not migration!
         Migrations use direct transfer methods (rsync/ZFS).
 
@@ -187,7 +187,7 @@ class StackMigrationExecutor:
         self, target_host: DockerHost, archive_path: str, target_path: str, dry_run: bool = False
     ) -> tuple[bool, dict]:
         """Extract archive on target host for BACKUP/RESTORE operations only.
-        
+
         WARNING: This method is for backup/restore operations only, not migration!
         Migrations use direct transfer methods without archiving.
 
@@ -298,10 +298,15 @@ class StackMigrationExecutor:
                         ]
 
                         import subprocess
-                        result = await _asyncio.get_event_loop().run_in_executor(
+                        from typing import Any, cast
+
+                        def run_check_cmd() -> Any:  # Use Any to avoid mypy confusion
+                            return subprocess.run(check_cmd, capture_output=True, text=True, check=False)  # nosec B603
+
+                        result = cast(subprocess.CompletedProcess[str], await _asyncio.get_event_loop().run_in_executor(
                             None,
-                            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # nosec B603
-                        )
+                            run_check_cmd,
+                        ))
 
                         if result.returncode == 0 and "RUNNING" in result.stdout:
                             self.logger.info("Container ready for verification", stack_name=stack_name, attempt=attempt+1)
@@ -370,9 +375,9 @@ class StackMigrationExecutor:
                 )
 
             # Extract the actual success from nested structure
-            container_success = container_verification.get("container_integration", {}).get("success", False)
-            data_success = data_verification.get("success", False)
-            overall_success = container_success and data_success
+            container_success: bool = bool(container_verification.get("container_integration", {}).get("success", False))
+            data_success: bool = bool(data_verification.get("success", False))
+            overall_success: bool = container_success and data_success
 
             return overall_success, {
                 "container_integration": container_verification,

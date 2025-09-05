@@ -81,7 +81,7 @@ def get_data_dir() -> Path:
     env_candidates = [
         os.getenv("FASTMCP_DATA_DIR"),
         os.getenv("DOCKER_MCP_DATA_DIR"),
-        os.getenv("XDG_DATA_HOME") and Path(os.getenv("XDG_DATA_HOME")) / "docker-mcp",
+        os.getenv("XDG_DATA_HOME") and Path(os.getenv("XDG_DATA_HOME") or "") / "docker-mcp" if os.getenv("XDG_DATA_HOME") else None,
     ]
 
     # Check explicit environment overrides
@@ -155,29 +155,46 @@ def get_config_dir() -> Path:
     6. User config fallback (~/.config/docker-mcp)
     7. System config fallback (/etc/docker-mcp)
     """
-    # Environment variable candidates in priority order
+    # Try environment variables first
+    if env_path := _try_environment_config_dirs():
+        return env_path
+
+    # Check for container environment
+    if container_path := _try_container_config_dir():
+        return container_path
+
+    # Try fallback directories
+    if fallback_path := _try_fallback_config_dirs():
+        return fallback_path
+
+    # Final fallback
+    return Path("config")
+
+
+def _try_environment_config_dirs() -> Path | None:
+    """Try environment variable config directories in priority order."""
     env_candidates = [
         os.getenv("FASTMCP_CONFIG_DIR"),
         os.getenv("DOCKER_MCP_CONFIG_DIR"),
-        os.getenv("XDG_CONFIG_HOME") and Path(os.getenv("XDG_CONFIG_HOME")) / "docker-mcp",
+        _get_xdg_config_dir(),
     ]
 
-    # Check explicit environment overrides
     for candidate in env_candidates:
         if candidate:
-            candidate_path = Path(candidate)
-            # For config directories, we only need read access, not write
-            try:
-                if candidate_path.exists() and candidate_path.is_dir():
-                    return candidate_path
-                # Try to create if it doesn't exist
-                candidate_path.mkdir(parents=True, exist_ok=True)
-                return candidate_path
-            except (OSError, PermissionError):
-                # If we can't create, continue to next candidate
-                continue
+            if path := _try_create_config_dir(Path(candidate)):
+                return path
 
-    # Check if running in container with comprehensive detection
+    return None
+
+
+def _get_xdg_config_dir() -> str | None:
+    """Get XDG config directory path if available."""
+    xdg_home = os.getenv("XDG_CONFIG_HOME")
+    return str(Path(xdg_home) / "docker-mcp") if xdg_home else None
+
+
+def _try_container_config_dir() -> Path | None:
+    """Try container config directory if running in container."""
     container_indicators = [
         os.getenv("DOCKER_CONTAINER", "").lower() in ("1", "true", "yes", "on"),
         os.path.exists("/.dockerenv"),
@@ -187,15 +204,13 @@ def get_config_dir() -> Path:
 
     if any(container_indicators):
         container_path = Path("/app/config")
-        try:
-            if container_path.exists() or container_path.parent.exists():
-                container_path.mkdir(parents=True, exist_ok=True)
-                return container_path
-        except (OSError, PermissionError):
-            # Container path failed, fall through to other options
-            pass
+        return _try_create_config_dir(container_path)
 
-    # Config directory fallbacks with preference for existing directories
+    return None
+
+
+def _try_fallback_config_dirs() -> Path | None:
+    """Try fallback config directories, preferring existing ones."""
     fallback_candidates = [
         Path("config"),  # Local project config (for development)
         Path.cwd() / "config",  # Current working directory config
@@ -204,27 +219,42 @@ def get_config_dir() -> Path:
         Path("/etc/docker-mcp"),  # System-wide config (read-only usually)
     ]
 
-    # First pass: look for existing config directories
+    # First pass: look for existing readable directories
     for candidate_path in fallback_candidates:
-        if candidate_path.exists() and candidate_path.is_dir():
-            try:
-                # Test if we can read from the directory
-                list(candidate_path.iterdir())
-                return candidate_path
-            except (OSError, PermissionError):
-                continue
-
-    # Second pass: try to create config directories
-    for candidate_path in fallback_candidates[:-1]:  # Skip system dir for creation
-        try:
-            candidate_path.mkdir(parents=True, exist_ok=True)
+        if _is_readable_config_dir(candidate_path):
             return candidate_path
-        except (OSError, PermissionError):
-            continue
 
-    # If all else fails, return the primary fallback even if not accessible
-    # Let the calling code handle the permission error
-    return Path("config")
+    # Second pass: try to create directories (skip system dir)
+    for candidate_path in fallback_candidates[:-1]:
+        if path := _try_create_config_dir(candidate_path):
+            return path
+
+    return None
+
+
+def _try_create_config_dir(candidate_path: Path) -> Path | None:
+    """Try to create or validate a config directory."""
+    try:
+        if candidate_path.exists() and candidate_path.is_dir():
+            return candidate_path
+        # Try to create if it doesn't exist
+        candidate_path.mkdir(parents=True, exist_ok=True)
+        return candidate_path
+    except (OSError, PermissionError):
+        return None
+
+
+def _is_readable_config_dir(candidate_path: Path) -> bool:
+    """Check if a path is an existing readable config directory."""
+    if not (candidate_path.exists() and candidate_path.is_dir()):
+        return False
+
+    try:
+        # Test if we can read from the directory
+        list(candidate_path.iterdir())
+        return True
+    except (OSError, PermissionError):
+        return False
 
 
 class DockerMCPServer:
@@ -275,8 +305,13 @@ class DockerMCPServer:
 
     def _initialize_app(self) -> None:
         """Initialize FastMCP app, middleware, and register tools."""
-        # Create FastMCP server
-        self.app = FastMCP("Docker Context Manager")
+        # Create FastMCP server (attach Google OAuth if configured)
+        auth_provider = self._build_auth_provider()
+        if auth_provider is not None:
+            self.app = FastMCP("Docker Context Manager", auth=auth_provider)
+            self.logger.info("Authentication provider enabled", provider="GoogleProvider")
+        else:
+            self.app = FastMCP("Docker Context Manager")
 
         # Add middleware in logical order (first added = first executed)
         # Error handling first to catch all errors
@@ -319,6 +354,37 @@ class DockerMCPServer:
             logging="dual output (console + files)",
         )
 
+        # Add diagnostic auth-protected tools (if auth enabled)
+        try:
+            from fastmcp.server.dependencies import get_access_token  # type: ignore
+
+            @self.app.tool  # type: ignore[attr-defined]
+            async def whoami() -> dict:
+                """Return identity claims for the authenticated user."""
+                token = get_access_token()
+                # token.claims should contain standard OIDC-style claims
+                return {
+                    "iss": token.claims.get("iss"),
+                    "sub": token.claims.get("sub"),
+                    "email": token.claims.get("email"),
+                    "name": token.claims.get("name"),
+                    "picture": token.claims.get("picture"),
+                }
+
+            @self.app.tool  # type: ignore[attr-defined]
+            async def get_user_info() -> dict:
+                """Return simplified user info for authenticated Google user."""
+                token = get_access_token()
+                return {
+                    "google_id": token.claims.get("sub"),
+                    "email": token.claims.get("email"),
+                    "name": token.claims.get("name"),
+                    "picture": token.claims.get("picture"),
+                }
+        except Exception:
+            # If dependencies are unavailable (e.g., auth not enabled), skip these helpers
+            pass
+
         # Register consolidated tools (3 tools replace 13 individual tools)
         self.app.tool(
             self.docker_hosts,
@@ -353,6 +419,87 @@ class DockerMCPServer:
 
         # Register MCP resources for data access (complement tools with clean URI-based data retrieval)
         self._register_resources()
+
+    def _build_auth_provider(self):
+        """Build Google OAuth provider from environment if configured.
+
+        Returns a provider instance or None if auth should be disabled.
+        """
+        # Import lazily; if unavailable, skip auth
+        try:
+            from fastmcp.server.auth.providers.google import GoogleProvider  # type: ignore
+        except Exception as e:  # pragma: no cover - import safety
+            self.logger.error("Failed to import GoogleProvider", error=str(e))
+            return None
+
+        # Read credentials from env if provided
+        client_id = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+
+        # Base URL for callbacks
+        base_url = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL")
+        if not base_url:
+            # Fallback to host/port (use http unless explicitly running behind TLS)
+            scheme = "http"
+            host = self.config.server.host
+            port = self.config.server.port
+            base_url = f"{scheme}://{host}:{port}"
+
+        # Redirect path
+        redirect_path = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH", "/auth/callback")
+
+        # Scopes can be comma/space/JSON separated
+        scopes_raw = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES", "")
+        required_scopes: list[str]
+        if scopes_raw.strip().startswith("["):
+            try:
+                import json
+
+                required_scopes = json.loads(scopes_raw)
+            except Exception:
+                required_scopes = []
+        else:
+            parts = [p.strip() for p in scopes_raw.replace(" ", ",").split(",") if p.strip()]
+            required_scopes = parts
+
+        # Provide sensible defaults
+        if not required_scopes:
+            required_scopes = [
+                "openid",
+                "https://www.googleapis.com/auth/userinfo.email",
+            ]
+
+        timeout = None
+        try:
+            timeout_val = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_TIMEOUT_SECONDS")
+            if timeout_val:
+                timeout = int(timeout_val)
+        except ValueError:
+            timeout = None
+
+        # Build provider with either explicit env creds or None (provider can read env directly)
+        provider = GoogleProvider(
+            client_id=client_id,
+            client_secret=client_secret,
+            base_url=base_url,
+            required_scopes=required_scopes,
+            redirect_path=redirect_path,
+            timeout_seconds=timeout,
+        )
+
+        # Optional hardening: restrict allowed client redirect URIs
+        allowed_redirects = os.getenv(
+            "FASTMCP_SERVER_AUTH_GOOGLE_ALLOWED_CLIENT_REDIRECT_URIS", ""
+        ).strip()
+        if allowed_redirects:
+            try:
+                # property exists in FastMCP 2.12.x
+                patterns = [p.strip() for p in allowed_redirects.split(",") if p.strip()]
+                setattr(provider, "allowed_client_redirect_uris", patterns)
+            except Exception:
+                pass
+
+        return provider
 
     def _register_resources(self) -> None:
         """Register MCP resources for data access.
@@ -477,8 +624,16 @@ class DockerMCPServer:
         """
         # Parse and validate parameters using the parameter model
         try:
+            # Convert string action to enum
+            if isinstance(action, str):
+                action_enum = HostAction(action)
+            elif action is None:
+                action_enum = HostAction.LIST
+            else:
+                action_enum = action
+
             params = DockerHostsParams(
-                action=action if action is not None else HostAction.LIST,
+                action=action_enum,
                 host_id=host_id,
                 ssh_host=ssh_host,
                 ssh_user=ssh_user,
@@ -492,8 +647,8 @@ class DockerMCPServer:
                 zfs_capable=zfs_capable,
                 zfs_dataset=zfs_dataset,
                 port=port,
-                cleanup_type=cleanup_type if cleanup_type else None,
-                frequency=frequency if frequency else None,
+                cleanup_type=cleanup_type if cleanup_type and cleanup_type in ['check', 'safe', 'moderate', 'aggressive'] else None,  # type: ignore[arg-type]
+                frequency=frequency if frequency and frequency in ['daily', 'weekly', 'monthly', 'custom'] else None,  # type: ignore[arg-type]
                 time=time if time else None,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,
@@ -583,8 +738,14 @@ class DockerMCPServer:
         """
         # Parse and validate parameters using the parameter model
         try:
+            # Convert string action to enum
+            if isinstance(action, str):
+                action_enum = ContainerAction(action)
+            else:
+                action_enum = action
+
             params = DockerContainerParams(
-                action=action,
+                action=action_enum,
                 host_id=host_id,
                 container_id=container_id,
                 all_containers=all_containers,
@@ -684,8 +845,14 @@ class DockerMCPServer:
         """
         # Parse and validate parameters using the parameter model
         try:
+            # Convert string action to enum
+            if isinstance(action, str):
+                action_enum = ComposeAction(action)
+            else:
+                action_enum = action
+
             params = DockerComposeParams(
-                action=action,
+                action=action_enum,
                 host_id=host_id,
                 stack_name=stack_name,
                 compose_content=compose_content,
@@ -882,7 +1049,7 @@ class DockerMCPServer:
     ) -> ToolResult:
         """Import hosts from SSH config with interactive selection and compose path discovery."""
         return await self.config_service.import_ssh_config(
-            ssh_config_path, selected_hosts, compose_path_overrides, auto_confirm, self._config_path
+            ssh_config_path, selected_hosts, self._config_path
         )
 
     def _to_dict(self, result: Any, fallback_msg: str = "No structured content") -> dict[str, Any]:
@@ -933,7 +1100,7 @@ class DockerMCPServer:
 
             # FastMCP.run() is synchronous and manages its own event loop
             self.app.run(
-                transport="streamable-http",
+                transport="http",
                 host=self.config.server.host,
                 port=self.config.server.port,
             )
@@ -975,10 +1142,25 @@ def main() -> None:
     """Main entry point."""
     args = parse_args()
 
-    # Setup unified logging (console + files) with enhanced configuration
-    from docker_mcp.core.logging_config import get_server_logger, setup_logging
+    # Setup logging
+    log_dir = _setup_log_directory()
+    logger = _setup_logging_system(args, log_dir)
 
-    # Determine log directory with fallback options
+    # Load and configure application
+    config, config_path_for_reload = _load_and_configure(args, logger)
+    if config is None:  # Validation-only mode
+        return
+
+    # Create server and setup hot reload
+    server = DockerMCPServer(config, config_path=config_path_for_reload)
+    _setup_hot_reload(server, logger)
+
+    # Run server with error handling
+    _run_server(server, logger)
+
+
+def _setup_log_directory() -> str | None:
+    """Setup log directory with fallback options."""
     log_dir_candidates = [
         os.getenv("LOG_DIR"),  # Explicit environment override
         str(get_data_dir() / "logs"),  # Primary data directory
@@ -986,21 +1168,23 @@ def main() -> None:
         str(Path(tempfile.gettempdir()) / "docker-mcp-logs"),  # System fallback
     ]
 
-    log_dir = None
     for candidate in log_dir_candidates:
         if candidate:
             try:
                 candidate_path = Path(candidate)
                 candidate_path.mkdir(parents=True, exist_ok=True)
                 if candidate_path.is_dir() and os.access(candidate_path, os.W_OK):
-                    log_dir = str(candidate_path)
-                    break
+                    return str(candidate_path)
             except (OSError, PermissionError):
                 continue
 
-    if not log_dir:
-        print("Warning: Unable to create log directory, using console-only logging")
-        log_dir = None
+    print("Warning: Unable to create log directory, using console-only logging")
+    return None
+
+
+def _setup_logging_system(args, log_dir: str | None):
+    """Setup logging system with error handling."""
+    from docker_mcp.core.logging_config import get_server_logger, setup_logging
 
     # Parse log file size with validation
     try:
@@ -1012,7 +1196,7 @@ def main() -> None:
 
     # Setup logging with error handling
     try:
-        setup_logging(log_dir=log_dir, log_level=args.log_level, max_file_size_mb=max_file_size_mb)
+        setup_logging(log_dir=log_dir or "/tmp", log_level=args.log_level, max_file_size_mb=max_file_size_mb)
         logger = get_server_logger()
 
         # Log successful initialization with configuration details
@@ -1024,66 +1208,73 @@ def main() -> None:
             console_logging=True,
             file_logging=log_dir is not None,
         )
+        return logger
     except Exception as e:
-        logger.warning(f"Logging setup failed ({e}), using basic console logging")
+        print(f"Logging setup failed ({e}), using basic console logging")
         import logging
 
         logging.basicConfig(
             level=getattr(logging, args.log_level.upper(), logging.INFO),
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         )
-        logger = logging.getLogger("docker_mcp")
+        return logging.getLogger("docker_mcp")
 
+
+def _load_and_configure(args, logger) -> tuple[DockerMCPConfig | None, str]:
+    """Load and configure application, returning None for validation-only mode."""
+    # Load configuration
+    config = load_config(args.config)
+
+    # Override server config from CLI args
+    config.server.host = args.host
+    config.server.port = args.port
+    config.server.log_level = args.log_level
+
+    # Validate configuration only
+    if args.validate_config:
+        logger.info("Configuration validation successful")
+        logger.info("✅ Configuration is valid")
+        return None, ""
+
+    # Determine config path for reload
+    config_path_for_reload = args.config or os.getenv(
+        "DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml")
+    )
+
+    logger.info(
+        "Hot reload configuration",
+        config_path=config_path_for_reload,
+        args_config=args.config,
+        env_config=os.getenv("DOCKER_HOSTS_CONFIG"),
+    )
+
+    return config, config_path_for_reload
+
+
+def _setup_hot_reload(server: "DockerMCPServer", logger) -> None:
+    """Setup hot reload in background thread."""
+    import asyncio
+    import threading
+
+    async def start_hot_reload():
+        await server.start_hot_reload()
+
+    def run_hot_reload():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(start_hot_reload())
+        # Keep the loop running to handle file changes
+        loop.run_forever()
+
+    hot_reload_thread = threading.Thread(target=run_hot_reload, daemon=True)
+    hot_reload_thread.start()
+    logger.info("Hot reload enabled for configuration changes")
+
+
+def _run_server(server: "DockerMCPServer", logger) -> None:
+    """Run server with error handling."""
     try:
-        # Load configuration
-        config = load_config(args.config)
-
-        # Override server config from CLI args
-        config.server.host = args.host
-        config.server.port = args.port
-        config.server.log_level = args.log_level
-
-        # Validate configuration only
-        if args.validate_config:
-            logger.info("Configuration validation successful")
-            logger.info("✅ Configuration is valid")
-            return
-
-        # Create and run server (hot reload always enabled)
-        config_path_for_reload = args.config or os.getenv(
-            "DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml")
-        )
-
-        logger.info(
-            "Hot reload configuration",
-            config_path=config_path_for_reload,
-            args_config=args.config,
-            env_config=os.getenv("DOCKER_HOSTS_CONFIG"),
-        )
-
-        server = DockerMCPServer(config, config_path=config_path_for_reload)
-
-        # Start hot reload in background (always enabled)
-        async def start_hot_reload():
-            await server.start_hot_reload()
-
-        # Run hot reload starter in the background
-        import asyncio
-        import threading
-
-        def run_hot_reload():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(start_hot_reload())
-            # Keep the loop running to handle file changes
-            loop.run_forever()
-
-        hot_reload_thread = threading.Thread(target=run_hot_reload, daemon=True)
-        hot_reload_thread.start()
-        logger.info("Hot reload enabled for configuration changes")
-
         server.run()
-
     except KeyboardInterrupt:
         logger.info("Server shutdown requested")
     except Exception as e:

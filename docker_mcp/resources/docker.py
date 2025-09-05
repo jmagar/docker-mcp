@@ -100,9 +100,11 @@ class DockerInfoResource(FunctionResource):
                     "resource_type": "docker_info",
                 }
 
+        from pydantic import AnyUrl
+
         super().__init__(
             fn=_get_docker_info,
-            uri="docker://{host_id}/info",
+            uri=AnyUrl("docker://{host_id}/info"),
             name="Docker Host Information",
             title="Docker host system information and configuration",
             description="Provides comprehensive Docker host information including version, system info, and configuration details",
@@ -191,9 +193,11 @@ class DockerContainersResource(FunctionResource):
                     "resource_type": "containers",
                 }
 
+        from pydantic import AnyUrl
+
         super().__init__(
             fn=_get_containers,
-            uri="docker://{host_id}/containers",
+            uri=AnyUrl("docker://{host_id}/containers"),
             name="Docker Container Listings",
             title="List of Docker containers on a host",
             description="Provides comprehensive container information including status, networks, volumes, and compose project details",
@@ -287,9 +291,11 @@ class DockerComposeResource(FunctionResource):
                     "resource_type": "compose",
                 }
 
+        from pydantic import AnyUrl
+
         super().__init__(
             fn=_get_compose_info,
-            uri="docker://{host_id}/compose",
+            uri=AnyUrl("docker://{host_id}/compose"),
             name="Docker Compose Information",
             title="Docker Compose stacks and projects",
             description="Provides information about Docker Compose stacks, projects, and their configurations on a host",

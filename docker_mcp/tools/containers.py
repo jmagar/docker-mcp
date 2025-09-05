@@ -50,6 +50,14 @@ class ContainerTools:
         try:
             # Get Docker client and list containers using Docker SDK
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {
+                    "success": False,
+                    "error": f"Could not connect to Docker on host {host_id}",
+                    "containers": [],
+                    "total": 0
+                }
+
             loop = asyncio.get_event_loop()
             docker_containers = await loop.run_in_executor(
                 None, lambda: client.containers.list(all=all_containers)
@@ -128,6 +136,12 @@ class ContainerTools:
         """
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {
+                    "success": False,
+                    "error": f"Could not connect to Docker on host {host_id}"
+                }
+
             loop = asyncio.get_event_loop()
 
             # Use Docker SDK to get container
@@ -212,6 +226,12 @@ class ContainerTools:
         """
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {
+                    "success": False,
+                    "error": f"Could not connect to Docker on host {host_id}"
+                }
+
             loop = asyncio.get_event_loop()
 
             # Get container and start it using Docker SDK
@@ -271,6 +291,12 @@ class ContainerTools:
         """
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {
+                    "success": False,
+                    "error": f"Could not connect to Docker on host {host_id}"
+                }
+
             loop = asyncio.get_event_loop()
 
             # Get container and stop it using Docker SDK
@@ -348,6 +374,12 @@ class ContainerTools:
         """
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {
+                    "success": False,
+                    "error": f"Could not connect to Docker on host {host_id}"
+                }
+
             loop = asyncio.get_event_loop()
 
             # Get container and restart it using Docker SDK
@@ -407,6 +439,12 @@ class ContainerTools:
         """
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {
+                    "success": False,
+                    "error": f"Could not connect to Docker on host {host_id}"
+                }
+
             loop = asyncio.get_event_loop()
 
             # Get container and retrieve stats using Docker SDK
@@ -599,6 +637,9 @@ class ContainerTools:
         """Get basic container inspect info for enhanced listings."""
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {"error": f"Could not connect to Docker on host {host_id}"}
+
             loop = asyncio.get_event_loop()
 
             # Use Docker SDK to get container
@@ -672,6 +713,12 @@ class ContainerTools:
             if action == "build":
                 # Build via docker compose for the service this container belongs to
                 client = await self.context_manager.get_client(host_id)
+                if client is None:
+                    return {
+                        "success": False,
+                        "error": f"Could not connect to Docker on host {host_id}"
+                    }
+
                 loop = asyncio.get_event_loop()
                 container = await loop.run_in_executor(
                     None, lambda: client.containers.get(container_id)
@@ -779,6 +826,12 @@ class ContainerTools:
         """
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {
+                    "success": False,
+                    "error": f"Could not connect to Docker on host {host_id}"
+                }
+
             loop = asyncio.get_event_loop()
 
             # Pull image using Docker SDK
@@ -908,6 +961,9 @@ class ContainerTools:
         """Get container data for port analysis."""
         # Get Docker client and list containers using Docker SDK
         client = await self.context_manager.get_client(host_id)
+        if client is None:
+            return []
+
         loop = asyncio.get_event_loop()
         docker_containers = await loop.run_in_executor(
             None, lambda: client.containers.list(all=include_stopped)

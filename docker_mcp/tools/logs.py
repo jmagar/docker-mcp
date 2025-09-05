@@ -44,6 +44,12 @@ class LogTools:
         """
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {
+                    "success": False,
+                    "error": f"Could not connect to Docker on host {host_id}"
+                }
+
             loop = asyncio.get_event_loop()
 
             # Get container and retrieve logs using Docker SDK

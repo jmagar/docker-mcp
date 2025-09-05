@@ -69,11 +69,12 @@ class TimingMiddleware(Middleware):
             duration_ms = duration_seconds * 1000
 
             # Update statistics if enabled
-            if self.track_statistics:
+            if self.track_statistics and method is not None:
                 await self._update_statistics(method, duration_ms, success)
 
             # Log timing information
-            await self._log_timing(method, duration_ms, success, context)
+            if method is not None:
+                await self._log_timing(method, duration_ms, success, context)
 
     async def _update_statistics(self, method: str, duration_ms: float, success: bool) -> None:
         """Update internal timing statistics.

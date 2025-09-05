@@ -79,6 +79,9 @@ Simplified Docker hosts management tool.
 • **remove**: Remove host from configuration
   - Required: host_id
 
+• **disk_usage**: Read-only Docker disk usage summary (alias of cleanup check)
+  - Required: host_id
+
 **Natural language examples:**
 ```
 "Add a new Docker host called production-1 at 192.168.1.100 with user dockeruser"
@@ -125,6 +128,12 @@ Consolidated Docker container management tool.
   - Required: host_id, container_id
   - Optional: follow, lines
 
+• **stats**: One-shot resource usage snapshot
+  - Required: host_id, container_id
+
+• **ports**: Show exposed host bindings for a container
+  - Required: host_id, container_id
+
 **Natural language examples:**
 ```
 "List all containers on production-1"
@@ -160,11 +169,14 @@ Consolidated Docker Compose stack management tool.
 
 • **logs**: Get stack logs
   - Required: host_id, stack_name
-  - Optional: follow, lines
+  - Optional: follow, lines, services (subset)
 
 • **migrate**: Migrate stack between hosts
   - Required: host_id, target_host_id, stack_name
   - Optional: remove_source, skip_stop_source, start_target, dry_run
+
+• **ps**: Show stack services (status and ports)
+  - Required: host_id, stack_name
 
 **Natural language examples:**
 ```

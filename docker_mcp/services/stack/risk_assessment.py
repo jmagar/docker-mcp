@@ -138,40 +138,45 @@ class StackRiskAssessment:
 
         try:
             import yaml
-
             compose_data = yaml.safe_load(compose_content)
             services = compose_data.get("services", {})
 
-            # Check for persistent volumes
-            persistent_services = []
-            for service_name, service_config in services.items():
-                volumes = service_config.get("volumes", [])
-                if volumes:
-                    persistent_services.append(service_name)
-
-            if persistent_services:
-                risks["risk_factors"].append("PERSISTENT_SERVICES")
-                if len(persistent_services) > 3:
-                    risks["warnings"].append(
-                        f"Multiple services with persistent data ({len(persistent_services)} services)"
-                    )
-                    if risks["overall_risk"] == "LOW":
-                        risks["overall_risk"] = "MEDIUM"
-
-            # Check for health checks
-            health_checked_services = []
-            for service_name, service_config in services.items():
-                if "healthcheck" in service_config:
-                    health_checked_services.append(service_name)
-
-            if health_checked_services:
-                risks["recommendations"].append(
-                    "Monitor health checks after migration - services may need time to stabilize"
-                )
+            # Assess different aspects of compose complexity
+            self._assess_persistent_volume_risk(risks, services)
+            self._assess_health_check_complexity(risks, services)
 
         except Exception as e:
             # Skip compose analysis if parsing fails
             self.logger.debug("Failed to analyze compose content for risks", error=str(e))
+
+    def _assess_persistent_volume_risk(self, risks: dict, services: dict) -> None:
+        """Assess risk from services with persistent volumes."""
+        persistent_services = []
+        for service_name, service_config in services.items():
+            volumes = service_config.get("volumes", [])
+            if volumes:
+                persistent_services.append(service_name)
+
+        if persistent_services:
+            risks["risk_factors"].append("PERSISTENT_SERVICES")
+            if len(persistent_services) > 3:
+                risks["warnings"].append(
+                    f"Multiple services with persistent data ({len(persistent_services)} services)"
+                )
+                if risks["overall_risk"] == "LOW":
+                    risks["overall_risk"] = "MEDIUM"
+
+    def _assess_health_check_complexity(self, risks: dict, services: dict) -> None:
+        """Assess complexity from services with health checks."""
+        health_checked_services = []
+        for service_name, service_config in services.items():
+            if "healthcheck" in service_config:
+                health_checked_services.append(service_name)
+
+        if health_checked_services:
+            risks["recommendations"].append(
+                "Monitor health checks after migration - services may need time to stabilize"
+            )
 
     def _generate_rollback_plan(self, risks: dict) -> None:
         """Generate a rollback plan for the migration."""

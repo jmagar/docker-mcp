@@ -108,9 +108,11 @@ class PortMappingResource(FunctionResource):
                 }
 
         # Initialize FunctionResource with closure-based function
+        from pydantic import AnyUrl
+
         super().__init__(
             fn=_get_port_data,
-            uri="ports://{host_id}",
+            uri=AnyUrl("ports://{host_id}"),
             name="Docker Port Mappings",
             title="Port mappings for Docker hosts",
             description="Provides comprehensive port mapping information for Docker containers on a host",

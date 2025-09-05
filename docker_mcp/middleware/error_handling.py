@@ -57,13 +57,13 @@ class ErrorHandlingMiddleware(Middleware):
         method = context.method
 
         # Update statistics if enabled
-        if self.track_error_stats:
+        if self.track_error_stats and method is not None:
             error_key = f"{error_type}:{method}"
             self.error_stats[error_key] += 1
             self.method_errors[method] += 1
 
         # Create comprehensive error log
-        error_data = {
+        error_data: dict[str, Any] = {
             "error_type": error_type,
             "error_message": str(error),
             "method": method,
@@ -73,7 +73,7 @@ class ErrorHandlingMiddleware(Middleware):
         }
 
         # Add statistics if tracking is enabled
-        if self.track_error_stats:
+        if self.track_error_stats and method is not None:
             error_data.update(
                 {
                     "error_occurrence_count": self.error_stats[f"{error_type}:{method}"],

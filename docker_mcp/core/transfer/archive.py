@@ -84,66 +84,83 @@ class ArchiveUtils:
         if not paths:
             return "/", []
 
-        # Convert to Path objects
         path_objects = [Path(p) for p in paths]
 
-        # For archiving, we want to archive the CONTENTS of directories
-        # So we use the path itself as the parent and archive everything inside with "*"
         if len(path_objects) == 1:
-            # Single path - handle file vs directory case
-            p = path_objects[0]
-            if p.is_dir():
-                parent = str(p)
-                relative_paths = ["."]
-            else:
-                parent = str(p.parent)
-                relative_paths = [p.name]
+            return self._handle_single_path(path_objects[0])
         else:
-            # Multiple paths - find their common parent
-            try:
-                # Find the longest common prefix
-                common_parts = []
-                min_parts = min(len(p.parts) for p in path_objects)
+            return self._handle_multiple_paths(path_objects)
 
-                for i in range(min_parts):
-                    part = path_objects[0].parts[i]
-                    if all(p.parts[i] == part for p in path_objects):
-                        common_parts.append(part)
-                    else:
-                        break
-
-                # Build parent from common parts
-                if common_parts:
-                    if len(common_parts) == 1 and common_parts[0] == "/":
-                        parent = "/"
-                    else:
-                        parent = "/" + "/".join(common_parts[1:])
-                else:
-                    parent = "/"
-
-                # Calculate relative paths from parent
-                relative_paths = []
-                parent_path = Path(parent)
-                for p in path_objects:
-                    try:
-                        if parent_path == Path("/"):
-                            # Remove leading slash for relative path from root
-                            rel_path = str(p)[1:] if str(p).startswith("/") else str(p)
-                        else:
-                            rel_path = str(p.relative_to(parent_path))
-                        relative_paths.append(rel_path)
-                    except ValueError:
-                        # Path is not relative to parent, use absolute
-                        relative_paths.append(str(p))
-
-            except Exception:
-                # Fallback to using root as parent
-                parent = "/"
-                relative_paths = [
-                    str(p)[1:] if str(p).startswith("/") else str(p) for p in path_objects
-                ]
+    def _handle_single_path(self, path: Path) -> tuple[str, list[str]]:
+        """Handle the case of a single path for archiving."""
+        if path.is_dir():
+            parent = str(path)
+            relative_paths = ["."]
+        else:
+            parent = str(path.parent)
+            relative_paths = [path.name]
 
         return parent, relative_paths
+
+    def _handle_multiple_paths(self, path_objects: list[Path]) -> tuple[str, list[str]]:
+        """Handle the case of multiple paths for archiving."""
+        try:
+            common_parts = self._find_common_path_parts(path_objects)
+            parent = self._build_parent_path(common_parts)
+            relative_paths = self._calculate_relative_paths(path_objects, parent)
+
+            return parent, relative_paths
+
+        except Exception:
+            # Fallback to using root as parent
+            parent = "/"
+            relative_paths = [
+                str(p)[1:] if str(p).startswith("/") else str(p) for p in path_objects
+            ]
+            return parent, relative_paths
+
+    def _find_common_path_parts(self, path_objects: list[Path]) -> list[str]:
+        """Find the longest common prefix of path parts."""
+        common_parts = []
+        min_parts = min(len(p.parts) for p in path_objects)
+
+        for i in range(min_parts):
+            part = path_objects[0].parts[i]
+            if all(p.parts[i] == part for p in path_objects):
+                common_parts.append(part)
+            else:
+                break
+
+        return common_parts
+
+    def _build_parent_path(self, common_parts: list[str]) -> str:
+        """Build parent path from common parts."""
+        if common_parts:
+            if len(common_parts) == 1 and common_parts[0] == "/":
+                return "/"
+            else:
+                return "/" + "/".join(common_parts[1:])
+        else:
+            return "/"
+
+    def _calculate_relative_paths(self, path_objects: list[Path], parent: str) -> list[str]:
+        """Calculate relative paths from parent directory."""
+        relative_paths = []
+        parent_path = Path(parent)
+
+        for p in path_objects:
+            try:
+                if parent_path == Path("/"):
+                    # Remove leading slash for relative path from root
+                    rel_path = str(p)[1:] if str(p).startswith("/") else str(p)
+                else:
+                    rel_path = str(p.relative_to(parent_path))
+                relative_paths.append(rel_path)
+            except ValueError:
+                # Path is not relative to parent, use absolute
+                relative_paths.append(str(p))
+
+        return relative_paths
 
     async def create_archive(
         self,

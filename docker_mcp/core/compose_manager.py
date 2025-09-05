@@ -104,6 +104,9 @@ class ComposeManager:
         """Get containers from Docker."""
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return None
+
             loop = asyncio.get_event_loop()
 
             # Use Docker SDK to get containers
@@ -190,6 +193,9 @@ class ComposeManager:
         """Get detailed container information."""
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return None
+
             loop = asyncio.get_event_loop()
 
             # Get container using Docker SDK

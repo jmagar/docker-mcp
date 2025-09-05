@@ -7,7 +7,7 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "fastmcp>=2.11.3",
+    "fastmcp>=2.12.2",
     "docker>=7.1.0",
     "pydantic>=2.11.7",
     "pydantic-settings>=2.0.0",
@@ -27,7 +27,7 @@ license = {text = "MIT"}
 [project.scripts]
 docker-mcp = "docker_mcp.server:main"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -67,10 +67,24 @@ combine-as-imports = true
 "tests/*" = ["S101", "S104"]  # Allow asserts in tests, Docker 0.0.0.0 bindings
 "docker_mcp/core/docker_context.py" = ["S603"]  # Legitimate subprocess calls for Docker
 "docker_mcp/core/compose_manager.py" = ["S603"]  # Legitimate subprocess calls for SSH/SCP
+"docker_mcp/core/backup.py" = ["S603"]  # Legitimate subprocess calls for backup operations
+"docker_mcp/core/migration/manager.py" = ["S603"]  # Legitimate subprocess calls for migration
+"docker_mcp/core/migration/verification.py" = ["S603"]  # Legitimate subprocess calls for verification
+"docker_mcp/core/migration/volume_parser.py" = ["S603"]  # Legitimate subprocess calls for volume operations
+"docker_mcp/core/safety.py" = ["S603"]  # Legitimate subprocess calls for safety operations
+"docker_mcp/core/transfer/archive.py" = ["S603"]  # Legitimate subprocess calls for archive operations
+"docker_mcp/core/transfer/zfs.py" = ["S603", "B023"]  # Subprocess calls + loop variable binding
+"docker_mcp/core/transfer/rsync.py" = ["S603"]  # Legitimate subprocess calls for rsync
+"docker_mcp/services/cleanup.py" = ["S603"]  # Legitimate subprocess calls for cleanup
+"docker_mcp/services/container.py" = ["S603", "S104"]  # Subprocess calls + Docker port mapping
+"docker_mcp/services/host.py" = ["S603", "S108"]  # Legitimate subprocess calls + temp directory references
+"docker_mcp/services/stack/migration_executor.py" = ["S603", "B023"]  # Subprocess calls + loop variable binding
+"docker_mcp/services/stack/network.py" = ["S603", "UP038"]  # Subprocess calls + isinstance usage
+"docker_mcp/services/stack/validation.py" = ["S603"]  # Legitimate subprocess calls for validation
 "docker_mcp/tools/stacks.py" = ["S603"]  # Legitimate subprocess calls for SSH
-"docker_mcp/server.py" = ["S104"]  # Docker port mapping 0.0.0.0 bindings
+"docker_mcp/tools/logs.py" = ["S603"]  # Legitimate subprocess calls for log operations
+"docker_mcp/server.py" = ["S104", "S108"]  # Docker port mapping 0.0.0.0 bindings + temp directory
 "docker_mcp/tools/containers.py" = ["S104"]  # Docker port mapping 0.0.0.0 bindings
-"docker_mcp/services/container.py" = ["S104"]  # Docker port mapping 0.0.0.0 bindings
 
 [tool.ruff.format]
 quote-style = "double"
@@ -88,6 +102,7 @@ show_error_context = true
 show_column_numbers = true
 cache_dir = ".cache/mypy"
 ignore_errors = false
+check_untyped_defs = true
 disable_error_code = ["misc", "no-untyped-call", "no-untyped-def"]
 
 # Module-specific settings
@@ -147,13 +162,3 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.4.1",
-    "pytest-asyncio>=1.1.0",
-    "pytest-cov>=6.2.1",
-    "pytest-timeout>=2.3.1",
-]
-
-# Dependency groups removed to avoid duplication with [project.optional-dependencies].dev

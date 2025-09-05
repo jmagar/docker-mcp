@@ -8,6 +8,7 @@ Handles compose syntax validation, resource checks, conflict detection, etc.
 import asyncio
 import shlex
 import subprocess
+from typing import Any
 
 import structlog
 
@@ -33,8 +34,8 @@ class StackValidation:
         Returns:
             Tuple of (is_valid: bool, issues: list[str], details: dict)
         """
-        issues = []
-        details = {
+        issues: list[str] = []
+        details: dict[str, Any] = {
             "stack_name": stack_name,
             "validation_checks": {},
             "syntax_valid": False,
@@ -44,102 +45,17 @@ class StackValidation:
 
         try:
             # Basic YAML syntax validation
-            import yaml
-
-            try:
-                compose_data = yaml.safe_load(compose_content)
-                details["syntax_valid"] = True
-                details["validation_checks"]["yaml_syntax"] = {"passed": True}
-            except yaml.YAMLError as e:
-                issues.append(f"YAML syntax error: {str(e)}")
-                details["validation_checks"]["yaml_syntax"] = {"passed": False, "error": str(e)}
-                details["issues"] = issues
+            compose_data = self._validate_yaml_syntax(compose_content, issues, details)
+            if compose_data is None:
                 return False, issues, details
 
-            if not isinstance(compose_data, dict):
-                issues.append("Compose file must be a YAML object")
-                details["validation_checks"]["structure"] = {
-                    "passed": False,
-                    "error": "Not a YAML object",
-                }
-                details["issues"] = issues
+            # Validate compose structure
+            structure_valid = self._validate_compose_structure(compose_data, issues, details)
+            if not structure_valid:
                 return False, issues, details
-
-            # Check for required sections
-            if "services" not in compose_data:
-                issues.append("No 'services' section found")
-                details["validation_checks"]["services_section"] = {
-                    "passed": False,
-                    "error": "Missing services section",
-                }
-            else:
-                services = compose_data["services"]
-                if not isinstance(services, dict) or len(services) == 0:
-                    issues.append("'services' section is empty or invalid")
-                    details["validation_checks"]["services_section"] = {
-                        "passed": False,
-                        "error": "Empty or invalid services",
-                    }
-                else:
-                    details["services_found"] = len(services)
-                    details["validation_checks"]["services_section"] = {
-                        "passed": True,
-                        "count": len(services),
-                    }
 
             # Validate individual services
-            if "services" in compose_data and isinstance(compose_data["services"], dict):
-                service_issues = []
-                for service_name, service_config in compose_data["services"].items():
-                    if not isinstance(service_config, dict):
-                        service_issues.append(
-                            f"Service '{service_name}': Invalid configuration (not an object)"
-                        )
-                        continue
-
-                    # Check for image or build
-                    if "image" not in service_config and "build" not in service_config:
-                        service_issues.append(
-                            f"Service '{service_name}': Missing 'image' or 'build' directive"
-                        )
-
-                    # Validate port specifications
-                    if "ports" in service_config:
-                        ports = service_config["ports"]
-                        if isinstance(ports, list):
-                            for _i, port_spec in enumerate(ports):
-                                if isinstance(port_spec, str):
-                                    if ":" in port_spec:
-                                        parts = port_spec.split(":")
-                                        try:
-                                            int(parts[0])  # host port
-                                            int(parts[1])  # container port
-                                        except (ValueError, IndexError):
-                                            service_issues.append(
-                                                f"Service '{service_name}': Invalid port specification '{port_spec}'"
-                                            )
-                                elif isinstance(port_spec, dict):
-                                    if "target" not in port_spec:
-                                        service_issues.append(
-                                            f"Service '{service_name}': Port object missing 'target' field"
-                                        )
-
-                    # Validate volume specifications
-                    if "volumes" in service_config:
-                        volumes = service_config["volumes"]
-                        if isinstance(volumes, list):
-                            for volume_spec in volumes:
-                                if isinstance(volume_spec, str):
-                                    if ":" not in volume_spec and not volume_spec.startswith("/"):
-                                        service_issues.append(
-                                            f"Service '{service_name}': Invalid volume specification '{volume_spec}'"
-                                        )
-
-                issues.extend(service_issues)
-                details["validation_checks"]["service_validation"] = {
-                    "passed": len(service_issues) == 0,
-                    "issues_found": len(service_issues),
-                }
+            self._validate_services(compose_data.get("services", {}), issues, details)
 
             details["issues"] = issues
             return len(issues) == 0, issues, details
@@ -150,6 +66,118 @@ class StackValidation:
             details["validation_checks"]["general_error"] = {"passed": False, "error": error_msg}
             details["issues"] = issues
             return False, issues, details
+
+    def _validate_yaml_syntax(self, compose_content: str, issues: list[str], details: dict) -> dict | None:
+        """Validate YAML syntax and return parsed data."""
+        import yaml
+
+        try:
+            compose_data = yaml.safe_load(compose_content)
+            details["syntax_valid"] = True
+            details["validation_checks"]["yaml_syntax"] = {"passed": True}
+            return compose_data
+        except yaml.YAMLError as e:
+            issues.append(f"YAML syntax error: {str(e)}")
+            details["validation_checks"]["yaml_syntax"] = {"passed": False, "error": str(e)}
+            details["issues"] = issues
+            return None
+
+    def _validate_compose_structure(self, compose_data: Any, issues: list[str], details: dict) -> bool:
+        """Validate basic compose file structure."""
+        if not isinstance(compose_data, dict):
+            issues.append("Compose file must be a YAML object")
+            details["validation_checks"]["structure"] = {
+                "passed": False,
+                "error": "Not a YAML object",
+            }
+            details["issues"] = issues
+            return False
+
+        # Check for required sections
+        if "services" not in compose_data:
+            issues.append("No 'services' section found")
+            details["validation_checks"]["services_section"] = {
+                "passed": False,
+                "error": "Missing services section",
+            }
+            return False
+
+        services = compose_data["services"]
+        if not isinstance(services, dict) or len(services) == 0:
+            issues.append("'services' section is empty or invalid")
+            details["validation_checks"]["services_section"] = {
+                "passed": False,
+                "error": "Empty or invalid services",
+            }
+            return False
+
+        details["services_found"] = len(services)
+        details["validation_checks"]["services_section"] = {
+            "passed": True,
+            "count": len(services),
+        }
+        return True
+
+    def _validate_services(self, services: dict, issues: list[str], details: dict) -> None:
+        """Validate individual services configuration."""
+        service_issues = []
+
+        for service_name, service_config in services.items():
+            if not isinstance(service_config, dict):
+                service_issues.append(
+                    f"Service '{service_name}': Invalid configuration (not an object)"
+                )
+                continue
+
+            # Check for image or build
+            if "image" not in service_config and "build" not in service_config:
+                service_issues.append(
+                    f"Service '{service_name}': Missing 'image' or 'build' directive"
+                )
+
+            # Validate port and volume specifications
+            self._validate_service_ports(service_name, service_config.get("ports"), service_issues)
+            self._validate_service_volumes(service_name, service_config.get("volumes"), service_issues)
+
+        issues.extend(service_issues)
+        details["validation_checks"]["service_validation"] = {
+            "passed": len(service_issues) == 0,
+            "issues_found": len(service_issues),
+        }
+
+    def _validate_service_ports(self, service_name: str, ports: Any, service_issues: list[str]) -> None:
+        """Validate service port specifications."""
+        if ports is None or not isinstance(ports, list):
+            return
+
+        for port_spec in ports:
+            if isinstance(port_spec, str):
+                if ":" in port_spec:
+                    parts = port_spec.split(":")
+                    try:
+                        int(parts[0])  # host port
+                        int(parts[1])  # container port
+                    except (ValueError, IndexError):
+                        service_issues.append(
+                            f"Service '{service_name}': Invalid port specification '{port_spec}'"
+                        )
+            elif isinstance(port_spec, dict):
+                if "target" not in port_spec:
+                    service_issues.append(
+                        f"Service '{service_name}': Port object missing 'target' field"
+                    )
+
+    def _validate_service_volumes(self, service_name: str, volumes: Any, service_issues: list[str]) -> None:
+        """Validate service volume specifications."""
+        if volumes is None or not isinstance(volumes, list):
+            return
+
+        for volume_spec in volumes:
+            if isinstance(volume_spec, str):
+                if ":" not in volume_spec and not volume_spec.startswith("/"):
+                    service_issues.append(
+                        f"Service '{service_name}': Invalid volume specification '{volume_spec}'"
+                    )
 
     async def check_disk_space(
         self, host: DockerHost, estimated_size: int
@@ -279,45 +307,66 @@ class StackValidation:
             import yaml
 
             compose_data = yaml.safe_load(compose_content)
+            if not compose_data:
+                return []
+
             exposed_ports = []
-
-            # Parse services for port mappings
             services = compose_data.get("services", {})
+
             for _service_name, service_config in services.items():
-                ports = service_config.get("ports", [])
-                for port_spec in ports:
-                    if isinstance(port_spec, str):
-                        # Format: "host_port:container_port" or "port"
-                        if ":" in port_spec:
-                            host_port = port_spec.split(":")[0]
-                        else:
-                            host_port = port_spec
+                service_ports = self._extract_service_ports(service_config)
+                exposed_ports.extend(service_ports)
 
-                        try:
-                            port_num = int(host_port)
-                            if port_num not in exposed_ports:
-                                exposed_ports.append(port_num)
-                        except ValueError:
-                            continue
-                    elif isinstance(port_spec, int):
-                        if port_spec not in exposed_ports:
-                            exposed_ports.append(port_spec)
-                    elif isinstance(port_spec, dict):
-                        # Long syntax: {target: 80, host_ip: "0.0.0.0", published: 8080}
-                        published_port = port_spec.get("published")
-                        if published_port and isinstance(published_port, int | str):
-                            try:
-                                port_num = int(published_port)
-                                if port_num not in exposed_ports:
-                                    exposed_ports.append(port_num)
-                            except ValueError:
-                                continue
-
-            return sorted(exposed_ports)
+            return sorted(list(set(exposed_ports)))  # Remove duplicates and sort
 
         except Exception as e:
             self.logger.warning("Failed to parse ports from compose file", error=str(e))
             return []
+
+    def _extract_service_ports(self, service_config: dict) -> list[int]:
+        """Extract ports from a single service configuration."""
+        ports = service_config.get("ports", [])
+        service_ports = []
+
+        for port_spec in ports:
+            parsed_port = self._parse_port_specification(port_spec)
+            if parsed_port is not None:
+                service_ports.append(parsed_port)
+
+        return service_ports
+
+    def _parse_port_specification(self, port_spec) -> int | None:
+        """Parse a single port specification into a port number."""
+        if isinstance(port_spec, str):
+            return self._parse_port_string(port_spec)
+        elif isinstance(port_spec, int):
+            return port_spec
+        elif isinstance(port_spec, dict):
+            return self._parse_port_dict(port_spec)
+        else:
+            return None
+
+    def _parse_port_string(self, port_spec: str) -> int | None:
+        """Parse string format ports like 'host_port:container_port' or 'port'."""
+        try:
+            if ":" in port_spec:
+                host_port = port_spec.split(":")[0]
+            else:
+                host_port = port_spec
+
+            return int(host_port)
+        except ValueError:
+            return None
+
+    def _parse_port_dict(self, port_spec: dict) -> int | None:
+        """Parse dictionary format ports like {target: 80, published: 8080}."""
+        published_port = port_spec.get("published")
+        if published_port and isinstance(published_port, int | str):
+            try:
+                return int(published_port)
+            except ValueError:
+                return None
+        return None
 
     async def check_port_conflicts(
         self, host: DockerHost, ports: list[int]

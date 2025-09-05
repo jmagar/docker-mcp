@@ -686,14 +686,11 @@ class ZFSTransfer(BaseTransfer):
         Args:
             source_host: Source host configuration
             target_host: Target host configuration
-            service_paths: List of service paths to transfer (e.g., ['/mnt/appdata/test-mcp-simple/html', '/mnt/appdata/test-mcp-simple/config'])
+            service_paths: List of service paths to transfer
 
         Returns:
             Transfer result with per-service statistics
         """
-        transfer_results = []
-        overall_success = True
-
         self.logger.info(
             "Starting multi-service ZFS transfer",
             services_count=len(service_paths),
@@ -702,25 +699,47 @@ class ZFSTransfer(BaseTransfer):
             service_paths=service_paths,
         )
 
+        transfer_results = []
+
         # Group paths by their containing dataset to avoid duplicate transfers
+        datasets_to_transfer = await self._group_paths_by_dataset(
+            source_host, target_host, service_paths, transfer_results
+        )
+
+        # Transfer each unique dataset
+        await self._transfer_datasets(
+            source_host, target_host, datasets_to_transfer, transfer_results
+        )
+
+        # Build and return final result
+        return self._build_transfer_result(
+            service_paths, datasets_to_transfer, transfer_results
+        )
+
+    async def _group_paths_by_dataset(
+        self,
+        source_host: DockerHost,
+        target_host: DockerHost,
+        service_paths: list[str],
+        transfer_results: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Group service paths by their containing datasets."""
         datasets_to_transfer = {}
 
         for service_path in service_paths:
             try:
-                # Ensure dataset exists on source side
                 source_dataset = await self.ensure_service_dataset_exists(source_host, service_path)
 
                 # Calculate target service path
-                target_service_path = service_path.replace(
-                    source_host.appdata_path, target_host.appdata_path
-                )
+                source_appdata = source_host.appdata_path or "/opt/appdata"
+                target_appdata = target_host.appdata_path or "/opt/appdata"
+                target_service_path = service_path.replace(source_appdata, target_appdata)
 
-                # Ensure dataset exists on target side
                 target_dataset = await self.ensure_service_dataset_exists(
                     target_host, target_service_path
                 )
 
-                # Group by dataset - all paths in same dataset will be transferred together
+                # Group by dataset
                 if source_dataset not in datasets_to_transfer:
                     datasets_to_transfer[source_dataset] = {
                         "paths": [],
@@ -734,29 +753,32 @@ class ZFSTransfer(BaseTransfer):
                 self.logger.error(
                     "Failed to determine dataset for path", service_path=service_path, error=str(e)
                 )
-                transfer_results.append(
-                    {
-                        "success": False,
-                        "service_name": service_name,
-                        "service_path": service_path,
-                        "error": str(e),
-                    }
-                )
+                transfer_results.append({
+                    "success": False,
+                    "service_name": service_name,
+                    "service_path": service_path,
+                    "error": str(e),
+                })
 
-        # Transfer each unique dataset
+        return datasets_to_transfer
+
+    async def _transfer_datasets(
+        self,
+        source_host: DockerHost,
+        target_host: DockerHost,
+        datasets_to_transfer: dict[str, dict[str, Any]],
+        transfer_results: list[dict[str, Any]]
+    ) -> None:
+        """Transfer each unique dataset."""
         for source_dataset, dataset_info in datasets_to_transfer.items():
             try:
-                # Get the dataset base path (mountpoint)
                 dataset_base_path = await self._get_dataset_mountpoint(source_host, source_dataset)
                 if not dataset_base_path:
                     raise ZFSError(f"Could not determine mountpoint for dataset {source_dataset}")
 
-                # Use the pre-determined target dataset
                 target_dataset = dataset_info["target_dataset"]
-
-                # Target path (mountpoint)
-                target_service_path = dataset_base_path.replace(
-                    source_host.appdata_path, target_host.appdata_path
+                target_service_path = self._calculate_target_path(
+                    source_host, target_host, dataset_base_path
                 )
 
                 self.logger.info(
@@ -776,80 +798,107 @@ class ZFSTransfer(BaseTransfer):
                     target_dataset=target_dataset,
                 )
 
-                # Mark all paths in this dataset as transferred
-                if result.get("success", False):
-                    for path in dataset_info["paths"]:
-                        path_name = path.split("/")[-1]
-                        transfer_results.append(
-                            {
-                                "success": True,
-                                "service_name": path_name,
-                                "service_path": path,
-                                "source_dataset": source_dataset,
-                                "target_dataset": target_dataset,
-                                "dataset_transfer": True,  # Indicates this was part of dataset transfer
-                            }
-                        )
-
-                    self.logger.info(
-                        "Dataset transfer completed successfully",
-                        source_dataset=source_dataset,
-                        target_dataset=target_dataset,
-                        paths_transferred=len(dataset_info["paths"]),
-                    )
-                else:
-                    overall_success = False
-                    for path in dataset_info["paths"]:
-                        path_name = path.split("/")[-1]
-                        transfer_results.append(
-                            {
-                                "success": False,
-                                "service_name": path_name,
-                                "service_path": path,
-                                "source_dataset": source_dataset,
-                                "target_dataset": target_dataset,
-                                "error": result.get("error", "Dataset transfer failed"),
-                            }
-                        )
-
-                    self.logger.error(
-                        "Dataset transfer failed",
-                        source_dataset=source_dataset,
-                        error=result.get("error", "Unknown error"),
-                    )
+                # Handle transfer results
+                self._handle_dataset_transfer_result(
+                    result, dataset_info, source_dataset, target_dataset, transfer_results
+                )
 
             except Exception as e:
-                overall_success = False
-                self.logger.error(
-                    "Dataset transfer failed", source_dataset=source_dataset, error=str(e)
+                self._handle_dataset_transfer_error(
+                    e, dataset_info, source_dataset, transfer_results
                 )
 
-                # Mark all paths in this dataset as failed
-                for path in dataset_info["paths"]:
-                    path_name = path.split("/")[-1]
-                    transfer_results.append(
-                        {
-                            "success": False,
-                            "service_name": path_name,
-                            "service_path": path,
-                            "source_dataset": source_dataset,
-                            "error": str(e),
-                        }
-                    )
+    def _calculate_target_path(self, source_host: DockerHost, target_host: DockerHost, dataset_base_path: str) -> str:
+        """Calculate target path from source dataset base path."""
+        source_appdata = source_host.appdata_path or "/opt/appdata"
+        target_appdata = target_host.appdata_path or "/opt/appdata"
+        return dataset_base_path.replace(source_appdata, target_appdata)
 
-        # Calculate final statistics
+    def _handle_dataset_transfer_result(
+        self,
+        result: dict[str, Any],
+        dataset_info: dict[str, Any],
+        source_dataset: str,
+        target_dataset: str,
+        transfer_results: list[dict[str, Any]]
+    ) -> None:
+        """Handle the result of a dataset transfer."""
+        if result.get("success", False):
+            for path in dataset_info["paths"]:
+                path_name = path.split("/")[-1]
+                transfer_results.append({
+                    "success": True,
+                    "service_name": path_name,
+                    "service_path": path,
+                    "source_dataset": source_dataset,
+                    "target_dataset": target_dataset,
+                    "dataset_transfer": True,
+                })
+
+            self.logger.info(
+                "Dataset transfer completed successfully",
+                source_dataset=source_dataset,
+                target_dataset=target_dataset,
+                paths_transferred=len(dataset_info["paths"]),
+            )
+        else:
+            for path in dataset_info["paths"]:
+                path_name = path.split("/")[-1]
+                transfer_results.append({
+                    "success": False,
+                    "service_name": path_name,
+                    "service_path": path,
+                    "source_dataset": source_dataset,
+                    "target_dataset": target_dataset,
+                    "error": result.get("error", "Dataset transfer failed"),
+                })
+
+            self.logger.error(
+                "Dataset transfer failed",
+                source_dataset=source_dataset,
+                error=result.get("error", "Unknown error"),
+            )
+
+    def _handle_dataset_transfer_error(
+        self,
+        error: Exception,
+        dataset_info: dict[str, Any],
+        source_dataset: str,
+        transfer_results: list[dict[str, Any]]
+    ) -> None:
+        """Handle errors during dataset transfer."""
+        self.logger.error(
+            "Dataset transfer failed", source_dataset=source_dataset, error=str(error)
+        )
+
+        for path in dataset_info["paths"]:
+            path_name = path.split("/")[-1]
+            transfer_results.append({
+                "success": False,
+                "service_name": path_name,
+                "service_path": path,
+                "source_dataset": source_dataset,
+                "error": str(error),
+            })
+
+    def _build_transfer_result(
+        self,
+        service_paths: list[str],
+        datasets_to_transfer: dict[str, dict[str, Any]],
+        transfer_results: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Build the final transfer result with statistics."""
         successful_services = [r for r in transfer_results if r.get("success", False)]
         failed_services = [r for r in transfer_results if not r.get("success", False)]
-        datasets_transferred = len(
-            [
-                d
-                for d in datasets_to_transfer.keys()
-                if any(
-                    r.get("success", False) and r.get("source_dataset") == d
-                    for r in transfer_results
-                )
-            ]
-        )
+        overall_success = len(failed_services) == 0
+
+        datasets_transferred = len([
+            d for d in datasets_to_transfer.keys()
+            if any(
+                r.get("success", False) and r.get("source_dataset") == d
+                for r in transfer_results
+            )
+        ])
 
         result = {
             "success": overall_success,

@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,9 @@ class StackTools:
         """
         try:
             client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+
             loop = asyncio.get_event_loop()
 
             # Get all containers and group by compose project using Docker SDK
@@ -489,94 +493,33 @@ class StackTools:
         """Execute stack command via SSH for all stack operations."""
         try:
             # Build compose arguments for the action
-            compose_args = []
-
-            if action == "ps":
-                compose_args = ["ps", "--format", "json"]
-            elif action == "down":
-                compose_args = ["down"]
-                if options.get("volumes", False):
-                    compose_args.append("--volumes")
-                if options.get("remove_orphans", False):
-                    compose_args.append("--remove-orphans")
-            elif action == "restart":
-                compose_args = ["restart"]
-                if options.get("timeout"):
-                    compose_args.extend(["--timeout", str(options["timeout"])])
-            elif action == "logs":
-                compose_args = ["logs"]
-                if options.get("follow", False):
-                    compose_args.append("--follow")
-                if options.get("tail"):
-                    compose_args.extend(["--tail", str(options["tail"])])
-            elif action == "pull":
-                compose_args = ["pull"]
-                if options.get("ignore_pull_failures", False):
-                    compose_args.append("--ignore-pull-failures")
-            elif action == "build":
-                compose_args = ["build"]
-                if options.get("no_cache", False):
-                    compose_args.append("--no-cache")
-                if options.get("pull", False):
-                    compose_args.append("--pull")
-            elif action == "up":
-                compose_args = ["up", "-d"]
-                if options.get("force_recreate", False):
-                    compose_args.append("--force-recreate")
-                if options.get("build", False):
-                    compose_args.append("--build")
-                if options.get("pull", True):
-                    compose_args.extend(["--pull", "always"])
-            else:
-                return self._build_error_response(
-                    host_id, stack_name, action, f"Action '{action}' not supported"
-                )
+            compose_args = self._build_compose_args(action, options)
+            if isinstance(compose_args, dict):  # Error response
+                return compose_args
 
             # Add service filter if specified
-            if options.get("services"):
-                services = options["services"]
-                if isinstance(services, list):
-                    compose_args.extend(services)
-                else:
-                    compose_args.append(str(services))
+            self._add_service_filter(compose_args, options)
 
             # Get Docker context for SSH connection info
             context_name = await self.context_manager.ensure_context(host_id)
 
-            # For stacks with compose files, use the full path
-            # For project-only stacks, execute in a default directory
-            if compose_info["exists"]:
-                compose_file_path = compose_info["path"]
-            else:
-                # For project-only stacks, we need to determine where to execute
-                # This is for cases where stack was created without deploy_stack
-                # Default to a standard location or fail gracefully
-                if action == "up":
-                    return self._build_error_response(
-                        host_id,
-                        stack_name,
-                        action,
-                        f"No compose file found for stack '{stack_name}'. Use deploy_stack for new deployments.",
-                    )
-                # For other actions on project-only stacks, we can't proceed without a compose file
-                return self._build_error_response(
-                    host_id,
-                    stack_name,
-                    action,
-                    f"Cannot {action} stack '{stack_name}': no compose file found. Stack may not exist or was not deployed via this tool.",
-                )
+            # Validate compose file exists for the action
+            compose_file_validation = self._validate_compose_file_exists(
+                compose_info, action, host_id, stack_name
+            )
+            if isinstance(compose_file_validation, dict):  # Error response
+                return compose_file_validation
 
-            # Execute via SSH using the same method as deploy_stack
-            # Use operation-specific timeouts: 300s for up/build, 60s for logs/ps
-            timeout = 300 if action in ["up", "build"] else 60
+            compose_file_path = compose_file_validation
+
+            # Execute via SSH with appropriate timeout
+            timeout = self._determine_timeout(action)
             result = await self._execute_compose_with_file(
                 context_name, stack_name, compose_file_path, compose_args, None, timeout
             )
 
             # Parse action-specific outputs
-            output_data = None
-            if action == "ps":
-                output_data = self._parse_ps_output_from_ssh(result)
+            output_data = self._parse_action_output(action, result)
 
             logger.info(
                 f"Stack {action} completed via SSH",
@@ -600,6 +543,130 @@ class StackTools:
 
         except Exception as e:
             return self._build_error_response(host_id, stack_name, action, str(e))
+
+    def _build_compose_args(self, action: str, options: dict[str, Any]) -> list[str] | dict[str, Any]:
+        """Build compose arguments based on action and options."""
+        # Get the argument builder for the action
+        builders = self._get_compose_args_builders()
+        builder = builders.get(action)
+
+        if builder:
+            return builder(options)
+        else:
+            # Return error response for unsupported actions
+            return {
+                "success": False,
+                "error": f"Action '{action}' not supported",
+                "timestamp": datetime.now().isoformat(),
+            }
+
+    def _get_compose_args_builders(self) -> dict[str, Callable]:
+        """Get mapping of actions to their argument builders."""
+        return {
+            "ps": self._build_ps_args,
+            "down": self._build_down_args,
+            "restart": self._build_restart_args,
+            "logs": self._build_logs_args,
+            "pull": self._build_pull_args,
+            "build": self._build_build_args,
+            "up": self._build_up_args,
+        }
+
+    def _build_ps_args(self, options: dict[str, Any]) -> list[str]:
+        """Build arguments for ps action."""
+        return ["ps", "--format", "json"]
+
+    def _build_down_args(self, options: dict[str, Any]) -> list[str]:
+        """Build arguments for down action."""
+        args = ["down"]
+        if options.get("volumes", False):
+            args.append("--volumes")
+        if options.get("remove_orphans", False):
+            args.append("--remove-orphans")
+        return args
+
+    def _build_restart_args(self, options: dict[str, Any]) -> list[str]:
+        """Build arguments for restart action."""
+        args = ["restart"]
+        if options.get("timeout"):
+            args.extend(["--timeout", str(options["timeout"])])
+        return args
+
+    def _build_logs_args(self, options: dict[str, Any]) -> list[str]:
+        """Build arguments for logs action."""
+        args = ["logs"]
+        if options.get("follow", False):
+            args.append("--follow")
+        if options.get("tail"):
+            args.extend(["--tail", str(options["tail"])])
+        return args
+
+    def _build_pull_args(self, options: dict[str, Any]) -> list[str]:
+        """Build arguments for pull action."""
+        args = ["pull"]
+        if options.get("ignore_pull_failures", False):
+            args.append("--ignore-pull-failures")
+        return args
+
+    def _build_build_args(self, options: dict[str, Any]) -> list[str]:
+        """Build arguments for build action."""
+        args = ["build"]
+        if options.get("no_cache", False):
+            args.append("--no-cache")
+        if options.get("pull", False):
+            args.append("--pull")
+        return args
+
+    def _build_up_args(self, options: dict[str, Any]) -> list[str]:
+        """Build arguments for up action."""
+        args = ["up", "-d"]
+        if options.get("force_recreate", False):
+            args.append("--force-recreate")
+        if options.get("build", False):
+            args.append("--build")
+        if options.get("pull", True):
+            args.extend(["--pull", "always"])
+        return args
+
+    def _add_service_filter(self, compose_args: list[str], options: dict[str, Any]) -> None:
+        """Add service filter to compose arguments if specified."""
+        if options.get("services"):
+            services = options["services"]
+            if isinstance(services, list):
+                compose_args.extend(services)
+            else:
+                compose_args.append(str(services))
+
+    def _validate_compose_file_exists(
+        self, compose_info: dict[str, Any], action: str, host_id: str, stack_name: str
+    ) -> str | dict[str, Any]:
+        """Validate compose file exists and return path or error."""
+        if compose_info["exists"]:
+            return compose_info["path"]
+        else:
+            if action == "up":
+                return self._build_error_response(
+                    host_id,
+                    stack_name,
+                    action,
+                    f"No compose file found for stack '{stack_name}'. Use deploy_stack for new deployments.",
+                )
+            return self._build_error_response(
+                host_id,
+                stack_name,
+                action,
+                f"Cannot {action} stack '{stack_name}': no compose file found. Stack may not exist or was not deployed via this tool.",
+            )
+
+    def _determine_timeout(self, action: str) -> int:
+        """Determine timeout based on action type."""
+        return 300 if action in ["up", "build"] else 60
+
+    def _parse_action_output(self, action: str, result: str) -> dict[str, Any] | None:
+        """Parse action-specific outputs."""
+        if action == "ps":
+            return self._parse_ps_output_from_ssh(result)
+        return None
 
     def _parse_ps_output_from_ssh(self, result: str) -> dict[str, Any]:
         """Parse docker compose ps output from SSH execution."""

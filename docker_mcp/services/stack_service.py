@@ -226,251 +226,213 @@ class StackService:
 
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
-        import re
-
         try:
-            # Import dependencies for this handler
             from ..models.enums import ComposeAction
 
-            # Extract common parameters
-            host_id = params.get("host_id", "")
-            stack_name = params.get("stack_name", "")
-            compose_content = params.get("compose_content", "")
-            environment = params.get("environment", {})
-            pull_images = params.get("pull_images", True)
-            recreate = params.get("recreate", False)
-            follow = params.get("follow", False)
-            lines = params.get("lines", 100)
-            dry_run = params.get("dry_run", False)
-            options = params.get("options", {})
-            target_host_id = params.get("target_host_id", "")
-            remove_source = params.get("remove_source", False)
-            skip_stop_source = params.get("skip_stop_source", False)
-            start_target = params.get("start_target", True)
-
-            # Route to appropriate handler with validation
+            # Route to appropriate handler
             if action == ComposeAction.LIST:
-                # Validate required parameters for list action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for list action"}
-
-                result = await self.list_stacks(host_id)
-                # Return the full ToolResult to preserve formatting
-                return result
-
+                return await self._handle_list_action(**params)
             elif action == ComposeAction.VIEW:
-                # Validate required parameters for view action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for view action"}
-                if not stack_name:
-                    return {"success": False, "error": "stack_name is required for view action"}
-
-                result = await self.get_stack_compose_file(host_id, stack_name)
-                # Return the full ToolResult to preserve formatting
-                return result
-
+                return await self._handle_view_action(**params)
             elif action == ComposeAction.DEPLOY:
-                # Validate required parameters for deploy action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for deploy action"}
-                if not stack_name:
-                    return {"success": False, "error": "stack_name is required for deploy action"}
-                if not compose_content:
-                    return {
-                        "success": False,
-                        "error": "compose_content is required for deploy action",
-                    }
-
-                # Validate stack name format (DNS compliance - no underscores allowed)
-                if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", stack_name):
-                    return {
-                        "success": False,
-                        "error": "stack_name must be DNS-compliant: lowercase letters, numbers, and hyphens only (no underscores)",
-                    }
-
-                result = await self.deploy_stack(
-                    host_id, stack_name, compose_content, environment, pull_images, recreate
-                )
-                # Return the full ToolResult to preserve formatting
-                return result
-
+                return await self._handle_deploy_action(**params)
             elif action in ["up", "down", "restart", "build", "pull"]:
-                # Validate required parameters for stack management actions
-                if not host_id:
-                    return {"success": False, "error": f"host_id is required for {action} action"}
-                if not stack_name:
-                    return {
-                        "success": False,
-                        "error": f"stack_name is required for {action} action",
-                    }
-
-                result = await self.manage_stack(host_id, stack_name, action, options)
-                # Return the full ToolResult to preserve formatting
-                return result
-
+                return await self._handle_manage_action(action, **params)
             elif action == ComposeAction.LOGS:
-                # Validate required parameters for logs action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for logs action"}
-                if not stack_name:
-                    return {"success": False, "error": "stack_name is required for logs action"}
-
-                # Validate lines parameter
-                if lines < 1 or lines > 1000:
-                    return {"success": False, "error": "lines must be between 1 and 10000"}
-
-                # Implement stack logs using docker-compose logs command
-                try:
-                    if host_id not in self.config.hosts:
-                        return {"success": False, "error": f"Host {host_id} not found"}
-
-                    # Use stack service to execute docker-compose logs command
-                    logs_options = {"tail": str(lines), "follow": follow}
-
-                    result = await self.manage_stack(host_id, stack_name, "logs", logs_options)
-
-                    # Format the result for logs
-                    if hasattr(result, "structured_content") and result.structured_content:
-                        logs_data = result.structured_content
-                        # Extract logs from the result
-                        if "output" in logs_data:
-                            logs_lines = (
-                                logs_data["output"].split("\n") if logs_data["output"] else []
-                            )
-                            return {
-                                "success": True,
-                                "host_id": host_id,
-                                "stack_name": stack_name,
-                                "logs": logs_lines,
-                                "lines_requested": lines,
-                                "lines_returned": len(logs_lines),
-                                "follow": follow,
-                            }
-                        else:
-                            return logs_data
-                    else:
-                        return {"success": False, "error": "Failed to retrieve stack logs"}
-
-                except Exception as e:
-                    self.logger.error(
-                        "stack logs error",
-                        host_id=host_id,
-                        stack_name=stack_name,
-                        error=str(e),
-                    )
-                    return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
-
+                return await self._handle_logs_action(**params)
             elif action == ComposeAction.DISCOVER:
-                # Validate required parameters for discover action
-                if not host_id:
-                    return {"success": False, "error": "host_id is required for discover action"}
-
-                try:
-                    # Use ComposeManager via operations -> stack_tools
-                    compose_manager = self.operations.stack_tools.compose_manager
-                    discovery = await compose_manager.discover_compose_locations(host_id)
-
-                    return {
-                        "success": True,
-                        "host_id": host_id,
-                        "compose_discovery": discovery,
-                    }
-                except Exception as e:
-                    self.logger.error("compose discover error", host_id=host_id, error=str(e))
-                    return {
-                        "success": False,
-                        "error": f"Failed to discover compose paths: {str(e)}",
-                        "host_id": host_id,
-                    }
-
+                return await self._handle_discover_action(**params)
             elif action == ComposeAction.MIGRATE:
-                # Validate required parameters for migrate action
-                if not host_id:
-                    return {
-                        "success": False,
-                        "error": "host_id (source) is required for migrate action",
-                    }
-                if not target_host_id:
-                    return {
-                        "success": False,
-                        "error": "target_host_id is required for migrate action",
-                    }
-                if not stack_name:
-                    return {"success": False, "error": "stack_name is required for migrate action"}
-
-                # Call the migration service
-                result = await self.migrate_stack(
-                    source_host_id=host_id,
-                    target_host_id=target_host_id,
-                    stack_name=stack_name,
-                    skip_stop_source=skip_stop_source,
-                    start_target=start_target,
-                    remove_source=remove_source,
-                    dry_run=dry_run,
-                )
-
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content") and result.structured_content:
-                    migration_result = result.structured_content.copy()
-                    # Map 'overall_success' to 'success' for consistency with other actions
-                    if "overall_success" in migration_result:
-                        migration_result["success"] = migration_result["overall_success"]
-                    return migration_result
-                return {"success": True, "data": "Migration completed"}
-
-            elif action in [
-                ComposeAction.UP,
-                ComposeAction.DOWN,
-                ComposeAction.RESTART,
-                ComposeAction.BUILD,
-            ]:
-                # Validate required parameters for stack lifecycle actions
-                if not host_id:
-                    return {
-                        "success": False,
-                        "error": "host_id is required for stack lifecycle actions",
-                    }
-                if not stack_name:
-                    return {
-                        "success": False,
-                        "error": "stack_name is required for stack lifecycle actions",
-                    }
-
-                # Use the stack service to manage stack lifecycle
-                result = await self.manage_stack(
-                    host_id=host_id,
-                    stack_name=stack_name,
-                    action=action.value,  # Convert enum to string value
-                    options=options,
-                )
-
-                # Convert ToolResult to dict for consistency
-                if hasattr(result, "structured_content"):
-                    return result.structured_content or {
-                        "success": True,
-                        "data": f"Stack {action.value} completed",
-                    }
-                return result
-
+                return await self._handle_migrate_action(**params)
+            elif action in [ComposeAction.UP, ComposeAction.DOWN, ComposeAction.RESTART, ComposeAction.BUILD]:
+                return await self._handle_lifecycle_action(action, **params)
             else:
                 return {
                     "success": False,
                     "error": f"Unsupported action: {action.value if hasattr(action, 'value') else action}",
                     "supported_actions": [a.value for a in ComposeAction],
                 }
-
         except Exception as e:
             self.logger.error(
                 "stack service action error",
                 action=action,
-                host_id=host_id,
-                stack_name=stack_name,
+                host_id=params.get("host_id", ""),
+                stack_name=params.get("stack_name", ""),
                 error=str(e),
             )
             return {
                 "success": False,
                 "error": f"Service action failed: {str(e)}",
                 "action": action,
-                "host_id": host_id,
-                "stack_name": stack_name,
+                "host_id": params.get("host_id", ""),
+                "stack_name": params.get("stack_name", ""),
             }
+
+    async def _handle_list_action(self, **params) -> dict[str, Any]:
+        """Handle LIST action."""
+        host_id = params.get("host_id", "")
+        if not host_id:
+            return {"success": False, "error": "host_id is required for list action"}
+
+        result = await self.list_stacks(host_id)
+        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+
+    async def _handle_view_action(self, **params) -> dict[str, Any]:
+        """Handle VIEW action."""
+        host_id = params.get("host_id", "")
+        stack_name = params.get("stack_name", "")
+
+        if not host_id:
+            return {"success": False, "error": "host_id is required for view action"}
+        if not stack_name:
+            return {"success": False, "error": "stack_name is required for view action"}
+
+        result = await self.get_stack_compose_file(host_id, stack_name)
+        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+
+    async def _handle_deploy_action(self, **params) -> dict[str, Any]:
+        """Handle DEPLOY action."""
+        import re
+
+        host_id = params.get("host_id", "")
+        stack_name = params.get("stack_name", "")
+        compose_content = params.get("compose_content", "")
+        environment = params.get("environment", {})
+        pull_images = params.get("pull_images", True)
+        recreate = params.get("recreate", False)
+
+        if not host_id:
+            return {"success": False, "error": "host_id is required for deploy action"}
+        if not stack_name:
+            return {"success": False, "error": "stack_name is required for deploy action"}
+        if not compose_content:
+            return {"success": False, "error": "compose_content is required for deploy action"}
+
+        # Validate stack name format (DNS compliance)
+        if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", stack_name):
+            return {
+                "success": False,
+                "error": "stack_name must be DNS-compliant: lowercase letters, numbers, and hyphens only (no underscores)",
+            }
+
+        result = await self.deploy_stack(host_id, stack_name, compose_content, environment, pull_images, recreate)
+        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+
+    async def _handle_manage_action(self, action: str, **params) -> dict[str, Any]:
+        """Handle string-based manage actions."""
+        host_id = params.get("host_id", "")
+        stack_name = params.get("stack_name", "")
+        options = params.get("options", {})
+
+        if not host_id:
+            return {"success": False, "error": f"host_id is required for {action} action"}
+        if not stack_name:
+            return {"success": False, "error": f"stack_name is required for {action} action"}
+
+        result = await self.manage_stack(host_id, stack_name, action, options)
+        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+
+    async def _handle_logs_action(self, **params) -> dict[str, Any]:
+        """Handle LOGS action."""
+        host_id = params.get("host_id", "")
+        stack_name = params.get("stack_name", "")
+        follow = params.get("follow", False)
+        lines = params.get("lines", 100)
+
+        if not host_id:
+            return {"success": False, "error": "host_id is required for logs action"}
+        if not stack_name:
+            return {"success": False, "error": "stack_name is required for logs action"}
+        if lines < 1 or lines > 1000:
+            return {"success": False, "error": "lines must be between 1 and 10000"}
+
+        try:
+            if host_id not in self.config.hosts:
+                return {"success": False, "error": f"Host {host_id} not found"}
+
+            logs_options = {"tail": str(lines), "follow": follow}
+            result = await self.manage_stack(host_id, stack_name, "logs", logs_options)
+
+            if hasattr(result, "structured_content") and result.structured_content:
+                logs_data = result.structured_content
+                if "output" in logs_data:
+                    logs_lines = logs_data["output"].split("\n") if logs_data["output"] else []
+                    return {
+                        "success": True,
+                        "host_id": host_id,
+                        "stack_name": stack_name,
+                        "logs": logs_lines,
+                        "lines_requested": lines,
+                        "lines_returned": len(logs_lines),
+                        "follow": follow,
+                    }
+                return logs_data
+            return {"success": False, "error": "Failed to retrieve stack logs"}
+        except Exception as e:
+            self.logger.error("stack logs error", host_id=host_id, stack_name=stack_name, error=str(e))
+            return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
+
+    async def _handle_discover_action(self, **params) -> dict[str, Any]:
+        """Handle DISCOVER action."""
+        host_id = params.get("host_id", "")
+
+        if not host_id:
+            return {"success": False, "error": "host_id is required for discover action"}
+
+        try:
+            compose_manager = self.operations.stack_tools.compose_manager
+            discovery = await compose_manager.discover_compose_locations(host_id)
+            return {"success": True, "host_id": host_id, "compose_discovery": discovery}
+        except Exception as e:
+            self.logger.error("compose discover error", host_id=host_id, error=str(e))
+            return {"success": False, "error": f"Failed to discover compose paths: {str(e)}", "host_id": host_id}
+
+    async def _handle_migrate_action(self, **params) -> dict[str, Any]:
+        """Handle MIGRATE action."""
+        host_id = params.get("host_id", "")
+        target_host_id = params.get("target_host_id", "")
+        stack_name = params.get("stack_name", "")
+        skip_stop_source = params.get("skip_stop_source", False)
+        start_target = params.get("start_target", True)
+        remove_source = params.get("remove_source", False)
+        dry_run = params.get("dry_run", False)
+
+        if not host_id:
+            return {"success": False, "error": "host_id (source) is required for migrate action"}
+        if not target_host_id:
+            return {"success": False, "error": "target_host_id is required for migrate action"}
+        if not stack_name:
+            return {"success": False, "error": "stack_name is required for migrate action"}
+
+        result = await self.migrate_stack(
+            source_host_id=host_id,
+            target_host_id=target_host_id,
+            stack_name=stack_name,
+            skip_stop_source=skip_stop_source,
+            start_target=start_target,
+            remove_source=remove_source,
+            dry_run=dry_run,
+        )
+
+        if hasattr(result, "structured_content") and result.structured_content:
+            migration_result = result.structured_content.copy()
+            if "overall_success" in migration_result:
+                migration_result["success"] = migration_result["overall_success"]
+            return migration_result
+        return {"success": True, "data": "Migration completed"}
+
+    async def _handle_lifecycle_action(self, action, **params) -> dict[str, Any]:
+        """Handle ComposeAction enum lifecycle actions."""
+        host_id = params.get("host_id", "")
+        stack_name = params.get("stack_name", "")
+        options = params.get("options", {})
+
+        if not host_id:
+            return {"success": False, "error": "host_id is required for stack lifecycle actions"}
+        if not stack_name:
+            return {"success": False, "error": "stack_name is required for stack lifecycle actions"}
+
+        result = await self.manage_stack(host_id=host_id, stack_name=stack_name, action=action.value, options=options)
+        if hasattr(result, "structured_content"):
+            return result.structured_content or {"success": True, "data": f"Stack {action.value} completed"}
+        return {"success": False, "error": "Invalid result format"}

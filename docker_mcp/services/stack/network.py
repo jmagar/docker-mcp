@@ -8,6 +8,7 @@ Handles SSH connectivity, network speed testing, and transfer time calculations.
 import asyncio
 import subprocess
 import time
+from typing import Any
 
 import structlog
 
@@ -23,7 +24,7 @@ class StackNetwork:
 
     async def test_network_connectivity(
         self, source_host: DockerHost, target_host: DockerHost
-    ) -> tuple[bool, dict]:
+    ) -> tuple[bool, dict[str, Any]]:
         """Test network connectivity between source and target hosts.
 
         Args:
@@ -33,7 +34,7 @@ class StackNetwork:
         Returns:
             Tuple of (connectivity_ok: bool, details: dict)
         """
-        details = {
+        details: dict[str, Any] = {
             "source_host": source_host.hostname,
             "target_host": target_host.hostname,
             "tests": {},
@@ -177,9 +178,9 @@ class StackNetwork:
             details["tests"]["network_speed"] = speed_test
 
             # Overall connectivity assessment
-            connectivity_ok = ssh_tests.get("source_ssh", {}).get(
-                "success", False
-            ) and ssh_tests.get("target_ssh", {}).get("success", False)
+            source_success = ssh_tests.get("source_ssh", {}).get("success", False)
+            target_success = ssh_tests.get("target_ssh", {}).get("success", False)
+            connectivity_ok = bool(source_success and target_success)
 
             details["overall_connectivity"] = connectivity_ok
 
@@ -201,7 +202,23 @@ class StackNetwork:
         Returns:
             Dict with transfer time estimates and details
         """
-        estimates = {
+        estimates = self._create_base_estimates(data_size_bytes)
+
+        # Add actual network speed estimate if available
+        if network_speed_details and network_speed_details.get("success"):
+            self._add_actual_network_estimate(estimates, network_speed_details)
+
+        # Add standard speed estimates
+        self._add_standard_speed_estimates(estimates)
+
+        # Add overhead to all estimates
+        self._add_overhead_estimates(estimates)
+
+        return estimates
+
+    def _create_base_estimates(self, data_size_bytes: int) -> dict:
+        """Create the base estimates structure with data size information."""
+        return {
             "data_size_bytes": data_size_bytes,
             "data_size_human": format_size(data_size_bytes),
             "compressed_size_bytes": int(data_size_bytes * 0.3),  # Assume 70% compression
@@ -209,51 +226,58 @@ class StackNetwork:
             "estimates": {},
         }
 
-        # Use network speed if available, otherwise use standard estimates
-        if network_speed_details and network_speed_details.get("success"):
-            try:
-                # Parse network speed (e.g., "50.2 Mbps")
-                speed_str = network_speed_details.get("estimated_speed", "10.0 Mbps")
-                speed_value = float(speed_str.split()[0])
-                speed_unit = speed_str.split()[1] if len(speed_str.split()) > 1 else "Mbps"
+    def _add_actual_network_estimate(self, estimates: dict, network_speed_details: dict) -> None:
+        """Add actual network speed estimate based on speed test results."""
+        try:
+            speed_str = network_speed_details.get("estimated_speed", "10.0 Mbps")
+            bytes_per_second = self._parse_network_speed(speed_str)
 
-                # Convert to bytes per second
-                if speed_unit.lower() == "mbps":
-                    bytes_per_second = (speed_value * 1_000_000) / 8  # Mbps to bytes/sec
-                elif speed_unit.lower() == "gbps":
-                    bytes_per_second = (speed_value * 1_000_000_000) / 8  # Gbps to bytes/sec
-                else:
-                    bytes_per_second = speed_value / 8  # Assume bps
+            if bytes_per_second > 0:
+                compressed_bytes = float(estimates["compressed_size_bytes"])
+                transfer_seconds = compressed_bytes / bytes_per_second
 
-                # Calculate transfer time for compressed data
-                compressed_bytes = estimates["compressed_size_bytes"]
-                if bytes_per_second > 0:
-                    transfer_seconds = compressed_bytes / bytes_per_second
+                estimates["estimates"]["actual_network"] = {
+                    "method": "measured",
+                    "speed": speed_str,
+                    "time_seconds": transfer_seconds,
+                    "time_human": self.format_time(transfer_seconds),
+                    "description": f"Based on actual network speed test ({speed_str})",
+                }
 
-                    estimates["estimates"]["actual_network"] = {
-                        "method": "measured",
-                        "speed": speed_str,
-                        "time_seconds": transfer_seconds,
-                        "time_human": self.format_time(transfer_seconds),
-                        "description": f"Based on actual network speed test ({speed_str})",
-                    }
+        except (ValueError, IndexError, TypeError):
+            # Fall back to estimates if parsing fails
+            pass
 
-            except (ValueError, IndexError, TypeError):
-                # Fall back to estimates if parsing fails
-                pass
+    def _parse_network_speed(self, speed_str: str) -> float:
+        """Parse network speed string and convert to bytes per second."""
+        parts = speed_str.split()
+        speed_value = float(parts[0])
+        speed_unit = parts[1] if len(parts) > 1 else "Mbps"
 
-        # Always provide standard estimates for comparison
+        # Convert to bytes per second
+        if speed_unit.lower() == "mbps":
+            return (speed_value * 1_000_000) / 8  # Mbps to bytes/sec
+        elif speed_unit.lower() == "gbps":
+            return (speed_value * 1_000_000_000) / 8  # Gbps to bytes/sec
+        else:
+            return speed_value / 8  # Assume bps
+
+    def _add_standard_speed_estimates(self, estimates: dict) -> None:
+        """Add standard speed estimates for comparison."""
         standard_speeds = [
             ("10 Mbps", "Slow broadband", 10 * 1_000_000 / 8),
             ("100 Mbps", "Fast broadband", 100 * 1_000_000 / 8),
             ("1 Gbps", "Gigabit network", 1 * 1_000_000_000 / 8),
         ]
 
-        compressed_bytes = estimates["compressed_size_bytes"]
+        compressed_bytes = float(estimates["compressed_size_bytes"])
+
         for speed_name, description, bytes_per_sec in standard_speeds:
             if bytes_per_sec > 0:
                 transfer_seconds = compressed_bytes / bytes_per_sec
-                estimates["estimates"][speed_name.replace(" ", "_").lower()] = {
+                key = speed_name.replace(" ", "_").lower()
+
+                estimates["estimates"][key] = {
                     "method": "estimate",
                     "speed": speed_name,
                     "time_seconds": transfer_seconds,
@@ -261,15 +285,13 @@ class StackNetwork:
                     "description": description,
                 }
 
-        # Add overhead estimates (15-25% additional time for setup, verification, etc.)
-        if estimates["estimates"]:
-            for _estimate_key, estimate_data in estimates["estimates"].items():
-                base_time = estimate_data["time_seconds"]
-                with_overhead = base_time * 1.2  # 20% overhead
-                estimate_data["time_with_overhead"] = with_overhead
-                estimate_data["time_with_overhead_human"] = self.format_time(with_overhead)
-
-        return estimates
+    def _add_overhead_estimates(self, estimates: dict) -> None:
+        """Add overhead estimates (20% additional time for setup, verification, etc.)."""
+        for estimate_data in estimates["estimates"].values():
+            base_time = estimate_data["time_seconds"]
+            with_overhead = base_time * 1.2  # 20% overhead
+            estimate_data["time_with_overhead"] = with_overhead
+            estimate_data["time_with_overhead_human"] = self.format_time(with_overhead)
 
     def format_time(self, seconds: float) -> str:
         """Format seconds into human-readable time string."""
