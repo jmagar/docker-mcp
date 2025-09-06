@@ -17,5 +17,4 @@ class ConfigurationError(DockerMCPError):
     """Configuration validation or loading failed."""
 
 
-class HostNotFoundError(DockerMCPError):
-    """Requested host is not configured."""
+# Removed unused HostNotFoundError to reduce unused exceptions surface.

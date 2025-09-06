@@ -10,7 +10,11 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, cast
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
+    from docker_mcp.services import ContainerService, HostService, StackService
 
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
@@ -276,12 +280,12 @@ class DockerMCPServer:
         # Initialize service layer
         from .services.logs import LogsService
 
-        self.logs_service = LogsService(config, self.context_manager)
-        self.host_service = HostService(config, self.context_manager)
-        self.container_service = ContainerService(
+        self.logs_service: LogsService = LogsService(config, self.context_manager)
+        self.host_service: HostService = HostService(config, self.context_manager)
+        self.container_service: ContainerService = ContainerService(
             config, self.context_manager, self.logs_service
         )
-        self.stack_service = StackService(config, self.context_manager, self.logs_service)
+        self.stack_service: StackService = StackService(config, self.context_manager, self.logs_service)
         self.config_service = ConfigService(config, self.context_manager)
         self.cleanup_service = CleanupService(config)
 
@@ -359,9 +363,11 @@ class DockerMCPServer:
             from fastmcp.server.dependencies import get_access_token  # type: ignore
 
             @self.app.tool  # type: ignore[attr-defined]
-            async def whoami() -> dict:
+            async def whoami() -> dict[str, Any]:
                 """Return identity claims for the authenticated user."""
                 token = get_access_token()
+                if token is None:
+                    return {}
                 # token.claims should contain standard OIDC-style claims
                 return {
                     "iss": token.claims.get("iss"),
@@ -372,9 +378,11 @@ class DockerMCPServer:
                 }
 
             @self.app.tool  # type: ignore[attr-defined]
-            async def get_user_info() -> dict:
+            async def get_user_info() -> dict[str, Any]:
                 """Return simplified user info for authenticated Google user."""
                 token = get_access_token()
+                if token is None:
+                    return {}
                 return {
                     "google_id": token.claims.get("sub"),
                     "email": token.claims.get("email"),
@@ -383,7 +391,11 @@ class DockerMCPServer:
                 }
         except Exception:
             # If dependencies are unavailable (e.g., auth not enabled), skip these helpers
-            pass
+            # Log at debug level to avoid noisy errors when auth isn't configured
+            self.logger.debug(
+                "Auth helpers unavailable; skipping whoami/get_user_info tools",
+                exc_info=True,
+            )
 
         # Register consolidated tools (3 tools replace 13 individual tools)
         self.app.tool(
@@ -477,15 +489,21 @@ class DockerMCPServer:
         except ValueError:
             timeout = None
 
-        # Build provider with either explicit env creds or None (provider can read env directly)
-        provider = GoogleProvider(
-            client_id=client_id,
-            client_secret=client_secret,
-            base_url=base_url,
-            required_scopes=required_scopes,
-            redirect_path=redirect_path,
-            timeout_seconds=timeout,
-        )
+        # Build provider with explicit env creds or let provider use defaults
+        kwargs: dict[str, Any] = {
+            "base_url": base_url,
+            "required_scopes": required_scopes,
+            "redirect_path": redirect_path,
+        }
+
+        if client_id:
+            kwargs["client_id"] = client_id
+        if client_secret:
+            kwargs["client_secret"] = client_secret
+        if timeout is not None:
+            kwargs["timeout_seconds"] = timeout
+
+        provider = GoogleProvider(**kwargs)  # type: ignore[arg-type]
 
         # Optional hardening: restrict allowed client redirect URIs
         allowed_redirects = os.getenv(
@@ -495,9 +513,13 @@ class DockerMCPServer:
             try:
                 # property exists in FastMCP 2.12.x
                 patterns = [p.strip() for p in allowed_redirects.split(",") if p.strip()]
-                setattr(provider, "allowed_client_redirect_uris", patterns)
+                provider.allowed_client_redirect_uris = patterns
             except Exception:
-                pass
+                # Older FastMCP versions may not support this; log and continue
+                self.logger.debug(
+                    "Skipping allowed_client_redirect_uris; provider does not support or failed to set",
+                    exc_info=True,
+                )
 
         return provider
 
@@ -553,7 +575,7 @@ class DockerMCPServer:
             str, Field(default="", description="Path to SSH private key file")
         ] = "",
         description: Annotated[str, Field(default="", description="Host description")] = "",
-        tags: Annotated[list[str], Field(default_factory=list, description="Host tags")] = None,
+        tags: Annotated[list[str] | None, Field(default_factory=list, description="Host tags")] = None,
         compose_path: Annotated[
             str, Field(default="", description="Docker Compose file path")
         ] = "",
@@ -647,8 +669,8 @@ class DockerMCPServer:
                 zfs_capable=zfs_capable,
                 zfs_dataset=zfs_dataset,
                 port=port,
-                cleanup_type=cleanup_type if cleanup_type and cleanup_type in ['check', 'safe', 'moderate', 'aggressive'] else None,  # type: ignore[arg-type]
-                frequency=frequency if frequency and frequency in ['daily', 'weekly', 'monthly', 'custom'] else None,  # type: ignore[arg-type]
+                cleanup_type=cast(Any, cleanup_type if cleanup_type and cleanup_type in ['check', 'safe', 'moderate', 'aggressive'] else None),
+                frequency=cast(Any, frequency if frequency and frequency in ['daily', 'weekly', 'monthly', 'custom'] else None)
                 time=time if time else None,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,
@@ -665,24 +687,24 @@ class DockerMCPServer:
         # Delegate to service layer for business logic
         return await self.host_service.handle_action(
             action,
-            host_id=host_id,
-            ssh_host=ssh_host,
-            ssh_user=ssh_user,
-            ssh_port=ssh_port,
-            ssh_key_path=ssh_key_path,
-            description=description,
-            tags=tags,
-            compose_path=compose_path,
-            appdata_path=appdata_path,
-            enabled=enabled,
-            zfs_capable=zfs_capable,
-            zfs_dataset=zfs_dataset,
-            port=port,
-            cleanup_type=cleanup_type,
-            frequency=frequency,
-            time=time,
-            ssh_config_path=ssh_config_path,
-            selected_hosts=selected_hosts,
+            host_id=params.host_id,
+            ssh_host=params.ssh_host,
+            ssh_user=params.ssh_user,
+            ssh_port=params.ssh_port,
+            ssh_key_path=params.ssh_key_path,
+            description=params.description,
+            tags=params.tags,
+            compose_path=params.compose_path,
+            appdata_path=params.appdata_path,
+            enabled=params.enabled,
+            zfs_capable=params.zfs_capable,
+            zfs_dataset=params.zfs_dataset,
+            port=params.port,
+            cleanup_type=params.cleanup_type,
+            frequency=params.frequency,
+            time=params.time,
+            ssh_config_path=params.ssh_config_path,
+            selected_hosts=params.selected_hosts,
         )
 
     async def docker_container(
@@ -728,10 +750,6 @@ class DockerMCPServer:
           - Required: host_id, container_id
           - Optional: force, timeout
 
-        • build: Build/rebuild a container
-          - Required: host_id, container_id
-          - Optional: force, timeout
-
         • logs: Get container logs
           - Required: host_id, container_id
           - Optional: follow, lines
@@ -768,15 +786,15 @@ class DockerMCPServer:
         # Delegate to service layer for business logic
         return await self.container_service.handle_action(
             action,
-            host_id=host_id,
-            container_id=container_id,
-            all_containers=all_containers,
-            limit=limit,
-            offset=offset,
-            follow=follow,
-            lines=lines,
-            force=force,
-            timeout=timeout,
+            host_id=params.host_id,
+            container_id=params.container_id,
+            all_containers=params.all_containers,
+            limit=params.limit,
+            offset=params.offset,
+            follow=params.follow,
+            lines=params.lines,
+            force=params.force,
+            timeout=params.timeout,
         )
 
     async def docker_compose(
@@ -788,7 +806,7 @@ class DockerMCPServer:
             str, Field(default="", description="Docker Compose file content")
         ] = "",
         environment: Annotated[
-            dict[str, str], Field(default_factory=dict, description="Environment variables")
+            dict[str, str] | None, Field(default_factory=dict, description="Environment variables")
         ] = None,
         pull_images: Annotated[
             bool, Field(default=True, description="Pull images before deploying")
@@ -802,7 +820,7 @@ class DockerMCPServer:
             bool, Field(default=False, description="Perform a dry run without making changes")
         ] = False,
         options: Annotated[
-            dict[str, str],
+            dict[str, str] | None,
             Field(default_factory=dict, description="Additional options for the operation"),
         ] = None,
         target_host_id: Annotated[
@@ -880,20 +898,20 @@ class DockerMCPServer:
         # Delegate to service layer for business logic
         return await self.stack_service.handle_action(
             action,
-            host_id=host_id,
-            stack_name=stack_name,
-            compose_content=compose_content,
-            environment=environment,
-            pull_images=pull_images,
-            recreate=recreate,
-            follow=follow,
-            lines=lines,
-            dry_run=dry_run,
-            options=options,
-            target_host_id=target_host_id,
-            remove_source=remove_source,
-            skip_stop_source=skip_stop_source,
-            start_target=start_target,
+            host_id=params.host_id,
+            stack_name=params.stack_name,
+            compose_content=params.compose_content,
+            environment=params.environment,
+            pull_images=params.pull_images,
+            recreate=params.recreate,
+            follow=params.follow,
+            lines=params.lines,
+            dry_run=params.dry_run,
+            options=params.options,
+            target_host_id=params.target_host_id,
+            remove_source=params.remove_source,
+            skip_stop_source=params.skip_stop_source,
+            start_target=params.start_target,
         )
 
     async def add_docker_host(
@@ -1075,6 +1093,15 @@ class DockerMCPServer:
         # Recreate logs service with updated config
         from .services.logs import LogsService
         self.logs_service = LogsService(new_config, self.context_manager)
+        # Propagate the new logs service to dependent services
+        try:
+            self.container_service.logs_service = self.logs_service
+        except Exception:
+            pass
+        try:
+            self.stack_service.logs_service = self.logs_service
+        except Exception:
+            pass
 
         self.logger.info("Configuration updated", hosts=list(new_config.hosts.keys()))
 

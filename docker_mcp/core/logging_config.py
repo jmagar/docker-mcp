@@ -136,8 +136,4 @@ def get_middleware_logger() -> Any:
     return structlog.get_logger("middleware")
 
 
-def ensure_log_directory(log_dir: Path | str = Path("logs")) -> Path:
-    """Ensure log directory exists and return Path object."""
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return log_dir
+# Removed unused ensure_log_directory helper; server initializes log dir directly.

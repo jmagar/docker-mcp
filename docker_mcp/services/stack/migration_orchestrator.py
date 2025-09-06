@@ -1,18 +1,21 @@
 """Stack migration orchestrator."""
 
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from mcp.types import TextContent
 from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
 
 from ...core.config_loader import DockerMCPConfig
-from ...core.docker_context import DockerContextManager
+from ...utils import format_size
 from .migration_executor import StackMigrationExecutor
 from .network import StackNetwork
 from .risk_assessment import StackRiskAssessment
 from .validation import StackValidation
 from .volume_utils import StackVolumeUtils
-from ...utils import format_size
 
 
 class StackMigrationOrchestrator:
@@ -22,7 +25,11 @@ class StackMigrationOrchestrator:
     deployment verification, and rollback capabilities.
     """
 
-    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+    def __init__(
+        self,
+        config: DockerMCPConfig,
+        context_manager: "DockerContextManager",
+    ):
         """Initialize migration orchestrator and its dependencies."""
         self.config = config
         # Build internal module instances
@@ -124,7 +131,9 @@ class StackMigrationOrchestrator:
             self.logger.error("Migration orchestration failed", error=str(e))
             return self._create_error_result(f"Migration failed: {str(e)}", migration_data)
 
-    async def _validate_hosts(self, source_host_id: str, target_host_id: str, migration_steps: list):
+    async def _validate_hosts(
+        self, source_host_id: str, target_host_id: str, migration_steps: list[str]
+    ) -> ToolResult | tuple[Any, Any]:
         """Validate source and target hosts."""
         for host_id in [source_host_id, target_host_id]:
             is_valid, error_msg = self._validate_host(host_id)
@@ -139,7 +148,7 @@ class StackMigrationOrchestrator:
         migration_steps.append("✅ Host validation completed")
         return source_host, target_host
 
-    async def _retrieve_and_validate_compose(self, source_host_id: str, stack_name: str, migration_steps: list, migration_data: dict):
+    async def _retrieve_and_validate_compose(self, source_host_id: str, stack_name: str, migration_steps: list[str], migration_data: dict) -> ToolResult | tuple[str, str]:
         """Retrieve and validate compose file."""
         migration_steps.append("📋 Retrieving compose configuration...")
         success, compose_content, compose_path = await self.executor.retrieve_compose_file(source_host_id, stack_name)
@@ -156,7 +165,7 @@ class StackMigrationOrchestrator:
         migration_data["compose_validation"] = validation_details
         return compose_content, compose_path
 
-    async def _run_preflight_checks(self, source_host, target_host, compose_content: str, stack_name: str, migration_steps: list, migration_data: dict, dry_run: bool):
+    async def _run_preflight_checks(self, source_host, target_host, compose_content: str, stack_name: str, migration_steps: list[str], migration_data: dict, dry_run: bool) -> ToolResult | tuple[list[str], int]:
         """Run pre-flight checks including disk space and tool availability."""
         migration_steps.append("🔍 Running pre-flight checks...")
 
@@ -189,7 +198,10 @@ class StackMigrationOrchestrator:
         migration_data["tool_availability"] = tool_details
         return expected_mounts, estimated_data_size
 
-    async def _test_network_connectivity(self, source_host, target_host, estimated_data_size: int, migration_steps: list, migration_data: dict, dry_run: bool):
+    async def _test_network_connectivity(
+        self, source_host, target_host, estimated_data_size: int,
+        migration_steps: list[str], migration_data: dict, dry_run: bool
+    ) -> ToolResult | bool:
         """Test network connectivity between hosts."""
         migration_steps.append("🌐 Testing network connectivity...")
         connectivity_ok, network_details = await self.network.test_network_connectivity(source_host, target_host)
@@ -213,7 +225,7 @@ class StackMigrationOrchestrator:
         migration_data["network_test"] = network_details
         return True
 
-    async def _assess_migration_risks(self, stack_name: str, estimated_data_size: int, compose_content: str, migration_steps: list, migration_data: dict):
+    async def _assess_migration_risks(self, stack_name: str, estimated_data_size: int, compose_content: str, migration_steps: list[str], migration_data: dict) -> dict[str, Any]:
         """Assess migration risks."""
         migration_steps.append("🎯 Assessing migration risks...")
         risks = self.risk_assessment.assess_migration_risks(
@@ -234,7 +246,12 @@ class StackMigrationOrchestrator:
         migration_data["risk_assessment"] = risks
         return risks
 
-    async def _execute_migration(self, source_host_id: str, target_host_id: str, source_host, target_host, stack_name: str, skip_stop_source: bool, start_target: bool, remove_source: bool, expected_mounts: list, compose_content: str, compose_path: str, migration_steps: list, migration_data: dict):
+    async def _execute_migration(
+        self, source_host_id: str, target_host_id: str, source_host, target_host,
+        stack_name: str, skip_stop_source: bool, start_target: bool, remove_source: bool,
+        expected_mounts: list[str], compose_content: str, compose_path: str,
+        migration_steps: list[str], migration_data: dict
+    ) -> bool | dict[str, Any]:
         """Execute the actual migration process."""
         migration_steps.append("🚀 Starting migration execution...")
 
@@ -244,12 +261,16 @@ class StackMigrationOrchestrator:
         path_mappings, source_paths = self._prepare_path_mappings(target_host, stack_name, expected_mounts)
 
         transfer_results = await self._transfer_migration_data(source_host, target_host, source_paths, stack_name, migration_steps, migration_data)
-        if isinstance(transfer_results, dict) and not transfer_results.get("success", True):
+        if isinstance(transfer_results, ToolResult):
             return transfer_results
+        if not transfer_results.get("success", True):
+            return self._create_error_result("Data transfer failed", migration_data)
 
         deploy_results = await self._deploy_target_stack(target_host_id, stack_name, compose_content, path_mappings, target_host, start_target, migration_steps)
-        if isinstance(deploy_results, dict) and not deploy_results.get("success", True):
+        if isinstance(deploy_results, ToolResult):
             return deploy_results
+        if not deploy_results.get("success", True):
+            return self._create_error_result("Stack deployment failed", migration_data)
 
         verify_results = await self._verify_and_cleanup(target_host_id, stack_name, expected_mounts, path_mappings, remove_source, source_host_id, compose_path, migration_steps, migration_data)
 
@@ -262,7 +283,7 @@ class StackMigrationOrchestrator:
 
         return True
 
-    async def _stop_source_stack(self, source_host_id: str, stack_name: str, skip_stop_source: bool, migration_steps: list) -> None:
+    async def _stop_source_stack(self, source_host_id: str, stack_name: str, skip_stop_source: bool, migration_steps: list[str]) -> None:
         """Stop source stack if not skipped."""
         if not skip_stop_source:
             stop_result = await self.executor.stack_tools.manage_stack(source_host_id, stack_name, "down", None)
@@ -271,7 +292,7 @@ class StackMigrationOrchestrator:
             else:
                 migration_steps.append("⚠️  Failed to stop source stack")
 
-    def _prepare_path_mappings(self, target_host, stack_name: str, expected_mounts: list) -> tuple[dict[str, str], list[str]]:
+    def _prepare_path_mappings(self, target_host, stack_name: str, expected_mounts: list[str]) -> tuple[dict[str, str], list[str]]:
         """Prepare path mappings and source paths for transfer."""
         source_paths = []
         path_mappings = {}
@@ -291,7 +312,7 @@ class StackMigrationOrchestrator:
 
         return path_mappings, source_paths
 
-    async def _transfer_migration_data(self, source_host, target_host, source_paths: list, stack_name: str, migration_steps: list, migration_data: dict):
+    async def _transfer_migration_data(self, source_host, target_host, source_paths: list[str], stack_name: str, migration_steps: list[str], migration_data: dict) -> ToolResult | dict[str, Any]:
         """Transfer data between hosts."""
         transfer_success, transfer_results = await self.executor.transfer_data(source_host, target_host, source_paths, stack_name, False)
         if not transfer_success:
@@ -307,7 +328,11 @@ class StackMigrationOrchestrator:
 
         return transfer_results
 
-    async def _deploy_target_stack(self, target_host_id: str, stack_name: str, compose_content: str, path_mappings: dict, target_host, start_target: bool, migration_steps: list):
+    async def _deploy_target_stack(
+        self, target_host_id: str, stack_name: str, compose_content: str,
+        path_mappings: dict[str, str], target_host, start_target: bool,
+        migration_steps: list[str]
+    ) -> ToolResult | dict[str, Any]:
         """Deploy stack on target host."""
         target_appdata_path = target_host.appdata_path or "/opt/docker-appdata"
         updated_compose = self.executor.update_compose_for_target(compose_content, path_mappings, target_appdata_path, stack_name)
@@ -319,7 +344,7 @@ class StackMigrationOrchestrator:
         migration_steps.append("🎯 Stack deployed on target")
         return deploy_results
 
-    async def _verify_and_cleanup(self, target_host_id: str, stack_name: str, expected_mounts: list, path_mappings: dict, remove_source: bool, source_host_id: str, compose_path: str, migration_steps: list, migration_data: dict):
+    async def _verify_and_cleanup(self, target_host_id: str, stack_name: str, expected_mounts: list[str], path_mappings: dict[str, str], remove_source: bool, source_host_id: str, compose_path: str, migration_steps: list[str], migration_data: dict) -> dict[str, Any]:
         """Verify deployment and cleanup source if requested."""
         # Prepare target expected mounts
         target_expected_mounts = []
@@ -348,7 +373,7 @@ class StackMigrationOrchestrator:
 
         return verify_results
 
-    async def _handle_dry_run(self, risks: dict, estimated_data_size: int, migration_steps: list, migration_data: dict):
+    async def _handle_dry_run(self, risks: dict[str, Any], estimated_data_size: int, migration_steps: list[str], migration_data: dict) -> None:
         """Handle dry run summary."""
         migration_steps.extend([
             "🧪 Dry run completed - no actual changes made",
@@ -358,9 +383,9 @@ class StackMigrationOrchestrator:
         ])
         migration_data["overall_success"] = True
 
-    def _create_final_result(self, stack_name: str, source_host_id: str, target_host_id: str, dry_run: bool, migration_steps: list, migration_data: dict) -> ToolResult:
+    def _create_final_result(self, stack_name: str, source_host_id: str, target_host_id: str, dry_run: bool, migration_steps: list[str], migration_data: dict) -> ToolResult:
         """Create final migration result."""
-        final_message = "\\n".join([
+        final_message = "\n".join([
             f"{'🧪 DRY RUN - ' if dry_run else ''}Stack Migration: {stack_name}",
             f"Source: {source_host_id} → Target: {target_host_id}",
             "",
@@ -372,7 +397,7 @@ class StackMigrationOrchestrator:
             structured_content=migration_data,
         )
 
-    def _create_error_result(self, error_message: str, migration_data: dict) -> ToolResult:
+    def _create_error_result(self, error_message: str, migration_data: dict[str, Any]) -> ToolResult:
         """Create standardized error result."""
         migration_data.update(
             {

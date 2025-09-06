@@ -4,6 +4,7 @@ Container Management Service
 Business logic for Docker container operations with formatted output.
 """
 
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -34,6 +35,26 @@ class ContainerService:
         self.logger = structlog.get_logger()
 
 
+
+    def _build_error_response(
+        self,
+        host_id: str,
+        container_id: str | None,
+        action: str | None,
+        error: Exception,
+        message: str,
+    ) -> dict[str, Any]:
+        """Build a standardized error response."""
+        return {
+            "success": False,
+            "message": message,
+            "host_id": host_id,
+            "container_id": container_id,
+            "action": action,
+            "error": str(error),
+            "error_type": type(error).__name__,
+            "timestamp": datetime.now().isoformat(),
+        }
 
     def _validate_container_safety(self, container_id: str) -> tuple[bool, str]:
         """Validate container is safe for testing operations."""

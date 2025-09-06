@@ -9,15 +9,10 @@ from typing import Any
 
 import structlog
 
-from ..exceptions import DockerMCPError
-
 logger = structlog.get_logger()
 
 
-class VerificationError(DockerMCPError):
-    """Verification operation failed."""
-
-    pass
+# Removed unused VerificationError; verifier reports issues via structured results.
 
 
 class MigrationVerifier:

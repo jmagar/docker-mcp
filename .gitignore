@@ -22,6 +22,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 element_clones
+docker-mcp-pr*
 
 # PyInstaller
 *.manifest
@@ -90,13 +91,10 @@ tmp/
 # Cache directories
 .cache/
 
-# Fix files
-*-fixes.md
-
 # Tests (exclude from git tracking)
 tests/
 
 # Test documentation files
 DOCKER_MCP_COMPREHENSIVE_TEST_PLAN.md
 DOCKER_MCP_TEST_RESULTS.md
-*TEST*.md
+DOCKER_MCP_*TEST*.md

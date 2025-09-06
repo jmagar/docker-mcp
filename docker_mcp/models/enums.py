@@ -1,6 +1,10 @@
 """Enum definitions for Docker MCP tools."""
 
 from enum import Enum
+from typing import Literal
+
+# Type alias for protocol strings
+ProtocolLiteral = Literal["tcp", "udp", "sctp"]
 
 
 class HostAction(Enum):
@@ -45,8 +49,4 @@ class ComposeAction(Enum):
     MIGRATE = "migrate"
 
 
-class Protocol(Enum):
-    """Network protocols for port operations."""
-
-    TCP = "TCP"
-    UDP = "UDP"
+# Removed unused Protocol enum; protocol strings are handled directly where needed.

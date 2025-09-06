@@ -90,6 +90,10 @@ combine-as-imports = true
 quote-style = "double"
 indent-style = "space"
 
+# UV configuration
+[tool.uv]
+cache-dir = ".cache/uv"
+
 # MyPy configuration
 [tool.mypy]
 python_version = "3.10"

@@ -4,19 +4,25 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .enums import ProtocolLiteral
 
+
+# Minimal Pydantic models for type safety (matches current dict shapes)
 class ContainerInfo(BaseModel):
-    """Information about a Docker container."""
+    """Information about a Docker container (minimal for type safety)."""
 
     container_id: str
     name: str
-    image: str
-    status: str
-    state: str
-    created: str
-    ports: list[dict[str, Any]] = Field(default_factory=list)
-    labels: dict[str, str] = Field(default_factory=dict)
     host_id: str
+    image: str | None = None
+    status: str | None = None
+    state: str | None = None
+    ports: list[str] = Field(default_factory=list)
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Convert to dict for backward compatibility."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(**kwargs)
 
 
 class ContainerStats(BaseModel):
@@ -41,7 +47,7 @@ class ContainerLogs(BaseModel):
     container_id: str
     host_id: str
     logs: list[str]
-    timestamp: str
+    timestamp: str  # ISO 8601 format
     truncated: bool = False
 
 
@@ -52,13 +58,14 @@ class StackInfo(BaseModel):
     host_id: str
     services: list[str] = Field(default_factory=list)
     status: str
-    created: str | None = None
-    updated: str | None = None
+    created: str | None = None  # ISO 8601 format
+    updated: str | None = None  # ISO 8601 format
     compose_file: str | None = None
 
 
+# Minimal request model for type safety
 class DeployStackRequest(BaseModel):
-    """Request to deploy a Docker Compose stack."""
+    """Request to deploy a Docker Compose stack (minimal for type safety)."""
 
     host_id: str
     stack_name: str
@@ -66,6 +73,11 @@ class DeployStackRequest(BaseModel):
     environment: dict[str, str] = Field(default_factory=dict)
     pull_images: bool = True
     recreate: bool = False
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Convert to dict for backward compatibility."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(**kwargs)
 
 
 class ContainerAction(BaseModel):
@@ -94,7 +106,7 @@ class PortMapping(BaseModel):
     host_ip: str
     host_port: str
     container_port: str
-    protocol: str
+    protocol: ProtocolLiteral
     container_id: str
     container_name: str
     image: str
@@ -107,19 +119,24 @@ class PortConflict(BaseModel):
     """Port conflict information."""
 
     host_port: str
-    protocol: str
+    protocol: ProtocolLiteral
     host_ip: str
     affected_containers: list[str]
     container_details: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PortListResponse(BaseModel):
-    """Complete port listing response with summary and conflict detection."""
+    """Port listing response (minimal for type safety)."""
 
     host_id: str
     total_ports: int
     total_containers: int
-    port_mappings: list[PortMapping]
+    port_mappings: list[PortMapping] = Field(default_factory=list)
     conflicts: list[PortConflict] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
-    timestamp: str
+    timestamp: str | None = None  # ISO 8601 format
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Convert to dict for backward compatibility."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(**kwargs)
