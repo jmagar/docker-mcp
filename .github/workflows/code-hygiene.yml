@@ -10,9 +10,17 @@ jobs:
       - uses: astral-sh/uv-action@v1
       - run: uv run python scripts/analyze_codebase.py --out CODE_HEALTH_DUPLICATES_DEAD_CODE.md --json report.json
       - run: |
-          jq '.duplicates.files + .duplicates.blocks + .unreferenced.count' report.json | awk '{exit ($1>0)}'
-          echo
-      - uses: actions/upload-artifact@v3
+          set -euo pipefail
+          if [ -f report.json ]; then
+            duplicates=$(jq '.duplicates.files + .duplicates.blocks + .unreferenced.count' report.json)
+            if [ "$duplicates" -gt 0 ]; then
+              echo "Code hygiene check failed: Found $duplicates duplicates or unreferenced items"
+              exit 1
+            fi
+          else
+            echo "Warning: report.json not found"
+          fi
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: code-hygiene-report

@@ -111,7 +111,7 @@ class DockerInfoResource(FunctionResource):
             title="Docker host system information and configuration",
             description="Provides comprehensive Docker host information including version, system info, and configuration details",
             mime_type="application/json",
-            tags={"docker", "system", "info"},
+            tags=("docker", "system", "info"),
         )
 
 
@@ -204,7 +204,7 @@ class DockerContainersResource(FunctionResource):
             title="List of Docker containers on a host",
             description="Provides comprehensive container information including status, networks, volumes, and compose project details",
             mime_type="application/json",
-            tags={"docker", "containers"},
+            tags=("docker", "containers"),
         )
 
 
@@ -302,5 +302,5 @@ class DockerComposeResource(FunctionResource):
             title="Docker Compose stacks and projects",
             description="Provides information about Docker Compose stacks, projects, and their configurations on a host",
             mime_type="application/json",
-            tags={"docker", "compose", "stacks"},
+            tags=("docker", "compose", "stacks"),
         )

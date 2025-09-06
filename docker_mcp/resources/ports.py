@@ -121,5 +121,5 @@ class PortMappingResource(FunctionResource):
             title="Port mappings for Docker hosts",
             description="Provides comprehensive port mapping information for Docker containers on a host",
             mime_type="application/json",
-            tags={"docker", "ports", "networking"},
+            tags=("docker", "ports", "networking"),
         )

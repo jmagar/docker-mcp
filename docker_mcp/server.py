@@ -10,7 +10,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
@@ -363,7 +363,7 @@ class DockerMCPServer:
             from fastmcp.server.dependencies import get_access_token  # type: ignore
 
             @self.app.tool  # type: ignore[attr-defined]
-            async def whoami() -> dict:
+            async def whoami() -> dict[str, Any]:
                 """Return identity claims for the authenticated user."""
                 token = get_access_token()
                 if token is None:
@@ -378,7 +378,7 @@ class DockerMCPServer:
                 }
 
             @self.app.tool  # type: ignore[attr-defined]
-            async def get_user_info() -> dict:
+            async def get_user_info() -> dict[str, Any]:
                 """Return simplified user info for authenticated Google user."""
                 token = get_access_token()
                 if token is None:
@@ -575,7 +575,7 @@ class DockerMCPServer:
             str, Field(default="", description="Path to SSH private key file")
         ] = "",
         description: Annotated[str, Field(default="", description="Host description")] = "",
-        tags: Annotated[list[str], Field(default_factory=list, description="Host tags")] = None,
+        tags: Annotated[list[str] | None, Field(default_factory=list, description="Host tags")] = None,
         compose_path: Annotated[
             str, Field(default="", description="Docker Compose file path")
         ] = "",
@@ -669,8 +669,8 @@ class DockerMCPServer:
                 zfs_capable=zfs_capable,
                 zfs_dataset=zfs_dataset,
                 port=port,
-                cleanup_type=cleanup_type if cleanup_type and cleanup_type in ['check', 'safe', 'moderate', 'aggressive'] else None,  # type: ignore[arg-type]
-                frequency=frequency if frequency and frequency in ['daily', 'weekly', 'monthly', 'custom'] else None,  # type: ignore[arg-type]
+                cleanup_type=cast(Any, cleanup_type if cleanup_type and cleanup_type in ['check', 'safe', 'moderate', 'aggressive'] else None),
+                frequency=cast(Any, frequency if frequency and frequency in ['daily', 'weekly', 'monthly', 'custom'] else None)
                 time=time if time else None,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,
@@ -750,10 +750,6 @@ class DockerMCPServer:
           - Required: host_id, container_id
           - Optional: force, timeout
 
-        • build: Build/rebuild a container
-          - Required: host_id, container_id
-          - Optional: force, timeout
-
         • logs: Get container logs
           - Required: host_id, container_id
           - Optional: follow, lines
@@ -810,7 +806,7 @@ class DockerMCPServer:
             str, Field(default="", description="Docker Compose file content")
         ] = "",
         environment: Annotated[
-            dict[str, str], Field(default_factory=dict, description="Environment variables")
+            dict[str, str] | None, Field(default_factory=dict, description="Environment variables")
         ] = None,
         pull_images: Annotated[
             bool, Field(default=True, description="Pull images before deploying")
@@ -824,7 +820,7 @@ class DockerMCPServer:
             bool, Field(default=False, description="Perform a dry run without making changes")
         ] = False,
         options: Annotated[
-            dict[str, str],
+            dict[str, str] | None,
             Field(default_factory=dict, description="Additional options for the operation"),
         ] = None,
         target_host_id: Annotated[
@@ -1097,6 +1093,15 @@ class DockerMCPServer:
         # Recreate logs service with updated config
         from .services.logs import LogsService
         self.logs_service = LogsService(new_config, self.context_manager)
+        # Propagate the new logs service to dependent services
+        try:
+            self.container_service.logs_service = self.logs_service
+        except Exception:
+            pass
+        try:
+            self.stack_service.logs_service = self.logs_service
+        except Exception:
+            pass
 
         self.logger.info("Configuration updated", hosts=list(new_config.hosts.keys()))
 

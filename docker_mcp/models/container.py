@@ -21,7 +21,7 @@ class ContainerInfo(BaseModel):
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         """Convert to dict for backward compatibility."""
-        kwargs.setdefault('exclude_none', True)
+        kwargs.setdefault("exclude_none", True)
         return super().model_dump(**kwargs)
 
 
@@ -47,7 +47,7 @@ class ContainerLogs(BaseModel):
     container_id: str
     host_id: str
     logs: list[str]
-    timestamp: str
+    timestamp: str  # ISO 8601 format
     truncated: bool = False
 
 
@@ -58,8 +58,8 @@ class StackInfo(BaseModel):
     host_id: str
     services: list[str] = Field(default_factory=list)
     status: str
-    created: str | None = None
-    updated: str | None = None
+    created: str | None = None  # ISO 8601 format
+    updated: str | None = None  # ISO 8601 format
     compose_file: str | None = None
 
 
@@ -76,7 +76,7 @@ class DeployStackRequest(BaseModel):
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         """Convert to dict for backward compatibility."""
-        kwargs.setdefault('exclude_none', True)
+        kwargs.setdefault("exclude_none", True)
         return super().model_dump(**kwargs)
 
 
@@ -134,9 +134,9 @@ class PortListResponse(BaseModel):
     port_mappings: list[PortMapping] = Field(default_factory=list)
     conflicts: list[PortConflict] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
-    timestamp: str | None = None
+    timestamp: str | None = None  # ISO 8601 format
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         """Convert to dict for backward compatibility."""
-        kwargs.setdefault('exclude_none', True)
+        kwargs.setdefault("exclude_none", True)
         return super().model_dump(**kwargs)

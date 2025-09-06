@@ -90,7 +90,6 @@ tmp/
 
 # Cache directories
 .cache/
-.uv-cache/
 
 # Tests (exclude from git tracking)
 tests/
@@ -98,4 +97,4 @@ tests/
 # Test documentation files
 DOCKER_MCP_COMPREHENSIVE_TEST_PLAN.md
 DOCKER_MCP_TEST_RESULTS.md
-*TEST*.md
+DOCKER_MCP_*TEST*.md
