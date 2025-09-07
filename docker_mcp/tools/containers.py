@@ -884,8 +884,9 @@ class ContainerTools:
         if client is None:
             return []
 
+        # Use asyncio.to_thread to run the blocking Docker SDK call off the event loop
         docker_containers = await asyncio.to_thread(
-            None, lambda: client.containers.list(all=include_stopped)
+            client.containers.list, all=include_stopped
         )
 
         # Return Docker SDK container objects directly for more efficient port extraction

@@ -12,10 +12,9 @@ import argparse
 import ast
 import hashlib
 import json
-import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any
 
 
 def should_skip_module(module_name: str) -> bool:
@@ -30,15 +29,15 @@ def should_skip_module(module_name: str) -> bool:
     # Skip __init__ files (package initializers)
     if module_name.endswith(".__init__"):
         return True
-    
+
     # Skip settings modules (often imported dynamically)
     if module_name.endswith(".settings"):
         return True
-    
+
     # Skip prompts package and its submodules (used dynamically)
     if module_name == "docker_mcp.prompts" or module_name.startswith("docker_mcp.prompts."):
         return True
-    
+
     return False
 
 
@@ -51,18 +50,18 @@ def get_file_hash(filepath: Path) -> str:
     return sha256.hexdigest()
 
 
-def extract_code_blocks(filepath: Path, min_lines: int = 5) -> List[Tuple[int, int, str]]:
+def extract_code_blocks(filepath: Path, min_lines: int = 5) -> list[tuple[int, int, str]]:
     """Extract significant code blocks from a Python file.
     
     Returns list of (start_line, end_line, normalized_code) tuples.
     """
     blocks = []
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             content = f.read()
-        
+
         tree = ast.parse(content)
-        
+
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
@@ -73,96 +72,96 @@ def extract_code_blocks(filepath: Path, min_lines: int = 5) -> List[Tuple[int, i
                         blocks.append((node.lineno, node.end_lineno, normalized))
     except (SyntaxError, UnicodeDecodeError):
         pass
-    
+
     return blocks
 
 
-def find_duplicate_files(root_dir: Path, exclude_patterns: List[str]) -> Dict[str, List[str]]:
+def find_duplicate_files(root_dir: Path, exclude_patterns: list[str]) -> dict[str, list[str]]:
     """Find duplicate files based on content hash."""
     file_hashes = {}
     duplicates = {}
-    
+
     for py_file in root_dir.rglob("*.py"):
         # Skip excluded paths
         if any(pattern in str(py_file) for pattern in exclude_patterns):
             continue
-        
+
         file_hash = get_file_hash(py_file)
         relative_path = str(py_file.relative_to(root_dir))
-        
+
         if file_hash in file_hashes:
             if file_hash not in duplicates:
                 duplicates[file_hash] = [file_hashes[file_hash]]
             duplicates[file_hash].append(relative_path)
         else:
             file_hashes[file_hash] = relative_path
-    
+
     return duplicates
 
 
-def find_duplicate_blocks(root_dir: Path, exclude_patterns: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+def find_duplicate_blocks(root_dir: Path, exclude_patterns: list[str]) -> dict[str, list[dict[str, Any]]]:
     """Find duplicate code blocks across files."""
     block_hashes = {}
     duplicates = {}
-    
+
     for py_file in root_dir.rglob("*.py"):
         # Skip excluded paths
         if any(pattern in str(py_file) for pattern in exclude_patterns):
             continue
-        
+
         relative_path = str(py_file.relative_to(root_dir))
         blocks = extract_code_blocks(py_file)
-        
+
         for start_line, end_line, code in blocks:
             code_hash = hashlib.sha256(code.encode()).hexdigest()
-            
+
             block_info = {
                 "file": relative_path,
                 "start_line": start_line,
                 "end_line": end_line,
                 "lines": end_line - start_line + 1
             }
-            
+
             if code_hash in block_hashes:
                 if code_hash not in duplicates:
                     duplicates[code_hash] = [block_hashes[code_hash]]
                 duplicates[code_hash].append(block_info)
             else:
                 block_hashes[code_hash] = block_info
-    
+
     return duplicates
 
 
-def find_unreferenced_modules(root_dir: Path, exclude_patterns: List[str]) -> Dict[str, Any]:
+def find_unreferenced_modules(root_dir: Path, exclude_patterns: list[str]) -> dict[str, Any]:
     """Find potentially unreferenced modules."""
     all_modules = set()
     imported_modules = set()
-    
+
     package_name = "docker_mcp"
-    
+
     for py_file in root_dir.rglob("*.py"):
         # Skip excluded paths
         if any(pattern in str(py_file) for pattern in exclude_patterns):
             continue
-        
+
         relative_path = py_file.relative_to(root_dir)
-        
+
         # Convert file path to module name
         module_parts = list(relative_path.parts[:-1]) + [relative_path.stem]
         if module_parts[0] == package_name:
             module_name = ".".join(module_parts)
-            
+
             # Skip known false positives
             if not should_skip_module(module_name):
                 all_modules.add(module_name)
-        
+
         # Find imports in the file
         try:
-            with open(py_file, "r", encoding="utf-8") as f:
+            with open(py_file, encoding="utf-8") as f:
                 content = f.read()
-            
+
             tree = ast.parse(content)
-            
+
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
@@ -178,13 +177,13 @@ def find_unreferenced_modules(root_dir: Path, exclude_patterns: List[str]) -> Di
                                 imported_modules.add(full_name)
         except (SyntaxError, UnicodeDecodeError):
             pass
-    
+
     # Find unreferenced modules
     unreferenced = all_modules - imported_modules
-    
+
     # Filter out main/cli modules (entry points)
     unreferenced = {m for m in unreferenced if not m.endswith(".__main__") and not m.endswith(".main")}
-    
+
     return {
         "total_modules": len(all_modules),
         "imported_modules": len(imported_modules),
@@ -193,17 +192,17 @@ def find_unreferenced_modules(root_dir: Path, exclude_patterns: List[str]) -> Di
     }
 
 
-def generate_markdown_report(duplicates: Dict[str, Any], output_file: str) -> None:
+def generate_markdown_report(duplicates: dict[str, Any], output_file: str) -> None:
     """Generate markdown report of findings."""
     with open(output_file, "w") as f:
         f.write("# Code Health: Duplicates and Dead Code Analysis\n\n")
         f.write("## Summary\n\n")
-        
+
         # Summary stats
         f.write(f"- Duplicate files: {duplicates['duplicates']['files']}\n")
         f.write(f"- Duplicate code blocks: {duplicates['duplicates']['blocks']}\n")
         f.write(f"- Potentially unreferenced modules: {duplicates['unreferenced']['count']}\n\n")
-        
+
         # Duplicate files
         f.write("## Duplicate Files\n\n")
         if duplicates["duplicate_files"]:
@@ -214,7 +213,7 @@ def generate_markdown_report(duplicates: Dict[str, Any], output_file: str) -> No
                 f.write("\n")
         else:
             f.write("No duplicate files found.\n\n")
-        
+
         # Duplicate blocks
         f.write("## Duplicate Code Blocks\n\n")
         if duplicates["duplicate_blocks"]:
@@ -225,7 +224,7 @@ def generate_markdown_report(duplicates: Dict[str, Any], output_file: str) -> No
                 f.write("\n")
         else:
             f.write("No duplicate code blocks found.\n\n")
-        
+
         # Unreferenced modules
         f.write("## Potentially Unreferenced Modules\n\n")
         if duplicates["unreferenced"]["unreferenced_modules"]:
@@ -233,7 +232,7 @@ def generate_markdown_report(duplicates: Dict[str, Any], output_file: str) -> No
                 f.write(f"- {module}\n")
         else:
             f.write("No unreferenced modules found.\n")
-        
+
         f.write("\n## Analysis Scope\n\n")
         f.write("- **Root**: .\n")
         f.write("- **Include**: **/*.py\n")
@@ -247,15 +246,15 @@ def main():
                         help="Output markdown file")
     parser.add_argument("--json", help="Output JSON file for CI integration")
     args = parser.parse_args()
-    
+
     root_dir = Path(".")
     exclude_patterns = [".venv", "build", "dist", "node_modules", "__pycache__", ".git"]
-    
+
     # Find duplicates and unreferenced code
     duplicate_files = find_duplicate_files(root_dir, exclude_patterns)
     duplicate_blocks = find_duplicate_blocks(root_dir, exclude_patterns)
     unreferenced = find_unreferenced_modules(root_dir, exclude_patterns)
-    
+
     # Prepare results
     results = {
         "duplicates": {
@@ -266,15 +265,15 @@ def main():
         "duplicate_blocks": duplicate_blocks,
         "unreferenced": unreferenced
     }
-    
+
     # Generate markdown report
     generate_markdown_report(results, args.out)
-    
+
     # Generate JSON report if requested
     if args.json:
         with open(args.json, "w") as f:
             json.dump(results, f, indent=2)
-    
+
     # Exit with non-zero if issues found
     total_issues = results["duplicates"]["files"] + results["duplicates"]["blocks"] + results["unreferenced"]["count"]
     sys.exit(1 if total_issues > 0 else 0)

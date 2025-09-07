@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Type hints for resource initialization methods
 - Forward references using TYPE_CHECKING pattern
 - ProtocolLiteral type alias for protocol strings
-- Artifact upload to GitHub Actions workflow with always() condition
+- Artifact upload to GitHub Actions workflow (upload-artifact@v4) with always() condition
 - Analysis scope documentation in CODE_HEALTH_DUPLICATES_DEAD_CODE.md
 
 ### Changed

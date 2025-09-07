@@ -670,7 +670,7 @@ class DockerMCPServer:
                 zfs_dataset=zfs_dataset,
                 port=port,
                 cleanup_type=cast(Any, cleanup_type if cleanup_type and cleanup_type in ['check', 'safe', 'moderate', 'aggressive'] else None),
-                frequency=cast(Any, frequency if frequency and frequency in ['daily', 'weekly', 'monthly', 'custom'] else None)
+                frequency=cast(Any, frequency if frequency and frequency in ['daily', 'weekly', 'monthly', 'custom'] else None),
                 time=time if time else None,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,
