@@ -29,7 +29,6 @@ class ContainerAction(Enum):
     START = "start"
     STOP = "stop"
     RESTART = "restart"
-    BUILD = "build"
     LOGS = "logs"
     REMOVE = "remove"  # Added for test cleanup
 

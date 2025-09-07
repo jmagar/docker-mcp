@@ -544,7 +544,9 @@ class StackTools:
         except Exception as e:
             return self._build_error_response(host_id, stack_name, action, str(e))
 
-    def _build_compose_args(self, action: str, options: dict[str, Any]) -> list[str] | dict[str, Any]:
+    def _build_compose_args(
+        self, action: str, options: dict[str, Any]
+    ) -> list[str] | dict[str, Any]:
         """Build compose arguments based on action and options."""
         # Get the argument builder for the action
         builders = self._get_compose_args_builders()

@@ -70,7 +70,13 @@ class PortMappingResource(FunctionResource):
                 else:
                     data = {"success": False, "error": "Unexpected response type"}
 
-                if filter_project or filter_range or filter_protocol or scan_available or suggest_next:
+                if (
+                    filter_project
+                    or filter_range
+                    or filter_protocol
+                    or scan_available
+                    or suggest_next
+                ):
                     if isinstance(data, dict) and data.get("success"):
                         data["warning"] = "Advanced filtering parameters not yet implemented"
 
@@ -121,5 +127,5 @@ class PortMappingResource(FunctionResource):
             title="Port mappings for Docker hosts",
             description="Provides comprehensive port mapping information for Docker containers on a host",
             mime_type="application/json",
-            tags=("docker", "ports", "networking"),
+            tags={"docker", "ports", "networking"},
         )

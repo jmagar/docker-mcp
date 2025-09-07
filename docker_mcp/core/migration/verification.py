@@ -335,9 +335,7 @@ class MigrationVerifier:
         container_name = find_result.stdout.strip()
 
         # Now inspect the actual container
-        inspect_cmd = ssh_cmd + [
-            f"docker inspect {shlex.quote(container_name)} 2>/dev/null"
-        ]
+        inspect_cmd = ssh_cmd + [f"docker inspect {shlex.quote(container_name)} 2>/dev/null"]
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda cmd=inspect_cmd: subprocess.run(  # nosec B603
@@ -402,7 +400,9 @@ class MigrationVerifier:
         )
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
-            return [f"Error response from daemon: No such container: {stack_name}"]  # This was the error we saw
+            return [
+                f"Error response from daemon: No such container: {stack_name}"
+            ]  # This was the error we saw
 
         container_name = find_result.stdout.strip()
 
@@ -487,7 +487,9 @@ class MigrationVerifier:
             "issues": [],
         }
 
-    def _verify_container_state(self, verification: dict[str, Any], container_info: dict[str, Any]) -> None:
+    def _verify_container_state(
+        self, verification: dict[str, Any], container_info: dict[str, Any]
+    ) -> None:
         """Verify container running state and health status."""
         state = container_info.get("State", {})
         verification["container_integration"]["container_running"] = state.get("Running", False)
@@ -502,7 +504,7 @@ class MigrationVerifier:
         verification: dict[str, Any],
         container_info: dict[str, Any],
         expected_volumes: list[str],
-        expected_appdata_path: str
+        expected_appdata_path: str,
     ) -> None:
         """Verify container mount configuration matches expectations."""
         actual_mounts = self._collect_mounts(container_info)
@@ -557,9 +559,7 @@ class MigrationVerifier:
             issues.append("Data not accessible inside container")
 
         if integration["startup_errors"]:
-            issues.append(
-                f"Container has {len(integration['startup_errors'])} startup errors"
-            )
+            issues.append(f"Container has {len(integration['startup_errors'])} startup errors")
 
         health_status = integration["health_status"]
         if health_status and health_status not in ["healthy", "none"]:

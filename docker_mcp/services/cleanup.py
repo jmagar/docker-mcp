@@ -444,9 +444,7 @@ class CleanupService:
             summary["images"]["reclaimable_bytes"]
             + summary["containers"]["reclaimable_bytes"]
             + summary["volumes"]["reclaimable_bytes"]
-            + summary["build_cache"].get(
-                "reclaimable_bytes", summary["build_cache"]["size_bytes"]
-            )
+            + summary["build_cache"].get("reclaimable_bytes", summary["build_cache"]["size_bytes"])
         )
 
         reclaimable_percentage = (
@@ -484,7 +482,9 @@ class CleanupService:
 
         return result
 
-    def _parse_disk_usage_sections(self, lines: list[str], result: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _parse_disk_usage_sections(
+        self, lines: list[str], result: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Parse different sections of docker system df output."""
         current_section = None
         images: list[dict[str, Any]] = []
@@ -523,7 +523,14 @@ class CleanupService:
         """Check if line is a header line."""
         return line.startswith(("REPOSITORY", "CONTAINER", "VOLUME", "CACHE"))
 
-    def _parse_section_line(self, line: str, section: str, images: list[dict[str, Any]], volumes: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    def _parse_section_line(
+        self,
+        line: str,
+        section: str,
+        images: list[dict[str, Any]],
+        volumes: list[dict[str, Any]],
+        result: dict[str, Any],
+    ) -> None:
         """Parse a data line based on section type."""
         parts = line.split()
         if len(parts) < 3:
@@ -548,11 +555,13 @@ class CleanupService:
             size_str = parts[4]
             size_bytes = self._parse_docker_size(size_str)
 
-            images.append({
-                "name": f"{repo}:{tag}" if tag != "<none>" else repo,
-                "size": size_str,
-                "size_bytes": size_bytes,
-            })
+            images.append(
+                {
+                    "name": f"{repo}:{tag}" if tag != "<none>" else repo,
+                    "size": size_str,
+                    "size_bytes": size_bytes,
+                }
+            )
 
     def _parse_volumes_list_line(self, parts: list[str], volumes: list[dict[str, Any]]) -> None:
         """Parse volumes section line."""
@@ -576,11 +585,9 @@ class CleanupService:
                 result["container_stats"]["running"] += 1
             else:
                 result["container_stats"]["stopped"] += 1
-                result["cleanup_candidates"].append({
-                    "type": "container",
-                    "name": container_name,
-                    "size": size_str
-                })
+                result["cleanup_candidates"].append(
+                    {"type": "container", "name": container_name, "size": size_str}
+                )
 
             result["container_stats"]["total_size_bytes"] += size_bytes
 
@@ -602,7 +609,9 @@ class CleanupService:
 
         return False
 
-    def _process_top_consumers(self, images: list[dict[str, Any]], volumes: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    def _process_top_consumers(
+        self, images: list[dict[str, Any]], volumes: list[dict[str, Any]], result: dict[str, Any]
+    ) -> None:
         """Sort and select top consumers."""
         # Sort and get top consumers
         images.sort(key=lambda x: x["size_bytes"], reverse=True)
@@ -986,6 +995,7 @@ class CleanupService:
         from typing import Literal, cast
 
         from ..core.config_loader import CleanupSchedule
+
         schedule_config = CleanupSchedule(
             host_id=host_id,
             cleanup_type=cast(Literal["safe", "moderate"], cleanup_type),

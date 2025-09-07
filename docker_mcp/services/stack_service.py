@@ -244,7 +244,12 @@ class StackService:
                 return await self._handle_discover_action(**params)
             elif action == ComposeAction.MIGRATE:
                 return await self._handle_migrate_action(**params)
-            elif action in [ComposeAction.UP, ComposeAction.DOWN, ComposeAction.RESTART, ComposeAction.BUILD]:
+            elif action in [
+                ComposeAction.UP,
+                ComposeAction.DOWN,
+                ComposeAction.RESTART,
+                ComposeAction.BUILD,
+            ]:
                 return await self._handle_lifecycle_action(action, **params)
             else:
                 return {
@@ -275,7 +280,11 @@ class StackService:
             return {"success": False, "error": "host_id is required for list action"}
 
         result = await self.list_stacks(host_id)
-        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+        return (
+            result.structured_content
+            if hasattr(result, "structured_content") and result.structured_content is not None
+            else {"success": False, "error": "Invalid result format"}
+        )
 
     async def _handle_view_action(self, **params) -> dict[str, Any]:
         """Handle VIEW action."""
@@ -288,7 +297,11 @@ class StackService:
             return {"success": False, "error": "stack_name is required for view action"}
 
         result = await self.get_stack_compose_file(host_id, stack_name)
-        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+        return (
+            result.structured_content
+            if hasattr(result, "structured_content") and result.structured_content is not None
+            else {"success": False, "error": "Invalid result format"}
+        )
 
     async def _handle_deploy_action(self, **params) -> dict[str, Any]:
         """Handle DEPLOY action."""
@@ -315,8 +328,14 @@ class StackService:
                 "error": "stack_name must be DNS-compliant: lowercase letters, numbers, and hyphens only (no underscores)",
             }
 
-        result = await self.deploy_stack(host_id, stack_name, compose_content, environment, pull_images, recreate)
-        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+        result = await self.deploy_stack(
+            host_id, stack_name, compose_content, environment, pull_images, recreate
+        )
+        return (
+            result.structured_content
+            if hasattr(result, "structured_content") and result.structured_content is not None
+            else {"success": False, "error": "Invalid result format"}
+        )
 
     async def _handle_manage_action(self, action: str, **params) -> dict[str, Any]:
         """Handle string-based manage actions."""
@@ -330,7 +349,11 @@ class StackService:
             return {"success": False, "error": f"stack_name is required for {action} action"}
 
         result = await self.manage_stack(host_id, stack_name, action, options)
-        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+        return (
+            result.structured_content
+            if hasattr(result, "structured_content") and result.structured_content is not None
+            else {"success": False, "error": "Invalid result format"}
+        )
 
     async def _handle_logs_action(self, **params) -> dict[str, Any]:
         """Handle LOGS action."""
@@ -369,7 +392,9 @@ class StackService:
                 return logs_data
             return {"success": False, "error": "Failed to retrieve stack logs"}
         except Exception as e:
-            self.logger.error("stack logs error", host_id=host_id, stack_name=stack_name, error=str(e))
+            self.logger.error(
+                "stack logs error", host_id=host_id, stack_name=stack_name, error=str(e)
+            )
             return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
 
     async def _handle_discover_action(self, **params) -> dict[str, Any]:
@@ -385,7 +410,11 @@ class StackService:
             return {"success": True, "host_id": host_id, "compose_discovery": discovery}
         except Exception as e:
             self.logger.error("compose discover error", host_id=host_id, error=str(e))
-            return {"success": False, "error": f"Failed to discover compose paths: {str(e)}", "host_id": host_id}
+            return {
+                "success": False,
+                "error": f"Failed to discover compose paths: {str(e)}",
+                "host_id": host_id,
+            }
 
     async def _handle_migrate_action(self, **params) -> dict[str, Any]:
         """Handle MIGRATE action."""
@@ -432,7 +461,12 @@ class StackService:
         if not stack_name:
             return {"success": False, "error": "stack_name is required for stack lifecycle actions"}
 
-        result = await self.manage_stack(host_id=host_id, stack_name=stack_name, action=action.value, options=options)
+        result = await self.manage_stack(
+            host_id=host_id, stack_name=stack_name, action=action.value, options=options
+        )
         if hasattr(result, "structured_content"):
-            return result.structured_content or {"success": True, "data": f"Stack {action.value} completed"}
+            return result.structured_content or {
+                "success": True,
+                "data": f"Stack {action.value} completed",
+            }
         return {"success": False, "error": "Invalid result format"}

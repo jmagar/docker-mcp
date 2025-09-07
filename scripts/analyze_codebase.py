@@ -19,10 +19,10 @@ from typing import Any
 
 def should_skip_module(module_name: str) -> bool:
     """Check if a module should be skipped from orphan detection.
-    
+
     Args:
         module_name: Full module name to check
-        
+
     Returns:
         True if module should be skipped (known false positive)
     """
@@ -52,7 +52,7 @@ def get_file_hash(filepath: Path) -> str:
 
 def extract_code_blocks(filepath: Path, min_lines: int = 5) -> list[tuple[int, int, str]]:
     """Extract significant code blocks from a Python file.
-    
+
     Returns list of (start_line, end_line, normalized_code) tuples.
     """
     blocks = []
@@ -63,9 +63,9 @@ def extract_code_blocks(filepath: Path, min_lines: int = 5) -> list[tuple[int, i
         tree = ast.parse(content)
 
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
-                    if node.end_lineno - node.lineno >= min_lines:
+                    if node.end_lineno is not None and node.end_lineno - node.lineno >= min_lines:
                         # Extract and normalize the code block
                         lines = content.split("\n")[node.lineno - 1:node.end_lineno]
                         normalized = "\n".join(line.strip() for line in lines if line.strip())
@@ -78,8 +78,8 @@ def extract_code_blocks(filepath: Path, min_lines: int = 5) -> list[tuple[int, i
 
 def find_duplicate_files(root_dir: Path, exclude_patterns: list[str]) -> dict[str, list[str]]:
     """Find duplicate files based on content hash."""
-    file_hashes = {}
-    duplicates = {}
+    file_hashes: dict[str, str] = {}
+    duplicates: dict[str, list[str]] = {}
 
     for py_file in root_dir.rglob("*.py"):
         # Skip excluded paths
@@ -101,8 +101,8 @@ def find_duplicate_files(root_dir: Path, exclude_patterns: list[str]) -> dict[st
 
 def find_duplicate_blocks(root_dir: Path, exclude_patterns: list[str]) -> dict[str, list[dict[str, Any]]]:
     """Find duplicate code blocks across files."""
-    block_hashes = {}
-    duplicates = {}
+    block_hashes: dict[str, dict[str, Any]] = {}
+    duplicates: dict[str, list[dict[str, Any]]] = {}
 
     for py_file in root_dir.rglob("*.py"):
         # Skip excluded paths
@@ -132,51 +132,64 @@ def find_duplicate_blocks(root_dir: Path, exclude_patterns: list[str]) -> dict[s
     return duplicates
 
 
+def _extract_imports_from_file(py_file: Path, package_name: str, imported_modules: set[str]) -> None:
+    """Extract imports from a Python file."""
+    try:
+        with open(py_file, encoding="utf-8") as f:
+            content = f.read()
+
+        tree = ast.parse(content)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith(package_name):
+                        imported_modules.add(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.module.startswith(package_name):
+                    imported_modules.add(node.module)
+                    # Also add the specific imports
+                    for alias in node.names:
+                        if alias.name != "*":
+                            full_name = f"{node.module}.{alias.name}"
+                            imported_modules.add(full_name)
+    except (SyntaxError, UnicodeDecodeError):
+        pass
+
+
+def _process_python_file(py_file: Path, root_dir: Path, package_name: str,
+                        exclude_patterns: list[str], all_modules: set[str],
+                        imported_modules: set[str]) -> None:
+    """Process a single Python file for module and import collection."""
+    # Skip excluded paths
+    if any(pattern in str(py_file) for pattern in exclude_patterns):
+        return
+
+    relative_path = py_file.relative_to(root_dir)
+
+    # Convert file path to module name
+    module_parts = list(relative_path.parts[:-1]) + [relative_path.stem]
+    if module_parts[0] == package_name:
+        module_name = ".".join(module_parts)
+
+        # Skip known false positives
+        if not should_skip_module(module_name):
+            all_modules.add(module_name)
+
+    # Find imports in the file
+    _extract_imports_from_file(py_file, package_name, imported_modules)
+
+
 def find_unreferenced_modules(root_dir: Path, exclude_patterns: list[str]) -> dict[str, Any]:
     """Find potentially unreferenced modules."""
-    all_modules = set()
-    imported_modules = set()
-
+    all_modules: set[str] = set()
+    imported_modules: set[str] = set()
     package_name = "docker_mcp"
 
+    # Process all Python files
     for py_file in root_dir.rglob("*.py"):
-        # Skip excluded paths
-        if any(pattern in str(py_file) for pattern in exclude_patterns):
-            continue
-
-        relative_path = py_file.relative_to(root_dir)
-
-        # Convert file path to module name
-        module_parts = list(relative_path.parts[:-1]) + [relative_path.stem]
-        if module_parts[0] == package_name:
-            module_name = ".".join(module_parts)
-
-            # Skip known false positives
-            if not should_skip_module(module_name):
-                all_modules.add(module_name)
-
-        # Find imports in the file
-        try:
-            with open(py_file, encoding="utf-8") as f:
-                content = f.read()
-
-            tree = ast.parse(content)
-
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith(package_name):
-                            imported_modules.add(alias.name)
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module and node.module.startswith(package_name):
-                        imported_modules.add(node.module)
-                        # Also add the specific imports
-                        for alias in node.names:
-                            if alias.name != "*":
-                                full_name = f"{node.module}.{alias.name}"
-                                imported_modules.add(full_name)
-        except (SyntaxError, UnicodeDecodeError):
-            pass
+        _process_python_file(py_file, root_dir, package_name, exclude_patterns,
+                           all_modules, imported_modules)
 
     # Find unreferenced modules
     unreferenced = all_modules - imported_modules
@@ -256,7 +269,7 @@ def main():
     unreferenced = find_unreferenced_modules(root_dir, exclude_patterns)
 
     # Prepare results
-    results = {
+    results: dict[str, Any] = {
         "duplicates": {
             "files": len(duplicate_files),
             "blocks": len(duplicate_blocks)

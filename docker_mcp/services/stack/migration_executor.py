@@ -286,6 +286,7 @@ class StackMigrationExecutor:
                 # Wait for containers to fully start after deployment
                 try:
                     import asyncio as _asyncio
+
                     await _asyncio.sleep(2)  # Initial delay for deployment to settle
 
                     # Poll for container readiness
@@ -301,20 +302,32 @@ class StackMigrationExecutor:
                         from typing import Any, cast
 
                         def run_check_cmd() -> Any:  # Use Any to avoid mypy confusion
-                            return subprocess.run(check_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                            return subprocess.run(
+                                check_cmd, capture_output=True, text=True, check=False
+                            )  # nosec B603
 
-                        result = cast(subprocess.CompletedProcess[str], await _asyncio.get_event_loop().run_in_executor(
-                            None,
-                            run_check_cmd,
-                        ))
+                        result = cast(
+                            subprocess.CompletedProcess[str],
+                            await _asyncio.get_event_loop().run_in_executor(
+                                None,
+                                run_check_cmd,
+                            ),
+                        )
 
                         if result.returncode == 0 and "RUNNING" in result.stdout:
-                            self.logger.info("Container ready for verification", stack_name=stack_name, attempt=attempt+1)
+                            self.logger.info(
+                                "Container ready for verification",
+                                stack_name=stack_name,
+                                attempt=attempt + 1,
+                            )
                             break
 
                         await _asyncio.sleep(1)
                     else:
-                        self.logger.warning("Container may not be fully ready for verification", stack_name=stack_name)
+                        self.logger.warning(
+                            "Container may not be fully ready for verification",
+                            stack_name=stack_name,
+                        )
 
                 except Exception as e:
                     self.logger.warning("Container readiness check failed", error=str(e))
@@ -375,7 +388,9 @@ class StackMigrationExecutor:
                 )
 
             # Extract the actual success from nested structure
-            container_success: bool = bool(container_verification.get("container_integration", {}).get("success", False))
+            container_success: bool = bool(
+                container_verification.get("container_integration", {}).get("success", False)
+            )
             data_success: bool = bool(data_verification.get("success", False))
             overall_success: bool = container_success and data_success
 

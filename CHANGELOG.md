@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Analysis scope documentation in CODE_HEALTH_DUPLICATES_DEAD_CODE.md
 
 ### Changed
-- Tags in resources changed from sets to tuples for deterministic ordering
+- Tags in resources changed from tuples to sets for deterministic ordering
 - Replaced loop.run_in_executor with asyncio.to_thread for modern async pattern
 - Updated PortListResponse model to use typed lists (PortMapping, PortConflict)
 - Updated ContainerInfo.ports type from list[dict[str, Any]] to list[str]
@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Type annotations for list and dict parameters
 
 ### Removed
+- HostNotFoundError class (use DockerMCPError instead) 
+- ensure_log_directory helper function (handled directly in server init)
+- BUILD action from ContainerAction enum (build operations belong in compose/stack management)
 - **HostNotFoundError** exception class (docker_mcp/core/exceptions.py:20)
   - This exception was removed as it was not being used in the codebase
   - Migration: Use DockerMCPError or DockerContextError instead

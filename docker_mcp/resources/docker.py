@@ -33,6 +33,7 @@ class DockerInfoResource(FunctionResource):
             context_manager: DockerContextManager for Docker command execution
             host_service: HostService for host operations
         """
+
         # Create the function with dependencies captured in closure
         async def _get_docker_info(host_id: str, **kwargs) -> dict[str, Any]:
             """Get Docker host information.
@@ -49,6 +50,9 @@ class DockerInfoResource(FunctionResource):
 
                 # Get Docker client and retrieve info/version using Docker SDK
                 client = await context_manager.get_client(host_id)
+                if client is None:
+                    raise docker.errors.APIError(f"Failed to get Docker client for host {host_id}")
+
                 # Get Docker system info and version using SDK
                 docker_info = await asyncio.to_thread(client.info)
                 docker_version = await asyncio.to_thread(client.version)
@@ -111,7 +115,7 @@ class DockerInfoResource(FunctionResource):
             title="Docker host system information and configuration",
             description="Provides comprehensive Docker host information including version, system info, and configuration details",
             mime_type="application/json",
-            tags=("docker", "system", "info"),
+            tags={"docker", "system", "info"},
         )
 
 
@@ -131,6 +135,7 @@ class DockerContainersResource(FunctionResource):
         Args:
             container_service: ContainerService for container operations
         """
+
         # Create the function with dependency captured in closure
         async def _get_containers(host_id: str, **kwargs) -> dict[str, Any]:
             """Get Docker containers for a host.
@@ -166,6 +171,10 @@ class DockerContainersResource(FunctionResource):
                     containers_data = result.structured_content
                 else:
                     containers_data = result
+
+                # Ensure we have a dict to work with
+                if containers_data is None:
+                    containers_data = {}
 
                 # Add resource metadata
                 containers_data["resource_uri"] = f"docker://{host_id}/containers"
@@ -204,7 +213,7 @@ class DockerContainersResource(FunctionResource):
             title="List of Docker containers on a host",
             description="Provides comprehensive container information including status, networks, volumes, and compose project details",
             mime_type="application/json",
-            tags=("docker", "containers"),
+            tags={"docker", "containers"},
         )
 
 
@@ -221,6 +230,7 @@ class DockerComposeResource(FunctionResource):
         Args:
             stack_service: StackService for stack operations
         """
+
         # Create the function with dependency captured in closure
         async def _get_compose_info(host_id: str, **kwargs) -> dict[str, Any]:
             """Get Docker Compose information for a host.
@@ -243,6 +253,10 @@ class DockerComposeResource(FunctionResource):
                     compose_data = result.structured_content
                 else:
                     compose_data = result
+
+                # Ensure we have a dict to work with
+                if compose_data is None:
+                    compose_data = {}
 
                 # Enhance with additional compose-specific information
                 if compose_data.get("success"):
@@ -302,5 +316,5 @@ class DockerComposeResource(FunctionResource):
             title="Docker Compose stacks and projects",
             description="Provides information about Docker Compose stacks, projects, and their configurations on a host",
             mime_type="application/json",
-            tags=("docker", "compose", "stacks"),
+            tags={"docker", "compose", "stacks"},
         )

@@ -55,7 +55,7 @@ class ContainerTools:
                     "success": False,
                     "error": f"Could not connect to Docker on host {host_id}",
                     "containers": [],
-                    "total": 0
+                    "total": 0,
                 }
 
             docker_containers = await asyncio.to_thread(
@@ -136,15 +136,10 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {
-                    "success": False,
-                    "error": f"Could not connect to Docker on host {host_id}"
-                }
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Use Docker SDK to get container
-            container = await asyncio.to_thread(
-                lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
 
             # Get container attributes (equivalent to inspect data)
             container_data = container.attrs
@@ -224,15 +219,10 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {
-                    "success": False,
-                    "error": f"Could not connect to Docker on host {host_id}"
-                }
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Get container and start it using Docker SDK
-            container = await asyncio.to_thread(
-                lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
             await asyncio.to_thread(container.start)
 
             logger.info("Container started", host_id=host_id, container_id=container_id)
@@ -287,15 +277,10 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {
-                    "success": False,
-                    "error": f"Could not connect to Docker on host {host_id}"
-                }
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Get container and stop it using Docker SDK
-            container = await asyncio.to_thread(
-                lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
             await asyncio.to_thread(lambda: container.stop(timeout=timeout))
 
             logger.info(
@@ -368,15 +353,10 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {
-                    "success": False,
-                    "error": f"Could not connect to Docker on host {host_id}"
-                }
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Get container and restart it using Docker SDK
-            container = await asyncio.to_thread(
-                lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
             await asyncio.to_thread(lambda: container.restart(timeout=timeout))
 
             logger.info(
@@ -431,20 +411,13 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {
-                    "success": False,
-                    "error": f"Could not connect to Docker on host {host_id}"
-                }
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Get container and retrieve stats using Docker SDK
-            container = await asyncio.to_thread(
-                lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
 
             # Docker SDK returns a single snapshot dict when stream=False
-            stats_raw = await asyncio.to_thread(
-                lambda: container.stats(stream=False)
-            )
+            stats_raw = await asyncio.to_thread(lambda: container.stats(stream=False))
 
             # Parse stats data from Docker SDK format (different from CLI format)
             cpu_stats = stats_raw.get("cpu_stats", {})
@@ -627,9 +600,7 @@ class ContainerTools:
                 return {"error": f"Could not connect to Docker on host {host_id}"}
 
             # Use Docker SDK to get container
-            container = await asyncio.to_thread(
-                lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
 
             # Return container attributes which contain all inspect data
             container_data = container.attrs
@@ -749,10 +720,7 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {
-                    "success": False,
-                    "error": f"Could not connect to Docker on host {host_id}"
-                }
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Pull image using Docker SDK
             image = await asyncio.to_thread(lambda: client.images.pull(image_name))
@@ -885,9 +853,7 @@ class ContainerTools:
             return []
 
         # Use asyncio.to_thread to run the blocking Docker SDK call off the event loop
-        docker_containers = await asyncio.to_thread(
-            client.containers.list, all=include_stopped
-        )
+        docker_containers = await asyncio.to_thread(client.containers.list, all=include_stopped)
 
         # Return Docker SDK container objects directly for more efficient port extraction
         return docker_containers

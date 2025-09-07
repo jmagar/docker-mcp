@@ -67,7 +67,9 @@ class StackValidation:
             details["issues"] = issues
             return False, issues, details
 
-    def _validate_yaml_syntax(self, compose_content: str, issues: list[str], details: dict) -> dict | None:
+    def _validate_yaml_syntax(
+        self, compose_content: str, issues: list[str], details: dict
+    ) -> dict | None:
         """Validate YAML syntax and return parsed data."""
         import yaml
 
@@ -82,7 +84,9 @@ class StackValidation:
             details["issues"] = issues
             return None
 
-    def _validate_compose_structure(self, compose_data: Any, issues: list[str], details: dict) -> bool:
+    def _validate_compose_structure(
+        self, compose_data: Any, issues: list[str], details: dict
+    ) -> bool:
         """Validate basic compose file structure."""
         if not isinstance(compose_data, dict):
             issues.append("Compose file must be a YAML object")
@@ -137,7 +141,9 @@ class StackValidation:
 
             # Validate port and volume specifications
             self._validate_service_ports(service_name, service_config.get("ports"), service_issues)
-            self._validate_service_volumes(service_name, service_config.get("volumes"), service_issues)
+            self._validate_service_volumes(
+                service_name, service_config.get("volumes"), service_issues
+            )
 
         issues.extend(service_issues)
         details["validation_checks"]["service_validation"] = {
@@ -145,7 +151,9 @@ class StackValidation:
             "issues_found": len(service_issues),
         }
 
-    def _validate_service_ports(self, service_name: str, ports: Any, service_issues: list[str]) -> None:
+    def _validate_service_ports(
+        self, service_name: str, ports: Any, service_issues: list[str]
+    ) -> None:
         """Validate service port specifications."""
         if ports is None or not isinstance(ports, list):
             return
@@ -167,7 +175,9 @@ class StackValidation:
                         f"Service '{service_name}': Port object missing 'target' field"
                     )
 
-    def _validate_service_volumes(self, service_name: str, volumes: Any, service_issues: list[str]) -> None:
+    def _validate_service_volumes(
+        self, service_name: str, volumes: Any, service_issues: list[str]
+    ) -> None:
         """Validate service volume specifications."""
         if volumes is None or not isinstance(volumes, list):
             return

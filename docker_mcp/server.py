@@ -85,7 +85,9 @@ def get_data_dir() -> Path:
     env_candidates = [
         os.getenv("FASTMCP_DATA_DIR"),
         os.getenv("DOCKER_MCP_DATA_DIR"),
-        os.getenv("XDG_DATA_HOME") and Path(os.getenv("XDG_DATA_HOME") or "") / "docker-mcp" if os.getenv("XDG_DATA_HOME") else None,
+        os.getenv("XDG_DATA_HOME") and Path(os.getenv("XDG_DATA_HOME") or "") / "docker-mcp"
+        if os.getenv("XDG_DATA_HOME")
+        else None,
     ]
 
     # Check explicit environment overrides
@@ -161,18 +163,18 @@ def get_config_dir() -> Path:
     """
     # Try environment variables first
     if env_path := _try_environment_config_dirs():
-        return env_path
+        return env_path if env_path.is_absolute() else (Path.cwd() / env_path)
 
     # Check for container environment
     if container_path := _try_container_config_dir():
-        return container_path
+        return container_path if container_path.is_absolute() else (Path.cwd() / container_path)
 
     # Try fallback directories
     if fallback_path := _try_fallback_config_dirs():
-        return fallback_path
+        return fallback_path if fallback_path.is_absolute() else (Path.cwd() / fallback_path)
 
-    # Final fallback
-    return Path("config")
+    # Final fallback — prefer absolute path for consistency
+    return Path.cwd() / "config"
 
 
 def _try_environment_config_dirs() -> Path | None:
@@ -276,7 +278,6 @@ class DockerMCPServer:
         # Initialize core managers
         self.context_manager = DockerContextManager(config)
 
-
         # Initialize service layer
         from .services.logs import LogsService
 
@@ -285,7 +286,9 @@ class DockerMCPServer:
         self.container_service: ContainerService = ContainerService(
             config, self.context_manager, self.logs_service
         )
-        self.stack_service: StackService = StackService(config, self.context_manager, self.logs_service)
+        self.stack_service: StackService = StackService(
+            config, self.context_manager, self.logs_service
+        )
         self.config_service = ConfigService(config, self.context_manager)
         self.cleanup_service = CleanupService(config)
 
@@ -306,7 +309,6 @@ class DockerMCPServer:
             config_path=self._config_path,
         )
 
-
     def _initialize_app(self) -> None:
         """Initialize FastMCP app, middleware, and register tools."""
         # Create FastMCP server (attach Google OAuth if configured)
@@ -317,44 +319,17 @@ class DockerMCPServer:
         else:
             self.app = FastMCP("Docker Context Manager")
 
-        # Add middleware in logical order (first added = first executed)
-        # Error handling first to catch all errors
-        self.app.add_middleware(
-            ErrorHandlingMiddleware(
-                include_traceback=os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG",
-                track_error_stats=True,
-            )
-        )
+        # Set up test compatibility wrapper
+        self._setup_test_compatibility()
 
-        # Rate limiting to protect against abuse
-        rate_limit = float(os.getenv("RATE_LIMIT_PER_SECOND", "50.0"))
-        self.app.add_middleware(
-            RateLimitingMiddleware(
-                max_requests_per_second=rate_limit,
-                burst_capacity=int(rate_limit * 2),
-                enable_global_limit=True,
-            )
-        )
-
-        # Timing middleware to monitor performance
-        slow_threshold = float(os.getenv("SLOW_REQUEST_THRESHOLD_MS", "5000.0"))
-        self.app.add_middleware(
-            TimingMiddleware(slow_request_threshold_ms=slow_threshold, track_statistics=True)
-        )
-
-        # Logging middleware last to log everything (including middleware processing)
-        self.app.add_middleware(
-            LoggingMiddleware(
-                include_payloads=os.getenv("LOG_INCLUDE_PAYLOADS", "true").lower() == "true",
-                max_payload_length=int(os.getenv("LOG_MAX_PAYLOAD_LENGTH", "1000")),
-            )
-        )
+        # Configure middleware stack
+        self._configure_middleware()
 
         self.logger.info(
             "FastMCP middleware initialized",
             error_handling=True,
-            rate_limiting=f"{rate_limit} req/sec",
-            timing_monitoring=f"{slow_threshold}ms threshold",
+            rate_limiting=f"{float(os.getenv('RATE_LIMIT_PER_SECOND', '50.0'))} req/sec",
+            timing_monitoring=f"{float(os.getenv('SLOW_REQUEST_THRESHOLD_MS', '5000.0'))}ms threshold",
             logging="dual output (console + files)",
         )
 
@@ -432,6 +407,77 @@ class DockerMCPServer:
         # Register MCP resources for data access (complement tools with clean URI-based data retrieval)
         self._register_resources()
 
+    def _setup_test_compatibility(self) -> None:
+        """Set up test compatibility wrapper for list_tools."""
+        try:
+            import inspect
+
+            app_ref = self.app
+
+            def _list_tools_sync():  # type: ignore[no-redef]
+                getter = getattr(app_ref, "get_tools", None)
+                if getter is None:
+                    # Some FastMCP versions might already have list_tools
+                    getter = getattr(app_ref, "list_tools", None)
+                if getter is None:
+                    return []
+                result = getter()
+                if inspect.iscoroutine(result):
+                    import asyncio
+
+                    try:
+                        # Prefer asyncio.run when not already in a running loop
+                        return asyncio.run(result)
+                    except RuntimeError:
+                        # If a loop is running (unlikely in sync tests), try a fresh loop
+                        loop = asyncio.new_event_loop()
+                        try:
+                            return loop.run_until_complete(result)
+                        finally:
+                            loop.close()
+                return result
+
+            # Attach wrapper unconditionally to provide stable API to tests
+            self.app.list_tools = _list_tools_sync
+        except Exception as e:
+            # Log the exception but continue
+            self.logger.debug("Failed to set up test compatibility wrapper", error=str(e))
+
+    def _configure_middleware(self) -> None:
+        """Configure FastMCP middleware stack."""
+        # Add middleware in logical order (first added = first executed)
+        # Error handling first to catch all errors
+        self.app.add_middleware(
+            ErrorHandlingMiddleware(
+                include_traceback=os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG",
+                track_error_stats=True,
+            )
+        )
+
+        # Rate limiting to protect against abuse
+        rate_limit = float(os.getenv("RATE_LIMIT_PER_SECOND", "50.0"))
+        self.app.add_middleware(
+            RateLimitingMiddleware(
+                max_requests_per_second=rate_limit,
+                burst_capacity=int(rate_limit * 2),
+                enable_global_limit=True,
+            )
+        )
+
+        # Timing middleware to monitor performance
+        slow_threshold = float(os.getenv("SLOW_REQUEST_THRESHOLD_MS", "5000.0"))
+        self.app.add_middleware(
+            TimingMiddleware(slow_request_threshold_ms=slow_threshold, track_statistics=True)
+        )
+
+        # Logging middleware last to log everything (including middleware processing)
+        self.app.add_middleware(
+            LoggingMiddleware(
+                include_payloads=os.getenv("LOG_INCLUDE_PAYLOADS", "true").lower() == "true",
+                max_payload_length=int(os.getenv("LOG_MAX_PAYLOAD_LENGTH", "1000")),
+            )
+        )
+
     def _build_auth_provider(self):
         """Build Google OAuth provider from environment if configured.
 
@@ -444,11 +490,24 @@ class DockerMCPServer:
             self.logger.error("Failed to import GoogleProvider", error=str(e))
             return None
 
-        # Read credentials from env if provided
-        client_id = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
-        client_secret = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+        # Build base URL and configuration
+        base_url = self._get_auth_base_url()
+        redirect_path = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH", "/auth/callback")
+        required_scopes = self._parse_auth_scopes()
+        timeout = self._parse_auth_timeout()
 
-        # Base URL for callbacks
+        # Build provider kwargs
+        kwargs = self._build_provider_kwargs(base_url, redirect_path, required_scopes, timeout)
+
+        provider = GoogleProvider(**kwargs)  # type: ignore[arg-type]
+
+        # Configure allowed redirects if specified
+        self._configure_allowed_redirects(provider)
+
+        return provider
+
+    def _get_auth_base_url(self) -> str:
+        """Get the base URL for auth callbacks."""
         base_url = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL")
         if not base_url:
             # Fallback to host/port (use http unless explicitly running behind TLS)
@@ -456,17 +515,16 @@ class DockerMCPServer:
             host = self.config.server.host
             port = self.config.server.port
             base_url = f"{scheme}://{host}:{port}"
+        return base_url
 
-        # Redirect path
-        redirect_path = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH", "/auth/callback")
-
-        # Scopes can be comma/space/JSON separated
+    def _parse_auth_scopes(self) -> list[str]:
+        """Parse required auth scopes from environment."""
         scopes_raw = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES", "")
         required_scopes: list[str]
+
         if scopes_raw.strip().startswith("["):
             try:
                 import json
-
                 required_scopes = json.loads(scopes_raw)
             except Exception:
                 required_scopes = []
@@ -481,6 +539,10 @@ class DockerMCPServer:
                 "https://www.googleapis.com/auth/userinfo.email",
             ]
 
+        return required_scopes
+
+    def _parse_auth_timeout(self) -> int | None:
+        """Parse auth timeout from environment."""
         timeout = None
         try:
             timeout_val = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_TIMEOUT_SECONDS")
@@ -488,13 +550,19 @@ class DockerMCPServer:
                 timeout = int(timeout_val)
         except ValueError:
             timeout = None
+        return timeout
 
-        # Build provider with explicit env creds or let provider use defaults
+    def _build_provider_kwargs(self, base_url: str, redirect_path: str,
+                              required_scopes: list[str], timeout: int | None) -> dict[str, Any]:
+        """Build kwargs for GoogleProvider initialization."""
         kwargs: dict[str, Any] = {
             "base_url": base_url,
             "required_scopes": required_scopes,
             "redirect_path": redirect_path,
         }
+
+        client_id = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
 
         if client_id:
             kwargs["client_id"] = client_id
@@ -503,12 +571,14 @@ class DockerMCPServer:
         if timeout is not None:
             kwargs["timeout_seconds"] = timeout
 
-        provider = GoogleProvider(**kwargs)  # type: ignore[arg-type]
+        return kwargs
 
-        # Optional hardening: restrict allowed client redirect URIs
+    def _configure_allowed_redirects(self, provider) -> None:
+        """Configure allowed client redirect URIs if specified."""
         allowed_redirects = os.getenv(
             "FASTMCP_SERVER_AUTH_GOOGLE_ALLOWED_CLIENT_REDIRECT_URIS", ""
         ).strip()
+
         if allowed_redirects:
             try:
                 # property exists in FastMCP 2.12.x
@@ -520,8 +590,6 @@ class DockerMCPServer:
                     "Skipping allowed_client_redirect_uris; provider does not support or failed to set",
                     exc_info=True,
                 )
-
-        return provider
 
     def _register_resources(self) -> None:
         """Register MCP resources for data access.
@@ -575,7 +643,7 @@ class DockerMCPServer:
             str, Field(default="", description="Path to SSH private key file")
         ] = "",
         description: Annotated[str, Field(default="", description="Host description")] = "",
-        tags: Annotated[list[str] | None, Field(default_factory=list, description="Host tags")] = None,
+        tags: Annotated[list[str] | None, Field(description="Host tags")] = None,
         compose_path: Annotated[
             str, Field(default="", description="Docker Compose file path")
         ] = "",
@@ -583,8 +651,12 @@ class DockerMCPServer:
             str, Field(default="", description="Application data storage path")
         ] = "",
         enabled: Annotated[bool, Field(default=True, description="Whether host is enabled")] = True,
-        zfs_capable: Annotated[bool, Field(default=False, description="Whether host has ZFS available")] = False,
-        zfs_dataset: Annotated[str, Field(default="", description="ZFS dataset path for appdata")] = "",
+        zfs_capable: Annotated[
+            bool, Field(default=False, description="Whether host has ZFS available")
+        ] = False,
+        zfs_dataset: Annotated[
+            str, Field(default="", description="ZFS dataset path for appdata")
+        ] = "",
         ssh_config_path: Annotated[
             str, Field(default="", description="Path to SSH config file")
         ] = "",
@@ -669,8 +741,16 @@ class DockerMCPServer:
                 zfs_capable=zfs_capable,
                 zfs_dataset=zfs_dataset,
                 port=port,
-                cleanup_type=cast(Any, cleanup_type if cleanup_type and cleanup_type in ['check', 'safe', 'moderate', 'aggressive'] else None),
-                frequency=cast(Any, frequency if frequency and frequency in ['daily', 'weekly', 'monthly', 'custom'] else None),
+                cleanup_type=cast(
+                    Any,
+                    cleanup_type
+                    if cleanup_type in ["check", "safe", "moderate", "aggressive"]
+                    else None,
+                ),
+                frequency=cast(
+                    Any,
+                    frequency if frequency in ["daily", "weekly", "monthly", "custom"] else None,
+                ),
                 time=time if time else None,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,
@@ -806,7 +886,7 @@ class DockerMCPServer:
             str, Field(default="", description="Docker Compose file content")
         ] = "",
         environment: Annotated[
-            dict[str, str] | None, Field(default_factory=dict, description="Environment variables")
+            dict[str, str] | None, Field(description="Environment variables")
         ] = None,
         pull_images: Annotated[
             bool, Field(default=True, description="Pull images before deploying")
@@ -821,7 +901,7 @@ class DockerMCPServer:
         ] = False,
         options: Annotated[
             dict[str, str] | None,
-            Field(default_factory=dict, description="Additional options for the operation"),
+            Field(description="Additional options for the operation"),
         ] = None,
         target_host_id: Annotated[
             str, Field(default="", description="Target host ID for migration operations")
@@ -1092,16 +1172,17 @@ class DockerMCPServer:
 
         # Recreate logs service with updated config
         from .services.logs import LogsService
+
         self.logs_service = LogsService(new_config, self.context_manager)
         # Propagate the new logs service to dependent services
         try:
             self.container_service.logs_service = self.logs_service
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.debug("Failed to set logs_service on container_service", error=str(e))
         try:
             self.stack_service.logs_service = self.logs_service
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.debug("Failed to set logs_service on stack_service", error=str(e))
 
         self.logger.info("Configuration updated", hosts=list(new_config.hosts.keys()))
 
@@ -1223,7 +1304,9 @@ def _setup_logging_system(args, log_dir: str | None):
 
     # Setup logging with error handling
     try:
-        setup_logging(log_dir=log_dir or "/tmp", log_level=args.log_level, max_file_size_mb=max_file_size_mb)
+        setup_logging(
+            log_dir=log_dir or "/tmp", log_level=args.log_level, max_file_size_mb=max_file_size_mb
+        )
         logger = get_server_logger()
 
         # Log successful initialization with configuration details
