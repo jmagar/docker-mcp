@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 import docker
 import structlog
 from fastmcp.resources.resource import FunctionResource
-from pydantic import AnyUrl
 
 logger = structlog.get_logger()
 
@@ -111,12 +110,12 @@ class DockerInfoResource(FunctionResource):
 
         super().__init__(
             fn=_get_docker_info,
-            uri=AnyUrl("docker://{host_id}/info"),
+            uri="docker://{host_id}/info",
             name="Docker Host Information",
             title="Docker host system information and configuration",
             description="Provides comprehensive Docker host information including version, system info, and configuration details",
             mime_type="application/json",
-            tags={"docker", "system", "info"},
+            tags=("docker", "system", "info"),
         )
 
 
@@ -207,12 +206,12 @@ class DockerContainersResource(FunctionResource):
 
         super().__init__(
             fn=_get_containers,
-            uri=AnyUrl("docker://{host_id}/containers"),
+            uri="docker://{host_id}/containers",
             name="Docker Container Listings",
             title="List of Docker containers on a host",
             description="Provides comprehensive container information including status, networks, volumes, and compose project details",
             mime_type="application/json",
-            tags={"docker", "containers"},
+            tags=("docker", "containers"),
         )
 
 
@@ -308,10 +307,10 @@ class DockerComposeResource(FunctionResource):
 
         super().__init__(
             fn=_get_compose_info,
-            uri=AnyUrl("docker://{host_id}/compose"),
+            uri="docker://{host_id}/compose",
             name="Docker Compose Information",
             title="Docker Compose stacks and projects",
             description="Provides information about Docker Compose stacks, projects, and their configurations on a host",
             mime_type="application/json",
-            tags={"docker", "compose", "stacks"},
+            tags=("docker", "compose", "stacks"),
         )

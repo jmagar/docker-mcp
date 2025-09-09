@@ -49,7 +49,11 @@ class StackNetwork:
             try:
                 result = await asyncio.to_thread(
                     subprocess.run,  # nosec B603
-                    source_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
+                    source_ssh_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
                 )
                 ssh_tests["source_ssh"] = {
                     "success": result.returncode == 0 and "SSH_OK" in result.stdout,
@@ -64,7 +68,11 @@ class StackNetwork:
             try:
                 result = await asyncio.to_thread(
                     subprocess.run,  # nosec B603
-                    target_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
+                    target_ssh_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
                 )
                 ssh_tests["target_ssh"] = {
                     "success": result.returncode == 0 and "SSH_OK" in result.stdout,
@@ -136,10 +144,14 @@ class StackNetwork:
 
                             await asyncio.gather(
                                 asyncio.to_thread(
-                                    subprocess.run, cleanup_source, check=False  # nosec B603
+                                    subprocess.run,
+                                    cleanup_source,
+                                    check=False,  # nosec B603
                                 ),
                                 asyncio.to_thread(
-                                    subprocess.run, cleanup_target, check=False  # nosec B603
+                                    subprocess.run,
+                                    cleanup_target,
+                                    check=False,  # nosec B603
                                 ),
                             )
                         else:
@@ -327,7 +339,11 @@ class StackNetwork:
 
             create_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
-                create_cmd, capture_output=True, text=True, check=False, timeout=30
+                create_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
             )
 
             if create_result.returncode != 0 or "CREATED" not in create_result.stdout:
@@ -344,7 +360,11 @@ class StackNetwork:
 
             transfer_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
-                transfer_cmd, capture_output=True, text=True, check=False, timeout=60
+                transfer_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
             )
 
             transfer_time = time.time() - start_time
@@ -374,7 +394,9 @@ class StackNetwork:
             await asyncio.gather(
                 *[
                     asyncio.to_thread(
-                        subprocess.run, cmd, check=False  # nosec B603
+                        subprocess.run,
+                        cmd,
+                        check=False,  # nosec B603
                     )
                     for cmd in cleanup_commands
                 ]

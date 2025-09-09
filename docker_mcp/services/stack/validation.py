@@ -69,7 +69,7 @@ class StackValidation:
 
     def _validate_yaml_syntax(
         self, compose_content: str, issues: list[str], details: dict
-    ) -> dict | None:
+    ) -> Any | None:
         """Validate YAML syntax and return parsed data."""
         import yaml
 
@@ -161,10 +161,18 @@ class StackValidation:
         for port_spec in ports:
             if isinstance(port_spec, str):
                 if ":" in port_spec:
-                    parts = port_spec.split(":")
+                    # Handle Docker Compose port formats: "host:container", "ip:host:container", "ip:host:container/proto"
+                    parts = port_spec.split("/")[0].split(":")  # Remove protocol suffix first
                     try:
-                        int(parts[0])  # host port
-                        int(parts[1])  # container port
+                        if len(parts) == 2:
+                            int(parts[0])  # host port
+                            int(parts[1])  # container port
+                        elif len(parts) == 3:
+                            # ip:host:container format - validate host and container ports
+                            int(parts[1])  # host port
+                            int(parts[2])  # container port
+                        else:
+                            raise ValueError("Invalid port format")
                     except (ValueError, IndexError):
                         service_issues.append(
                             f"Service '{service_name}': Invalid port specification '{port_spec}'"
@@ -212,7 +220,11 @@ class StackValidation:
             ]
             result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
-                df_cmd, capture_output=True, text=True, check=False
+                df_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -274,6 +286,7 @@ class StackValidation:
                     capture_output=True,
                     text=True,
                     check=False,  # nosec B603
+                    timeout=30,
                 )
 
                 is_available = result.returncode == 0 and "AVAILABLE" in result.stdout
@@ -406,6 +419,7 @@ class StackValidation:
                     capture_output=True,
                     text=True,
                     check=False,  # nosec B603
+                    timeout=30,
                 )
 
                 is_in_use = result.returncode == 0 and "IN_USE" in result.stdout
@@ -492,6 +506,7 @@ class StackValidation:
                     capture_output=True,
                     text=True,
                     check=False,  # nosec B603
+                    timeout=30,
                 )
 
                 has_conflict = result.returncode == 0 and "CONFLICT" in result.stdout
@@ -524,6 +539,7 @@ class StackValidation:
                     capture_output=True,
                     text=True,
                     check=False,  # nosec B603
+                    timeout=30,
                 )
 
                 has_conflict = result.returncode == 0 and "CONFLICT" in result.stdout

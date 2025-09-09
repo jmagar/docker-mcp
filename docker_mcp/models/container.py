@@ -80,7 +80,7 @@ class DeployStackRequest(BaseModel):
         return super().model_dump(**kwargs)
 
 
-class ContainerAction(BaseModel):
+class ContainerActionRequest(BaseModel):
     """Request to perform an action on a container."""
 
     host_id: str

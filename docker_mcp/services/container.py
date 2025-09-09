@@ -4,7 +4,7 @@ Container Management Service
 Business logic for Docker container operations with formatted output.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -54,7 +54,7 @@ class ContainerService:
             "action": action,
             "error": str(error),
             "error_type": type(error).__name__,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
     def _validate_container_safety(self, container_id: str) -> tuple[bool, str]:
@@ -528,7 +528,7 @@ class ContainerService:
 
             # Format: host_port→container_port/protocol
             port_str = (
-                f"{mapping['host_port']}→{mapping['container_port']}/{mapping['protocol'].lower()}"
+                f"{mapping['host_port']}→{mapping['container_port']}/{mapping['protocol']}"
             )
             if mapping["is_conflict"]:
                 port_str = f"⚠️{port_str}"
@@ -661,7 +661,7 @@ class ContainerService:
     ) -> dict[str, Any]:
         """Handle list container action."""
         if not host_id:
-            return {"success": False, "error": "host_id is required for list action"}
+            return {"success": False, "error": "host_id is required for list action", "action": "list"}
 
         # Validate pagination parameters
         if limit < 1 or limit > 1000:
@@ -675,9 +675,9 @@ class ContainerService:
     async def _handle_info_action(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Handle container info action."""
         if not host_id:
-            return {"success": False, "error": "host_id is required for info action"}
+            return {"success": False, "error": "host_id is required for info action", "action": "info"}
         if not container_id:
-            return {"success": False, "error": "container_id is required for info action"}
+            return {"success": False, "error": "container_id is required for info action", "action": "info", "host_id": host_id}
 
         info_result = await self.get_container_info(host_id, container_id)
         return self._extract_structured_content(info_result)
@@ -687,9 +687,9 @@ class ContainerService:
     ) -> dict[str, Any]:
         """Handle container management actions (start, stop, restart, etc.)."""
         if not host_id:
-            return {"success": False, "error": f"host_id is required for {action} action"}
+            return {"success": False, "error": f"host_id is required for {action} action", "action": str(action)}
         if not container_id:
-            return {"success": False, "error": f"container_id is required for {action} action"}
+            return {"success": False, "error": f"container_id is required for {action} action", "action": str(action), "host_id": host_id}
 
         # Validate timeout parameter
         if timeout < 1 or timeout > 300:
@@ -703,12 +703,12 @@ class ContainerService:
     ) -> dict[str, Any]:
         """Handle container logs action."""
         if not host_id:
-            return {"success": False, "error": "host_id is required for logs action"}
+            return {"success": False, "error": "host_id is required for logs action", "action": "logs"}
         if not container_id:
-            return {"success": False, "error": "container_id is required for logs action"}
+            return {"success": False, "error": "container_id is required for logs action", "action": "logs", "host_id": host_id}
 
         # Validate lines parameter
-        if lines < 1 or lines > 1000:
+        if lines < 1 or lines > 10000:
             return {"success": False, "error": "lines must be between 1 and 10000"}
 
         try:

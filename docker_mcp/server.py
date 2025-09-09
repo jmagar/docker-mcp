@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Annotated, Any, cast
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
-    from docker_mcp.services import ContainerService, HostService, StackService
+    from docker_mcp.services.container import ContainerService
+    from docker_mcp.services.host import HostService
+    from docker_mcp.services.stack_service import StackService
 
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
@@ -66,21 +68,17 @@ except ImportError:
 # Import enum definitions
 try:
     from .models.enums import (
-        CleanupType,
         ComposeAction,
         ContainerAction,
         HostAction,
         ProtocolLiteral,
-        ScheduleFrequency,
     )
 except ImportError:
     from docker_mcp.models.enums import (
-        CleanupType,
         ComposeAction,
         ContainerAction,
         HostAction,
         ProtocolLiteral,
-        ScheduleFrequency,
     )
 
 
@@ -524,8 +522,8 @@ class DockerMCPServer:
         """Get the base URL for auth callbacks."""
         base_url = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL")
         if not base_url:
-            # Fallback to host/port (use http unless explicitly running behind TLS)
-            scheme = "http"
+            # Check for TLS environment variable
+            scheme = "https" if os.getenv("FASTMCP_ENABLE_TLS", "").lower() in ("1", "true", "yes") else "http"
             host = self.config.server.host
             port = self.config.server.port
             base_url = f"{scheme}://{host}:{port}"
@@ -757,16 +755,8 @@ class DockerMCPServer:
                 zfs_capable=zfs_capable,
                 zfs_dataset=zfs_dataset,
                 port=port,
-                cleanup_type=cast(
-                    CleanupType | None,
-                    cleanup_type
-                    if cleanup_type in ["check", "safe", "moderate", "aggressive"]
-                    else None,
-                ),
-                frequency=cast(
-                    ScheduleFrequency | None,
-                    frequency if frequency in ["daily", "weekly", "monthly", "custom"] else None,
-                ),
+                cleanup_type=cleanup_type if cleanup_type in ["check", "safe", "moderate", "aggressive"] else None,
+                frequency=frequency if frequency in ["daily", "weekly", "monthly", "custom"] else None,
                 time=time if time else None,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,
@@ -783,46 +773,29 @@ class DockerMCPServer:
         # Delegate to service layer for business logic
         return await self.host_service.handle_action(
             action,
-            host_id=params.host_id,
-            ssh_host=params.ssh_host,
-            ssh_user=params.ssh_user,
-            ssh_port=params.ssh_port,
-            ssh_key_path=params.ssh_key_path,
-            description=params.description,
-            tags=params.tags,
-            compose_path=params.compose_path,
-            appdata_path=params.appdata_path,
-            enabled=params.enabled,
-            zfs_capable=params.zfs_capable,
-            zfs_dataset=params.zfs_dataset,
-            port=params.port,
-            cleanup_type=params.cleanup_type,
-            frequency=params.frequency,
-            time=params.time,
-            ssh_config_path=params.ssh_config_path,
-            selected_hosts=params.selected_hosts_list,
+            **params.model_dump(exclude={"action"})
         )
 
     async def docker_container(
         self,
         action: Annotated[str | ContainerAction, Field(description="Action to perform")],
-        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
-        container_id: Annotated[str, Field(default="", description="Container identifier")] = "",
+        host_id: Annotated[str, Field(default="", description="Host identifier")],
+        container_id: Annotated[str, Field(default="", description="Container identifier")],
         all_containers: Annotated[
             bool, Field(default=False, description="Include all containers, not just running")
-        ] = False,
+        ],
         limit: Annotated[
             int, Field(default=20, ge=1, le=1000, description="Maximum number of results to return")
-        ] = 20,
-        offset: Annotated[int, Field(default=0, ge=0, description="Number of results to skip")] = 0,
-        follow: Annotated[bool, Field(default=False, description="Follow log output")] = False,
+        ],
+        offset: Annotated[int, Field(default=0, ge=0, description="Number of results to skip")],
+        follow: Annotated[bool, Field(default=False, description="Follow log output")],
         lines: Annotated[
             int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve")
-        ] = 100,
-        force: Annotated[bool, Field(default=False, description="Force the operation")] = False,
+        ],
+        force: Annotated[bool, Field(default=False, description="Force the operation")],
         timeout: Annotated[
             int, Field(default=10, ge=1, le=300, description="Operation timeout in seconds")
-        ] = 10,
+        ],
     ) -> ToolResult | dict[str, Any]:
         """Consolidated Docker container management tool.
 
@@ -994,20 +967,7 @@ class DockerMCPServer:
         # Delegate to service layer for business logic
         return await self.stack_service.handle_action(
             action,
-            host_id=params.host_id,
-            stack_name=params.stack_name,
-            compose_content=params.compose_content,
-            environment=params.environment,
-            pull_images=params.pull_images,
-            recreate=params.recreate,
-            follow=params.follow,
-            lines=params.lines,
-            dry_run=params.dry_run,
-            options=params.options,
-            target_host_id=params.target_host_id,
-            remove_source=params.remove_source,
-            skip_stop_source=params.skip_stop_source,
-            start_target=params.start_target,
+            **params.model_dump(exclude={"action"})
         )
 
     async def add_docker_host(

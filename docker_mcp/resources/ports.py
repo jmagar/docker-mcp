@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 
 import structlog
 from fastmcp.resources.resource import FunctionResource
-from pydantic import AnyUrl
 
 logger = structlog.get_logger()
 
@@ -32,7 +31,7 @@ class PortMappingResource(FunctionResource):
     - use_cache: Use cached data (default: True)
     """
 
-    def __init__(self, container_service: "ContainerService", server_instance: "DockerMCPServer"):
+    def __init__(self, _container_service: "ContainerService", server_instance: "DockerMCPServer"):
         """Initialize the port mapping resource.
 
         Dependencies are captured in a closure to avoid setting attributes
@@ -121,10 +120,10 @@ class PortMappingResource(FunctionResource):
         # Initialize FunctionResource with closure-based function
         super().__init__(
             fn=_get_port_data,
-            uri=AnyUrl("ports://{host_id}"),
+            uri="ports://{host_id}",
             name="Docker Port Mappings",
             title="Port mappings for Docker hosts",
             description="Provides comprehensive port mapping information for Docker containers on a host",
             mime_type="application/json",
-            tags={"docker", "ports", "networking"},
+            tags=("docker", "ports", "networking"),
         )

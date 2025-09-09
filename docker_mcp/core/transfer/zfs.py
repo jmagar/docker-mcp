@@ -55,6 +55,7 @@ class ZFSTransfer(BaseTransfer):
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=300,
             )
 
             if "FAILED" in result.stdout:
@@ -68,6 +69,7 @@ class ZFSTransfer(BaseTransfer):
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=300,
             )
 
             if "FAILED" in result.stdout:
@@ -127,6 +129,7 @@ class ZFSTransfer(BaseTransfer):
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=300,
             )
 
             if result.returncode != 0:
@@ -145,6 +148,7 @@ class ZFSTransfer(BaseTransfer):
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=300,
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -159,6 +163,7 @@ class ZFSTransfer(BaseTransfer):
                 mount_cmd,
                 check=False,
                 capture_output=True,
+                timeout=300,
                 text=True,
             )
 
@@ -182,12 +187,15 @@ class ZFSTransfer(BaseTransfer):
             Dataset name (e.g., rpool/appdata/authelia)
         """
         service_name = service_path.split("/")[-1]
+        if not host.zfs_dataset:
+            raise ZFSError(f"Host {host.hostname} missing zfs_dataset configuration")
         expected_dataset = f"{host.zfs_dataset}/{service_name}"
 
         # Check if dataset already exists
         ssh_cmd = self.build_ssh_cmd(host)
         check_cmd = ssh_cmd + [
-            f"zfs list {expected_dataset} >/dev/null 2>&1 && echo 'EXISTS' || echo 'MISSING'"
+            f"zfs list {shlex.quote(expected_dataset)} >/dev/null 2>&1 && "
+            "echo 'EXISTS' || echo 'MISSING'"
         ]
 
         result = await asyncio.to_thread(
@@ -196,6 +204,7 @@ class ZFSTransfer(BaseTransfer):
             capture_output=True,
             text=True,
             check=False,
+            timeout=300,
         )
 
         if "EXISTS" in result.stdout:
@@ -217,6 +226,7 @@ class ZFSTransfer(BaseTransfer):
             capture_output=True,
             text=True,
             check=False,
+            timeout=300,
         )
 
         if "DIR_EXISTS" in path_result.stdout:
@@ -224,13 +234,14 @@ class ZFSTransfer(BaseTransfer):
             await self._convert_directory_to_dataset(host, service_path, expected_dataset)
         else:
             # No existing data - create empty dataset
-            create_cmd = ssh_cmd + [f"zfs create {expected_dataset}"]
+            create_cmd = ssh_cmd + [f"zfs create {shlex.quote(expected_dataset)}"]
             create_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
                 create_cmd,
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=300,
             )
 
             if create_result.returncode != 0:
@@ -257,6 +268,7 @@ class ZFSTransfer(BaseTransfer):
             capture_output=True,
             text=True,
             check=False,
+            timeout=300,
         )
 
         if result.returncode != 0:
@@ -264,26 +276,30 @@ class ZFSTransfer(BaseTransfer):
 
         try:
             # 2. Create ZFS dataset
-            create_cmd = ssh_cmd + [f"zfs create {dataset_name}"]
+            create_cmd = ssh_cmd + [f"zfs create {shlex.quote(dataset_name)}"]
             create_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
                 create_cmd,
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=300,
             )
 
             if create_result.returncode != 0:
                 raise ZFSError(f"Failed to create dataset {dataset_name}: {create_result.stderr}")
 
             # 3. Move data back
-            restore_cmd = ssh_cmd + [f"cp -r {shlex.quote(temp_path)}/* {shlex.quote(dir_path)}/"]
+            restore_cmd = ssh_cmd + [
+                f"rsync -aHAX {shlex.quote(temp_path)}/ {shlex.quote(dir_path)}/"
+            ]
             restore_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
                 restore_cmd,
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=300,
             )
 
             if restore_result.returncode != 0:
@@ -297,13 +313,29 @@ class ZFSTransfer(BaseTransfer):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=60,
             )
 
             self.logger.info("Successfully converted directory to dataset", dataset=dataset_name)
 
         except Exception as e:
-            # Rollback on failure
+            # Rollback on failure - clean up any partially created dataset
             self.logger.error("Dataset creation failed, rolling back", error=str(e))
+
+            # Try to destroy any partially created dataset first
+            cleanup_dataset_cmd = ssh_cmd + [
+                f"zfs destroy -r {shlex.quote(dataset_name)} 2>/dev/null || true"
+            ]
+            await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                cleanup_dataset_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+
+            # Restore original directory
             rollback_cmd = ssh_cmd + [f"mv {shlex.quote(temp_path)} {shlex.quote(dir_path)}"]
             await asyncio.to_thread(
                 subprocess.run,  # nosec B603
@@ -311,6 +343,7 @@ class ZFSTransfer(BaseTransfer):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=60,
             )
             raise
 
@@ -350,6 +383,7 @@ class ZFSTransfer(BaseTransfer):
             check=False,
             capture_output=True,
             text=True,
+            timeout=300,
         )
 
         if result.returncode != 0:
@@ -400,6 +434,7 @@ class ZFSTransfer(BaseTransfer):
             check=False,
             capture_output=True,
             text=True,
+            timeout=300,
         )
 
         if result.returncode == 0:
@@ -445,7 +480,8 @@ class ZFSTransfer(BaseTransfer):
                 # SAFETY: Never assume pool names - require explicit configuration
                 raise ZFSError(
                     f"Target ZFS dataset not found for path '{target_path}' and no target_dataset specified. "
-                    f"Please configure 'zfs_dataset' in hosts.yml for target host '{target_host.hostname}' "
+                    f"Please configure 'zfs_dataset' in hosts.yml for target host "
+                    f"'{target_host.hostname}' "
                     f"or ensure the target path is on an existing ZFS dataset."
                 )
 
@@ -503,8 +539,6 @@ class ZFSTransfer(BaseTransfer):
 
         # Build the ZFS send command - be careful with -R flag
         # Use -R (recursive) only if specifically requested, default to single snapshot
-        import shlex
-
         send_flags = "-R" if getattr(self, "_use_recursive_send", False) else ""
         send_cmd = (
             " ".join(source_ssh_cmd) + f' "zfs send {send_flags} {shlex.quote(full_snapshot)}"'
@@ -537,13 +571,14 @@ class ZFSTransfer(BaseTransfer):
             target_host=target_host.hostname,
         )
 
-        # Execute the combined command
+        # Execute the combined command with timeout
         result = await asyncio.to_thread(
             subprocess.run,  # nosec B603
             ["/bin/bash", "-c", full_cmd],
             check=False,
             capture_output=True,
             text=True,
+            timeout=3600,  # 1 hour timeout for large transfers
         )
 
         if result.returncode != 0:
@@ -591,6 +626,7 @@ class ZFSTransfer(BaseTransfer):
             capture_output=True,
             text=True,
             check=False,  # nosec B603
+            timeout=300,
         )
 
         if "NOT_FOUND" in result.stdout:
@@ -606,6 +642,7 @@ class ZFSTransfer(BaseTransfer):
             capture_output=True,
             text=True,
             check=False,  # nosec B603
+            timeout=300,
         )
 
         if "FAILED" in source_result.stdout or source_result.returncode != 0:
@@ -621,6 +658,7 @@ class ZFSTransfer(BaseTransfer):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=300,
             )
 
             if "FAILED" not in target_result.stdout and target_result.returncode == 0:
@@ -660,6 +698,7 @@ class ZFSTransfer(BaseTransfer):
             capture_output=True,
             text=True,
             check=False,  # nosec B603
+            timeout=300,
         )
 
         if access_result.returncode != 0:
@@ -993,6 +1032,7 @@ class ZFSTransfer(BaseTransfer):
             capture_output=True,
             text=True,
             check=False,  # nosec B603
+            timeout=300,
         )
 
         if result.returncode == 0 and "NOT_FOUND" not in result.stdout:
@@ -1025,6 +1065,7 @@ class ZFSTransfer(BaseTransfer):
             capture_output=True,
             text=True,
             check=False,  # nosec B603
+            timeout=300,
         )
 
         if "EXISTS" in result.stdout:
@@ -1035,13 +1076,14 @@ class ZFSTransfer(BaseTransfer):
             )
 
             # Destroy the entire dataset (this also removes all snapshots)
-            destroy_cmd = ssh_cmd + [f"zfs destroy -r {shlex.quote(dataset)} 2>/dev/null || true"]
+            destroy_cmd = ssh_cmd + [f"zfs destroy -r {shlex.quote(dataset)}"]
             destroy_result = await asyncio.to_thread(
                 subprocess.run,
                 destroy_cmd,
                 capture_output=True,
                 text=True,
                 check=False,  # nosec B603
+                timeout=300,
             )
 
             if destroy_result.returncode == 0:

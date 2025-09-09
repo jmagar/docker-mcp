@@ -96,6 +96,7 @@ class MigrationManager:
             check=False,
             capture_output=True,
             text=True,
+            timeout=300,
         )
 
         if result.returncode != 0:
@@ -129,6 +130,7 @@ class MigrationManager:
                     check=False,
                     capture_output=True,
                     text=True,
+                    timeout=60,
                 )
 
             # Wait for containers to stop and processes to fully terminate
@@ -166,6 +168,7 @@ class MigrationManager:
             check=False,
             capture_output=True,
             text=True,
+            timeout=300,
         )
 
         if result.returncode != 0:

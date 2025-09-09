@@ -20,14 +20,52 @@ class MigrationVerifier:
 
     def __init__(self):
         self.logger = logger.bind(component="migration_verifier")
+        self._checksum_algorithm_cache = {}
 
     async def _run_remote(self, cmd: list[str], description: str = "", timeout: int = 60):
         """Run a remote SSH/Docker command with timeout and consistent annotation."""
         self.logger.debug("exec_remote", description=description, cmd=cmd)
         return await asyncio.to_thread(
             subprocess.run,  # nosec B603
-            cmd, capture_output=True, text=True, check=False, timeout=timeout
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
         )
+
+    async def _detect_common_checksum_algorithm(self, source_host, target_host):
+        """Detect the best common checksum algorithm for both hosts."""
+        cache_key = f"{source_host.hostname}_{target_host.hostname}"
+        if cache_key in self._checksum_algorithm_cache:
+            return self._checksum_algorithm_cache[cache_key]
+
+        # Test both hosts for available algorithms
+        algorithms = ["sha256sum", "md5sum"]
+        common_algorithm = None
+
+        for algorithm in algorithms:
+            source_cmd = ["ssh", f"{source_host.user}@{source_host.hostname}",
+                         f"command -v {algorithm} >/dev/null 2>&1 && echo 'available' || echo 'unavailable'"]
+            target_cmd = ["ssh", f"{target_host.user}@{target_host.hostname}",
+                         f"command -v {algorithm} >/dev/null 2>&1 && echo 'available' || echo 'unavailable'"]
+
+            source_result = await self._run_remote(source_cmd, f"check_{algorithm}_source", timeout=30)
+            target_result = await self._run_remote(target_cmd, f"check_{algorithm}_target", timeout=30)
+
+            if (source_result.returncode == 0 and "available" in source_result.stdout and
+                target_result.returncode == 0 and "available" in target_result.stdout):
+                common_algorithm = algorithm
+                break
+
+        # Default to md5sum if nothing else works (most universal)
+        if not common_algorithm:
+            common_algorithm = "md5sum"
+            self.logger.warning("No common checksum algorithm found, defaulting to md5sum")
+
+        self._checksum_algorithm_cache[cache_key] = common_algorithm
+        self.logger.info("Selected checksum algorithm", algorithm=common_algorithm)
+        return common_algorithm
 
     async def create_source_inventory(
         self,
@@ -49,7 +87,7 @@ class MigrationVerifier:
             "total_size": 0,
             "paths": {},
             "critical_files": {},
-            "timestamp": time.time(),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime()),
         }
 
         for path in volume_paths:
@@ -86,23 +124,12 @@ class MigrationVerifier:
             )
 
             # Find and checksum critical files (databases, configs)
-            # Use SHA256 first, fallback to MD5 (consistent with target verification)
+            # Use MD5 consistently for maximum compatibility across hosts
             critical_cmd = ssh_cmd + [
-                f"if command -v sha256sum >/dev/null 2>&1; then "
-                f"  find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
-                f"  -exec sha256sum {{}} + 2>/dev/null; "
-                f"else "
-                f"  find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
-                f"  -exec md5sum {{}} + 2>/dev/null; "
-                f"fi"
+                f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
+                f"-exec md5sum {{}} + 2>/dev/null"
             ]
-            result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                critical_cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = await self._run_remote(critical_cmd, "critical_files", timeout=300)
 
             critical_files: dict[str, str] = {}
             if result.returncode == 0 and result.stdout.strip():
@@ -111,8 +138,12 @@ class MigrationVerifier:
                         parts = line.strip().split(None, 1)
                         if len(parts) == 2:
                             checksum, filepath = parts
-                            # Store relative path
-                            rel_path = filepath.replace(f"{path}/", "")
+                            # Store relative path (handle path normalization properly)
+                            path_normalized = path.rstrip('/')
+                            if filepath.startswith(path_normalized + '/'):
+                                rel_path = filepath[len(path_normalized) + 1:]
+                            else:
+                                rel_path = filepath
                             critical_files[rel_path] = checksum
 
             path_inventory["critical_files"] = critical_files
@@ -171,37 +202,19 @@ class MigrationVerifier:
         # Get target inventory using same methods as source
         # File count
         file_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f 2>/dev/null | wc -l"]
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            file_count_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = await self._run_remote(file_count_cmd, "file_count", timeout=300)
         target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["files_found"] = target_files
 
         # Directory count
         dir_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type d 2>/dev/null | wc -l"]
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            dir_count_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = await self._run_remote(dir_count_cmd, "dir_count", timeout=300)
         target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["dirs_found"] = target_dirs
 
         # Total size
         size_cmd = ssh_cmd + [f"du -sb {shlex.quote(target_path)} 2>/dev/null | cut -f1"]
-        result = await asyncio.to_thread(
-            subprocess.run,
-            size_cmd,
-            capture_output=True,
-            text=True,
-            check=False,  # nosec B603
-        )
+        result = await self._run_remote(size_cmd, "size_check", timeout=300)
         target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["size_found"] = target_size
 
@@ -209,13 +222,7 @@ class MigrationVerifier:
         file_list_cmd = ssh_cmd + [
             f"find {shlex.quote(target_path)} -type f -printf '%P\\n' 2>/dev/null | sort"
         ]
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            file_list_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = await self._run_remote(file_list_cmd, "file_listing", timeout=300)
         target_file_list = (
             result.stdout.strip().split("\n")
             if result.returncode == 0 and result.stdout.strip()
@@ -247,22 +254,12 @@ class MigrationVerifier:
         for rel_path, source_checksum in source_inventory["critical_files"].items():
             target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
             qfile = shlex.quote(target_file_path)
-            # Try SHA256 first, fallback to MD5
+            # Use MD5 consistently for maximum compatibility across hosts
             checksum_cmd = ssh_cmd + [
-                f"if command -v sha256sum >/dev/null 2>&1; then "
-                f"  sha256sum {qfile} 2>/dev/null | cut -d' ' -f1; "
-                f"else "
-                f"  md5sum {qfile} 2>/dev/null | cut -d' ' -f1; "
-                f"fi"
+                f"md5sum {qfile} 2>/dev/null | cut -d' ' -f1"
             ]
 
-            result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                checksum_cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            result = await self._run_remote(checksum_cmd, "checksum", timeout=300)
 
             if result.returncode == 0 and result.stdout.strip():
                 target_checksum = result.stdout.strip()
@@ -333,13 +330,7 @@ class MigrationVerifier:
         find_cmd = ssh_cmd + [
             f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            find_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
             return None
@@ -348,13 +339,7 @@ class MigrationVerifier:
 
         # Now inspect the actual container
         inspect_cmd = ssh_cmd + [f"docker inspect {shlex.quote(container_name)} 2>/dev/null"]
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            inspect_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = await self._run_remote(inspect_cmd, "inspect_container", timeout=60)
 
         if result.returncode != 0:
             return None
@@ -382,13 +367,7 @@ class MigrationVerifier:
         find_cmd = ssh_cmd + [
             f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.to_thread(
-            subprocess.run,
-            find_cmd,
-            capture_output=True,
-            text=True,
-            check=False,  # nosec B603
-        )
+        find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
             return False
@@ -398,13 +377,7 @@ class MigrationVerifier:
         test_cmd = ssh_cmd + [
             f"docker exec {shlex.quote(container_name)} ls /usr/share/nginx/html 2>/dev/null || docker exec {shlex.quote(container_name)} ls / 2>/dev/null"
         ]
-        result = await asyncio.to_thread(
-            subprocess.run,
-            test_cmd,
-            capture_output=True,
-            text=True,
-            check=False,  # nosec B603
-        )
+        result = await self._run_remote(test_cmd, "test_access", timeout=60)
         return result.returncode == 0
 
     async def _collect_startup_errors(self, ssh_cmd: list[str], stack_name: str) -> list[str]:
@@ -413,13 +386,7 @@ class MigrationVerifier:
         find_cmd = ssh_cmd + [
             f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.to_thread(
-            subprocess.run,
-            find_cmd,
-            capture_output=True,
-            text=True,
-            check=False,  # nosec B603
-        )
+        find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
             return [
@@ -431,13 +398,7 @@ class MigrationVerifier:
         logs_cmd = ssh_cmd + [
             f"docker logs {shlex.quote(container_name)} --tail 50 2>&1 | grep -i error || true"
         ]
-        result = await asyncio.to_thread(
-            subprocess.run,
-            logs_cmd,
-            capture_output=True,
-            text=True,
-            check=False,  # nosec B603
-        )
+        result = await self._run_remote(logs_cmd, "collect_logs", timeout=60)
 
         if result.stdout.strip():
             error_lines = [

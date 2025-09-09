@@ -4,7 +4,7 @@ This module provides standardized error response formatting following RFC 7807:
 Problem Details for HTTP APIs standard, adapted for MCP tool responses.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -30,14 +30,14 @@ class ErrorDetail(BaseModel):
     title: str | None = Field(default=None, description="Problem type summary")
     detail: str | None = Field(default=None, description="Specific problem details")
     instance: str | None = Field(default=None, description="Problem occurrence URI")
-    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class DockerMCPErrorResponse:
     """Factory for creating standardized Docker MCP error responses."""
 
     # Standard problem types for Docker MCP operations
-    PROBLEM_TYPES = {
+    PROBLEM_TYPES: dict[str, dict[str, str]] = {
         "host-not-found": {
             "type": "/problems/host-not-found",
             "title": "Host Not Found",
@@ -132,7 +132,18 @@ class DockerMCPErrorResponse:
         response = error_detail.model_dump(exclude_none=True)
 
         if context:
-            response.update(context)
+            # Filter out RFC 7807 reserved fields from context to avoid overwriting
+            reserved_fields = {
+                "success",
+                "error",
+                "type",
+                "title",
+                "detail",
+                "instance",
+                "timestamp",
+            }
+            filtered_context = {k: v for k, v in context.items() if k not in reserved_fields}
+            response.update(filtered_context)
 
         return response
 

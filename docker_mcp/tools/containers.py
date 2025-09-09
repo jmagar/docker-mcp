@@ -56,6 +56,14 @@ class ContainerTools:
                     "error": f"Could not connect to Docker on host {host_id}",
                     "containers": [],
                     "total": 0,
+                    "pagination": {
+                        "total": 0,
+                        "limit": limit,
+                        "offset": offset,
+                        "returned": 0,
+                        "has_next": False,
+                        "has_prev": offset > 0,
+                    },
                 }
 
             docker_containers = await asyncio.to_thread(client.containers.list, all=all_containers)
@@ -64,27 +72,51 @@ class ContainerTools:
             containers = []
             for container in docker_containers:
                 try:
-                    # Get enhanced container info including inspect data
+                    # Use container.attrs directly instead of making redundant inspect calls
                     container_id = container.id[:12]
-                    inspect_info = await self._get_container_inspect_info(host_id, container_id)
+                    container_data = container.attrs
+
+                    # Extract enhanced info directly from attrs
+                    mounts = container_data.get("Mounts", [])
+                    network_settings = container_data.get("NetworkSettings", {})
+                    labels = container_data.get("Config", {}).get("Labels", {}) or {}
+
+                    # Parse volume mounts
+                    volumes = []
+                    for mount in mounts:
+                        if mount.get("Type") == "bind":
+                            volumes.append(
+                                f"{mount.get('Source', '')}:{mount.get('Destination', '')}"
+                            )
+                        elif mount.get("Type") == "volume":
+                            volumes.append(
+                                f"{mount.get('Name', '')}:{mount.get('Destination', '')}"
+                            )
+
+                    # Parse networks
+                    networks = list(network_settings.get("Networks", {}).keys())
+
+                    # Extract compose information
+                    compose_project = labels.get("com.docker.compose.project", "")
+                    compose_file = labels.get("com.docker.compose.config-files", "")
 
                     # Extract ports from container attributes
-                    ports_dict = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+                    ports_dict = network_settings.get("Ports", {})
                     ports_str = self._format_ports_from_dict(ports_dict)
 
                     # Return enhanced container info
                     container_summary = {
                         "id": container_id,
                         "name": container.name,
-                        "image": container.attrs.get("Config", {}).get("Image", ""),
+                        "image": container_data.get("Config", {}).get("Image", ""),
                         "status": container.status,
-                        "state": container.attrs.get("State", {}).get("Status", ""),
+                        "state": container_data.get("State", {}).get("Status", ""),
                         "ports": self._parse_ports_summary(ports_str),
                         "host_id": host_id,
-                        "volumes": inspect_info.get("volumes", []),
-                        "networks": inspect_info.get("networks", []),
-                        "compose_project": inspect_info.get("compose_project", ""),
-                        "compose_file": inspect_info.get("compose_file", ""),
+                        "volumes": volumes,
+                        "networks": networks,
+                        "compose_project": compose_project,
+                        "compose_file": compose_file,
                     }
                     containers.append(container_summary)
                 except Exception as e:
@@ -279,7 +311,7 @@ class ContainerTools:
 
             # Get container and stop it using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
-            await asyncio.to_thread(container.stop, timeout=timeout)
+            await asyncio.to_thread(lambda: container.stop(timeout=timeout))
 
             logger.info(
                 "Container stopped", host_id=host_id, container_id=container_id, timeout=timeout
@@ -355,7 +387,7 @@ class ContainerTools:
 
             # Get container and restart it using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
-            await asyncio.to_thread(container.restart, timeout=timeout)
+            await asyncio.to_thread(lambda: container.restart(timeout=timeout))
 
             logger.info(
                 "Container restarted", host_id=host_id, container_id=container_id, timeout=timeout
@@ -415,7 +447,7 @@ class ContainerTools:
             container = await asyncio.to_thread(client.containers.get, container_id)
 
             # Docker SDK returns a single snapshot dict when stream=False
-            stats_raw = await asyncio.to_thread(container.stats, stream=False)
+            stats_raw = await asyncio.to_thread(lambda: container.stats(stream=False))
 
             # Parse stats data from Docker SDK format (different from CLI format)
             cpu_stats = stats_raw.get("cpu_stats", {})
@@ -788,7 +820,7 @@ class ContainerTools:
                 return f"rm -f {container_id}"
             return f"rm {container_id}"
         else:
-            raise ValueError(f"Unknown action: {action}")
+            return f"unsupported_action_{action}"
 
     async def list_host_ports(self, host_id: str) -> dict[str, Any]:
         """List all ports currently in use by containers on a Docker host (includes stopped containers).
@@ -839,7 +871,12 @@ class ContainerTools:
             raise
         except Exception as e:
             logger.error("Unexpected error listing host ports", host_id=host_id, error=str(e))
-            raise DockerCommandError(f"Failed to list ports: {e}") from e
+            return {
+                "success": False,
+                "error": f"Failed to list ports: {e}",
+                "host_id": host_id,
+                "timestamp": datetime.now().isoformat(),
+            }
 
     async def _get_containers_for_port_analysis(
         self, host_id: str, include_stopped: bool
@@ -1011,3 +1048,23 @@ class ContainerTools:
                 port_range_usage["49152-65535"] += 1
         except ValueError:
             pass
+
+    def _create_error_response(
+        self, error_msg: str, host_id: str = "", container_id: str = "", action: str = "", **kwargs
+    ) -> dict[str, Any]:
+        """Create standardized error response."""
+        response = {
+            "success": False,
+            "error": error_msg,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        if host_id:
+            response["host_id"] = host_id
+        if container_id:
+            response["container_id"] = container_id
+        if action:
+            response["action"] = action
+
+        response.update(kwargs)
+        return response

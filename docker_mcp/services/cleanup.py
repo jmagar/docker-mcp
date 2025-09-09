@@ -543,8 +543,8 @@ class CleanupService:
                 self._parse_volumes_list_line(parts, volumes)
             elif section == "containers":
                 self._parse_containers_list_line(parts, result)
-        except (ValueError, IndexError):
-            # Skip malformed lines
+        except (ValueError, IndexError) as e:
+            self.logger.debug("Skipping malformed docker df line", line=line, error=str(e))
             pass
 
     def _parse_images_list_line(self, parts: list[str], images: list[dict[str, Any]]) -> None:
@@ -586,7 +586,7 @@ class CleanupService:
             else:
                 result["container_stats"]["stopped"] += 1
                 result["cleanup_candidates"].append(
-                    {"type": "container", "name": container_name, "size": size_str}
+                    {"type": "container", "name": container_name, "size": size_str, "size_bytes": size_bytes}
                 )
 
             result["container_stats"]["total_size_bytes"] += size_bytes
@@ -622,6 +622,13 @@ class CleanupService:
         result["container_stats"]["total_size"] = format_size(
             result["container_stats"]["total_size_bytes"]
         )
+
+        # Sort cleanup candidates by size and limit to top 10
+        result["cleanup_candidates"] = sorted(
+            result["cleanup_candidates"],
+            key=lambda x: x.get("size_bytes", 0),
+            reverse=True
+        )[:10]
 
     def _analyze_cleanup_potential(self, df_output: str) -> dict[str, str]:
         """Analyze potential cleanup from docker system df output."""

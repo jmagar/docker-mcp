@@ -62,7 +62,10 @@ class StackOperations:
                     await _asyncio.sleep(0.5)  # Initial delay for deployment to settle
                     for _ in range(5):
                         list_result = await self.stack_tools.list_stacks(host_id)
-                        if any(stack_name in str(s) for s in list_result.get("stacks", [])):
+                        if any(
+                            stack_name.lower() in str(s).lower()
+                            for s in list_result.get("stacks", [])
+                        ):
                             break
                         await _asyncio.sleep(1)
                 except Exception as e:
@@ -71,6 +74,7 @@ class StackOperations:
                         host_id=host_id,
                         stack_name=stack_name,
                         error=str(e),
+                        error_type=type(e).__name__,
                     )
                 return ToolResult(
                     content=[

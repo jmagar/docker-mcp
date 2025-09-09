@@ -90,7 +90,9 @@ class HostService:
             # Add to configuration
             self.config.hosts[host_id] = host_config
             # Always save configuration changes to disk
-            save_config(self.config, getattr(self.config, "config_file", None))
+            await asyncio.to_thread(
+                save_config, self.config, getattr(self.config, "config_file", None)
+            )
 
             self.logger.info(
                 "Docker host added", host_id=host_id, hostname=ssh_host, tested=connection_tested
@@ -270,7 +272,9 @@ class HostService:
 
             # Save configuration changes to disk
             try:
-                save_config(self.config, getattr(self.config, "config_file", None))
+                await asyncio.to_thread(
+                    save_config, self.config, getattr(self.config, "config_file", None)
+                )
             except Exception as save_error:
                 # Rollback the in-memory change if save fails
                 self.config.hosts[host_id] = current_host
@@ -321,7 +325,9 @@ class HostService:
             del self.config.hosts[host_id]
 
             # Always save configuration changes to disk
-            save_config(self.config, getattr(self.config, "config_file", None))
+            await asyncio.to_thread(
+                save_config, self.config, getattr(self.config, "config_file", None)
+            )
 
             self.logger.info("Docker host removed", host_id=host_id, hostname=hostname)
 
@@ -433,7 +439,7 @@ class HostService:
         """
         try:
             # Force reload configuration from disk to avoid stale in-memory state
-            self._reload_config(host_id)
+            await self._reload_config(host_id)
 
             # Check if host exists
             if host_id not in self.config.hosts:
@@ -462,7 +468,7 @@ class HostService:
             }
 
             # Generate recommendations
-            self._generate_recommendations(
+            await self._generate_recommendations(
                 capabilities, compose_result, appdata_result, zfs_result, host_id
             )
 
@@ -489,11 +495,11 @@ class HostService:
                 HOST_ID: host_id,
             }
 
-    def _reload_config(self, host_id: str) -> None:
+    async def _reload_config(self, host_id: str) -> None:
         """Reload configuration from disk to avoid stale in-memory state."""
         try:
             config_file_path = getattr(self.config, "config_file", None)
-            fresh_config = load_config(config_file_path)
+            fresh_config = await asyncio.to_thread(load_config, config_file_path)
             self.config = fresh_config
             self.logger.info(
                 "Reloaded configuration from disk before discovery",
@@ -550,7 +556,7 @@ class HostService:
 
         return compose_result, appdata_result, zfs_result
 
-    def _generate_recommendations(
+    async def _generate_recommendations(
         self,
         capabilities: dict[str, Any],
         compose_result: dict[str, Any],
@@ -581,10 +587,12 @@ class HostService:
 
         # Add ZFS recommendation and handle configuration updates
         if zfs_result["capable"]:
-            zfs_recommendation = self._handle_zfs_configuration(zfs_result, host_id)
+            zfs_recommendation = await self._handle_zfs_configuration(zfs_result, host_id)
             capabilities["recommendations"].append(zfs_recommendation)
 
-    def _handle_zfs_configuration(self, zfs_result: dict[str, Any], host_id: str) -> dict[str, Any]:
+    async def _handle_zfs_configuration(
+        self, zfs_result: dict[str, Any], host_id: str
+    ) -> dict[str, Any]:
         """Handle ZFS configuration updates and return recommendation."""
         host = self.config.hosts[host_id]
         tag_added = False
@@ -617,7 +625,7 @@ class HostService:
             )
 
         # Save configuration if any changes were made
-        save_success, save_error = self._save_config_changes(config_changed, host_id)
+        save_success, save_error = await self._save_config_changes(config_changed, host_id)
 
         # Build recommendation
         message = (
@@ -643,7 +651,9 @@ class HostService:
 
         return zfs_recommendation
 
-    def _save_config_changes(self, config_changed: bool, host_id: str) -> tuple[bool, str | None]:
+    async def _save_config_changes(
+        self, config_changed: bool, host_id: str
+    ) -> tuple[bool, str | None]:
         """Save configuration changes and return success status."""
         if not config_changed:
             return True, None
@@ -655,7 +665,7 @@ class HostService:
                 host_id=host_id,
                 config_file_path=config_file_path,
             )
-            save_config(self.config, config_file_path)
+            await asyncio.to_thread(save_config, self.config, config_file_path)
             self.logger.info(
                 "Successfully saved config after ZFS updates",
                 host_id=host_id,
@@ -1246,6 +1256,10 @@ class HostService:
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
         try:
+            # Normalize action to handle string inputs
+            if isinstance(action, str):
+                action = action.lower().strip()
+
             # Get action handlers mapping
             handlers = self._get_action_handlers()
             handler = handlers.get(action)

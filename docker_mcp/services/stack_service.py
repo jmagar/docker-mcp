@@ -13,8 +13,9 @@ if TYPE_CHECKING:
 import structlog
 from fastmcp.tools.tool import ToolResult
 
+from docker_mcp.models.enums import ComposeAction
+
 from ..core.config_loader import DockerMCPConfig
-from ..core.docker_context import DockerContextManager
 from .logs import LogsService
 from .stack.migration_orchestrator import StackMigrationOrchestrator
 from .stack.operations import StackOperations
@@ -224,14 +225,12 @@ class StackService:
         volume_utils = StackVolumeUtils()
         return volume_utils.normalize_volume_entry(volume, target_appdata, stack_name)
 
-    async def handle_action(self, action, **params) -> dict[str, Any]:
+    async def handle_action(self, action: ComposeAction | str, **params) -> dict[str, Any]:
         """Unified action handler for all stack operations.
 
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
         try:
-            from ..models.enums import ComposeAction
-
             # Route to appropriate handler
             if action == ComposeAction.LIST:
                 return await self._handle_list_action(**params)
@@ -252,6 +251,7 @@ class StackService:
                 ComposeAction.DOWN,
                 ComposeAction.RESTART,
                 ComposeAction.BUILD,
+                ComposeAction.PULL,
             ]:
                 return await self._handle_lifecycle_action(action, **params)
             else:
@@ -340,18 +340,21 @@ class StackService:
             else {"success": False, "error": "Invalid result format"}
         )
 
-    async def _handle_manage_action(self, action: str, **params) -> dict[str, Any]:
+    async def _handle_manage_action(self, action: ComposeAction | str, **params) -> dict[str, Any]:
         """Handle string-based manage actions."""
+        # Convert enum to string if needed
+        action_str = action.value if hasattr(action, "value") else str(action)
+
         host_id = params.get("host_id", "")
         stack_name = params.get("stack_name", "")
         options = params.get("options", {})
 
         if not host_id:
-            return {"success": False, "error": f"host_id is required for {action} action"}
+            return {"success": False, "error": f"host_id is required for {action_str} action"}
         if not stack_name:
-            return {"success": False, "error": f"stack_name is required for {action} action"}
+            return {"success": False, "error": f"stack_name is required for {action_str} action"}
 
-        result = await self.manage_stack(host_id, stack_name, action, options)
+        result = await self.manage_stack(host_id, stack_name, action_str, options)
         return (
             result.structured_content
             if hasattr(result, "structured_content") and result.structured_content is not None
@@ -369,7 +372,7 @@ class StackService:
             return {"success": False, "error": "host_id is required for logs action"}
         if not stack_name:
             return {"success": False, "error": "stack_name is required for logs action"}
-        if lines < 1 or lines > 1000:
+        if lines < 1 or lines > 10000:
             return {"success": False, "error": "lines must be between 1 and 10000"}
 
         try:

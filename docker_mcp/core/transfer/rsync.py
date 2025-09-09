@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+import shlex
 import subprocess
 from typing import Any
 
@@ -98,15 +99,25 @@ class RsyncTransfer(BaseTransfer):
         if dry_run:
             rsync_opts.append("--dry-run")
 
-        # Build target URL for rsync running ON source host
-        target_url = f"{target_host.user}@{target_host.hostname}:{target_path}"
+        # Build target URL for rsync running ON source host with quoted path
+        target_url = f"{target_host.user}@{target_host.hostname}:{shlex.quote(target_path)}"
 
-        # Build rsync command that will run on the source host
-        rsync_inner_cmd = f"rsync {' '.join(rsync_opts)} {source_path} {target_url}"
-
-        # Handle SSH key for target host connection (nested SSH)
+        # Build SSH options for nested connection
+        ssh_opts = []
         if target_host.identity_file:
-            rsync_inner_cmd = f"rsync {' '.join(rsync_opts)} -e 'ssh -i {target_host.identity_file}' {source_path} {target_url}"
+            ssh_opts.append(f"-i {shlex.quote(target_host.identity_file)}")
+        if hasattr(target_host, "port") and target_host.port and target_host.port != 22:
+            ssh_opts.append(f"-p {target_host.port}")
+
+        # Build rsync command that will run on the source host with quoted paths
+        quoted_source = shlex.quote(source_path)
+        if ssh_opts:
+            ssh_command = shlex.quote(f"ssh {' '.join(ssh_opts)}")
+            rsync_inner_cmd = (
+                f"rsync {' '.join(rsync_opts)} -e {ssh_command} {quoted_source} {target_url}"
+            )
+        else:
+            rsync_inner_cmd = f"rsync {' '.join(rsync_opts)} {quoted_source} {target_url}"
 
         # Full command: SSH into source, then run rsync from there to target
         rsync_cmd = ssh_cmd + [rsync_inner_cmd]
@@ -130,8 +141,13 @@ class RsyncTransfer(BaseTransfer):
         )
 
         if result.returncode != 0:
-            snippet = (result.stdout or "")[:500]
-            raise RsyncError(f"Rsync failed: {result.stderr or snippet}")
+            # Bounded output to prevent excessive error messages
+            stderr_snippet = (result.stderr or "")[:500]
+            stdout_snippet = (result.stdout or "")[:500]
+            error_msg = (
+                f"Rsync failed (exit {result.returncode}): {stderr_snippet or stdout_snippet}"
+            )
+            raise RsyncError(error_msg)
 
         # Parse rsync output for statistics
         stats = self._parse_stats(result.stdout)

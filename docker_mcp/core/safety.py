@@ -68,21 +68,25 @@ class MigrationSafety:
             # Resolve path to handle symlinks and relative paths
             resolved_path = str(Path(file_path).resolve())
 
-            # Check for forbidden paths
-            for forbidden in self.FORBIDDEN_PATHS:
-                if resolved_path == forbidden or resolved_path.startswith(forbidden + "/"):
-                    return False, f"Path '{resolved_path}' is in forbidden directory '{forbidden}'"
-
-            # Check for parent directory traversal attempts
+            # Check for parent directory traversal attempts first
             if ".." in file_path:
                 return False, f"Path '{file_path}' contains parent directory traversal"
 
-            # Check if path is in safe deletion areas
+            # Check if path is in safe deletion areas BEFORE checking forbidden paths
             is_in_safe_area = False
             for safe_path in self.SAFE_DELETE_PATHS:
                 if resolved_path.startswith(safe_path + "/"):
                     is_in_safe_area = True
                     break
+
+            # If in safe area, allow immediately
+            if is_in_safe_area:
+                return True, f"Path in safe area: {resolved_path}"
+
+            # Check for forbidden paths only after confirming not in safe area
+            for forbidden in self.FORBIDDEN_PATHS:
+                if resolved_path == forbidden or resolved_path.startswith(forbidden + "/"):
+                    return False, f"Path '{resolved_path}' is in forbidden directory '{forbidden}'"
 
             # For files outside safe areas, require more validation
             if not is_in_safe_area:
@@ -166,8 +170,10 @@ class MigrationSafety:
             )
             raise SafetyError(error_msg)
 
-        # Proceed with deletion
-        delete_cmd = ssh_cmd + [f"rm -f {file_path}"]
+        # Proceed with deletion with quoted path
+        import shlex
+
+        delete_cmd = ssh_cmd + [f"rm -f {shlex.quote(file_path)}"]
 
         try:
             result = await asyncio.to_thread(

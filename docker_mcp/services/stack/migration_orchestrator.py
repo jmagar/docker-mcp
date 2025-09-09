@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
+from structlog import BoundLogger
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
@@ -38,7 +39,7 @@ class StackMigrationOrchestrator:
         self.network = StackNetwork()
         self.risk_assessment = StackRiskAssessment()
         self.volume_utils = StackVolumeUtils()
-        self.logger = structlog.get_logger()
+        self.logger: BoundLogger = structlog.get_logger().bind(component="migration_orchestrator")
 
     def _validate_host(self, host_id: str) -> tuple[bool, str]:
         """Validate host exists in configuration."""
@@ -543,7 +544,7 @@ class StackMigrationOrchestrator:
                 "⏱️  Estimated downtime: 5-15 minutes",
             ]
         )
-        migration_data["overall_success"] = True
+        migration_data.setdefault("success", True)
 
     def _create_final_result(
         self,

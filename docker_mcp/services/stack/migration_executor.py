@@ -54,8 +54,11 @@ class StackMigrationExecutor:
             # Read compose file
             read_cmd = ssh_cmd_source + [f"cat {shlex.quote(compose_file_path)}"]
             result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                read_cmd, capture_output=True, text=True, check=False
+                subprocess.run,
+                read_cmd,
+                capture_output=True,
+                text=True,
+                check=False,  # nosec B603
             )
 
             if result.returncode != 0:
@@ -298,10 +301,9 @@ class StackMigrationExecutor:
                         target_host = self.config.hosts[host_id]
                         ssh_cmd = build_ssh_command(target_host)
                         check_cmd = ssh_cmd + [
-                            f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}' | grep -q . && echo 'RUNNING' || echo 'NOT_READY'"
+                            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | grep -q . && echo 'RUNNING' || echo 'NOT_READY'"
                         ]
 
-                        import subprocess
                         from typing import cast
 
                         result = cast(
@@ -338,6 +340,7 @@ class StackMigrationExecutor:
                 "deploy_success": True,
                 "start_success": start_stack,
                 "stack_deployed": True,
+                "container_ready": "RUNNING" in result.stdout if "result" in locals() else False,
             }
 
         except Exception as e:
@@ -396,6 +399,7 @@ class StackMigrationExecutor:
             overall_success: bool = container_success and data_success
 
             return overall_success, {
+                "success": overall_success,
                 "container_integration": container_verification,
                 "data_verification": data_verification,
                 "overall_verification": overall_success,
@@ -448,8 +452,9 @@ class StackMigrationExecutor:
             # Remove compose file (safe operation)
             remove_cmd = ssh_cmd_source + [f"rm -f {shlex.quote(compose_path)}"]
             result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                remove_cmd, check=False
+                subprocess.run,
+                remove_cmd,
+                check=False,  # nosec B603
             )
 
             cleanup_results = {
