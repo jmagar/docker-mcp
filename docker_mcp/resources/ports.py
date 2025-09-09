@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 import structlog
 from fastmcp.resources.resource import FunctionResource
+from pydantic import AnyUrl
 
 logger = structlog.get_logger()
 
@@ -120,10 +121,10 @@ class PortMappingResource(FunctionResource):
         # Initialize FunctionResource with closure-based function
         super().__init__(
             fn=_get_port_data,
-            uri="ports://{host_id}",
+            uri=AnyUrl("ports://{host_id}"),
             name="Docker Port Mappings",
             title="Port mappings for Docker hosts",
             description="Provides comprehensive port mapping information for Docker containers on a host",
             mime_type="application/json",
-            tags=("docker", "ports", "networking"),
+            tags={"docker", "ports", "networking"},
         )

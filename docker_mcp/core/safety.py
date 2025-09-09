@@ -72,39 +72,43 @@ class MigrationSafety:
             if ".." in file_path:
                 return False, f"Path '{file_path}' contains parent directory traversal"
 
-            # Check if path is in safe deletion areas BEFORE checking forbidden paths
-            is_in_safe_area = False
-            for safe_path in self.SAFE_DELETE_PATHS:
-                if resolved_path.startswith(safe_path + "/"):
-                    is_in_safe_area = True
-                    break
-
-            # If in safe area, allow immediately
-            if is_in_safe_area:
+            # Check if path is in safe deletion areas
+            if self._is_in_safe_area(resolved_path):
                 return True, f"Path in safe area: {resolved_path}"
 
-            # Check for forbidden paths only after confirming not in safe area
-            for forbidden in self.FORBIDDEN_PATHS:
-                if resolved_path == forbidden or resolved_path.startswith(forbidden + "/"):
-                    return False, f"Path '{resolved_path}' is in forbidden directory '{forbidden}'"
+            # Check for forbidden paths
+            if forbidden_path := self._get_forbidden_path(resolved_path):
+                return False, f"Path '{resolved_path}' is in forbidden directory '{forbidden_path}'"
 
-            # For files outside safe areas, require more validation
-            if not is_in_safe_area:
-                # Allow specific file extensions in any directory
-                if file_path.endswith((".tar.gz", ".tar", ".zip", ".tmp", ".temp", ".migration")):
-                    return True, f"File type allowed: {file_path}"
-
-                # Allow specific filenames
-                filename = Path(file_path).name
-                if filename in ("docker-compose.yml", "docker-compose.yaml"):
-                    return True, f"Docker compose file allowed: {file_path}"
-
-                return False, f"Path '{resolved_path}' is not in safe deletion area"
-
-            return True, f"Path validated: {resolved_path}"
+            # Validate files outside safe areas
+            return self._validate_file_outside_safe_area(file_path, resolved_path)
 
         except Exception as e:
             return False, f"Path validation error: {str(e)}"
+
+    def _is_in_safe_area(self, resolved_path: str) -> bool:
+        """Check if path is in a safe deletion area."""
+        return any(resolved_path.startswith(safe_path + "/") for safe_path in self.SAFE_DELETE_PATHS)
+
+    def _get_forbidden_path(self, resolved_path: str) -> str | None:
+        """Get forbidden path if resolved path is forbidden, None otherwise."""
+        for forbidden in self.FORBIDDEN_PATHS:
+            if resolved_path == forbidden or resolved_path.startswith(forbidden + "/"):
+                return forbidden
+        return None
+
+    def _validate_file_outside_safe_area(self, file_path: str, resolved_path: str) -> tuple[bool, str]:
+        """Validate files outside safe areas."""
+        # Allow specific file extensions in any directory
+        if file_path.endswith((".tar.gz", ".tar", ".zip", ".tmp", ".temp", ".migration")):
+            return True, f"File type allowed: {file_path}"
+
+        # Allow specific filenames
+        filename = Path(file_path).name
+        if filename in ("docker-compose.yml", "docker-compose.yaml"):
+            return True, f"Docker compose file allowed: {file_path}"
+
+        return False, f"Path '{resolved_path}' is not in safe deletion area"
 
     def add_to_deletion_manifest(self, file_path: str, operation: str, reason: str) -> None:
         """Add a deletion operation to the manifest for audit trail.

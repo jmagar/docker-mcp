@@ -10,7 +10,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
@@ -495,28 +495,9 @@ class DockerMCPServer:
 
         Returns a provider instance or None if auth should be disabled.
         """
-        # Import lazily; if unavailable, skip auth
-        try:
-            from fastmcp.server.auth.providers.google import GoogleProvider  # type: ignore
-        except Exception as e:  # pragma: no cover - import safety
-            self.logger.error("Failed to import GoogleProvider", error=str(e))
-            return None
-
-        # Build base URL and configuration
-        base_url = self._get_auth_base_url()
-        redirect_path = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH", "/auth/callback")
-        required_scopes = self._parse_auth_scopes()
-        timeout = self._parse_auth_timeout()
-
-        # Build provider kwargs
-        kwargs = self._build_provider_kwargs(base_url, redirect_path, required_scopes, timeout)
-
-        provider = GoogleProvider(**kwargs)  # type: ignore[arg-type]
-
-        # Configure allowed redirects if specified
-        self._configure_allowed_redirects(provider)
-
-        return provider
+        # OAuth authentication disabled for now
+        self.logger.info("OAuth authentication disabled")
+        return None
 
     def _get_auth_base_url(self) -> str:
         """Get the base URL for auth callbacks."""
@@ -678,9 +659,13 @@ class DockerMCPServer:
             str, Field(default="", description="Comma-separated list of hosts to select")
         ] = "",
         cleanup_type: Annotated[
-            str, Field(default="", description="Type of cleanup to perform")
-        ] = "",
-        frequency: Annotated[str, Field(default="", description="Cleanup schedule frequency")] = "",
+            Literal["check", "safe", "moderate", "aggressive"] | None,
+            Field(default=None, description="Type of cleanup to perform")
+        ] = None,
+        frequency: Annotated[
+            Literal["daily", "weekly", "monthly", "custom"] | None,
+            Field(default=None, description="Cleanup schedule frequency")
+        ] = None,
         time: Annotated[
             str, Field(default="", description="Cleanup schedule time in HH:MM format")
         ] = "",
@@ -755,8 +740,8 @@ class DockerMCPServer:
                 zfs_capable=zfs_capable,
                 zfs_dataset=zfs_dataset,
                 port=port,
-                cleanup_type=cleanup_type if cleanup_type in ["check", "safe", "moderate", "aggressive"] else None,
-                frequency=frequency if frequency in ["daily", "weekly", "monthly", "custom"] else None,
+                cleanup_type=cleanup_type,
+                frequency=frequency,
                 time=time if time else None,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,

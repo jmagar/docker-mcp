@@ -12,26 +12,67 @@ Docker contexts cannot access remote filesystem paths. Stack deployment requires
 - Directory creation and file persistence
 - Remote docker compose command execution
 
-## Services Layer Pattern
+## Consolidated Action-Parameter Pattern
+
+This project uses the **Consolidated Action-Parameter Pattern** instead of simple `@mcp.tool()` decorators. This architectural choice is correct for complex Docker management operations.
+
+### Why This Pattern?
+
+Docker infrastructure management requires sophisticated capabilities that simple decorators cannot provide:
+
+1. **Complex Multi-Step Operations**: Operations like migration require orchestration:
+   - `migrate_stack`: stop → verify → archive → transfer → deploy → validate
+   - `cleanup`: analyze → confirm → execute → verify
+   - `deploy`: validate → pull → configure → start → health-check
+
+2. **Hybrid Connection Model**: Different operations need different approaches:
+   - **Container operations**: Docker contexts (API over SSH tunnel) for efficiency
+   - **Stack operations**: Direct SSH (filesystem access) for compose file management
+
+3. **Stateful Resource Management**:
+   - Connection pooling and context caching
+   - Resource lifecycle management
+   - Cross-cutting concerns (logging, validation, error handling)
+
+4. **Token Efficiency**: 
+   - **2.6x more efficient**: 3 consolidated tools use ~5k tokens vs 27 individual tools using ~9.7k tokens
+   - Each tool adds ~400-500 tokens - consolidation reduces this multiplicatively
+
+### Implementation Pattern
 
 ```python
-# Tools delegate to services for business logic
+# CORRECT: Consolidated Action-Parameter Pattern with Service Delegation
 class DockerMCPServer:
     def __init__(self, config):
         self.context_manager = DockerContextManager(config)
-        self.host_service = HostService(config)
+        # Service delegation for complex multi-step operations
+        self.host_service = HostService(config, self.context_manager)
         self.container_service = ContainerService(config, self.context_manager)
         self.stack_service = StackService(config, self.context_manager)
 
-    # MCP tools delegate to services
-    async def list_containers(self, host_id, ...):
-        return await self.container_service.list_containers(host_id, ...)
+    # MCP tools use consolidated action pattern
+    async def docker_hosts(self, action: Literal["list", "add", "ports", ...], **kwargs):
+        """Consolidated Docker hosts management."""
+        # Route to appropriate service method based on action
+        return await self.host_service.handle_action(action, **kwargs)
+        
+    async def docker_container(self, action: Literal["list", "start", "stop", ...], **kwargs):
+        """Consolidated Docker container management."""
+        return await self.container_service.handle_action(action, **kwargs)
+        
+    async def docker_compose(self, action: Literal["list", "deploy", "up", ...], **kwargs):
+        """Consolidated Docker Compose stack management."""
+        return await self.stack_service.handle_action(action, **kwargs)
 ```
 
-**Service Responsibilities:**
-- **Services**: Business logic, validation, ToolResult formatting
-- **Tools**: Direct Docker/SSH operations, data structures
+### Service Layer Benefits
+
+- **Services**: Business logic, validation, ToolResult formatting, complex orchestration
+- **Tools**: Direct Docker/SSH operations, data structures, low-level implementation
 - **Models**: Pydantic validation and type safety
+
+**Why NOT Simple Decorators:**
+Simple `@mcp.tool()` decorators work for stateless operations, but Docker infrastructure management requires orchestration, state management, and service composition that only the consolidated pattern can provide.
 
 ## Transfer Architecture Pattern
 
@@ -156,6 +197,8 @@ uv run mypy docker_mcp/                  # Type checking
 
 ## Error Handling Patterns
 
+### Modern Async Exception Handling
+
 ```python
 # Custom exception hierarchy
 class DockerMCPError(Exception):
@@ -167,33 +210,133 @@ class DockerContextError(DockerMCPError):
 class DockerCommandError(DockerMCPError):
     """Docker command execution failed"""
 
+# Modern Python 3.11+ async exception patterns
+async def complex_docker_operation():
+    try:
+        # Use asyncio.timeout for all operations (Python 3.11+)
+        async with asyncio.timeout(30.0):
+            result = await docker_operation()
+    except* (DockerError, SSHError) as eg:  # Exception groups (Python 3.11+)
+        for error in eg.exceptions:
+            logger.error("Operation failed", error=str(error))
+        raise
+    except TimeoutError:
+        logger.error("Operation timed out after 30 seconds")
+        raise DockerMCPError("Docker operation timed out")
+
 # Service validation pattern
 def _validate_host(self, host_id: str) -> tuple[bool, str]:
     if host_id not in self.config.hosts:
         return False, f"Host '{host_id}' not found"
     return True, ""
+
+# Batch operation error aggregation
+async def batch_operation_with_error_groups(operations: list[Operation]):
+    """Execute multiple operations with proper error aggregation."""
+    errors: list[Exception] = []
+    results: list[OperationResult] = []
+    
+    async with asyncio.TaskGroup() as tg:  # Python 3.11+
+        tasks = [tg.create_task(execute_operation(op)) for op in operations]
+    
+    # Handle aggregated results with exception groups
+    for task, operation in zip(tasks, operations):
+        try:
+            results.append(await task)
+        except* (DockerError, SSHError) as eg:
+            errors.extend(eg.exceptions)
+            logger.error("Batch operation partial failure", 
+                        operation=operation.name, 
+                        errors=[str(e) for e in eg.exceptions])
+    
+    return BatchResult(results=results, errors=errors)
 ```
 
 ## Security Considerations
 
 ### Docker Command Validation
-```python
-# Allow only specific Docker commands
-ALLOWED_COMMANDS = {
-    "ps", "logs", "start", "stop", "restart", "stats",
-    "compose", "pull", "build", "inspect", "images"
-}
 
-def _validate_docker_command(self, command: str) -> None:
-    parts = command.strip().split()
-    if not parts or parts[0] not in ALLOWED_COMMANDS:
-        raise ValueError(f"Command not allowed: {parts[0] if parts else 'empty'}")
+```python
+import subprocess
+from pathlib import Path
+
+# Comprehensive allowed Docker commands
+ALLOWED_DOCKER_COMMANDS = frozenset({
+    "ps", "logs", "start", "stop", "restart", "stats",
+    "compose", "pull", "build", "inspect", "images",
+    "version", "info", "system", "volume", "network"
+})
+
+def validate_docker_command(cmd: list[str]) -> None:
+    """Validate Docker command for security before execution."""
+    if not cmd or not isinstance(cmd, list):
+        raise SecurityError("Command must be a non-empty list")
+    
+    if cmd[0] not in ALLOWED_DOCKER_COMMANDS:
+        raise SecurityError(f"Command not allowed: {cmd[0]}")
+    
+    # Additional validation for specific commands
+    if cmd[0] == "system" and len(cmd) > 1:
+        allowed_system_commands = {"df", "info", "events"}
+        if cmd[1] not in allowed_system_commands:
+            raise SecurityError(f"System subcommand not allowed: {cmd[1]}")
+
+# Secure subprocess execution pattern
+async def execute_docker_command(cmd: list[str], timeout: float = 30.0) -> CommandResult:
+    """Execute Docker command with proper security and timeout."""
+    # Validate command first
+    validate_docker_command(cmd)
+    
+    try:
+        # Use proper security annotations for legitimate subprocess calls
+        result = subprocess.run(  # nosec B603 - validated Docker command
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout  # Always use timeouts to prevent hanging
+        )
+        return CommandResult(
+            stdout=result.stdout,
+            stderr=result.stderr,
+            returncode=result.returncode
+        )
+    except subprocess.TimeoutExpired:
+        raise DockerMCPError(f"Docker command timed out after {timeout} seconds")
+    except subprocess.CalledProcessError as e:
+        raise DockerCommandError(f"Docker command failed: {e}")
 ```
 
 ### SSH Security
-- Use SSH keys from host configuration for all connections
-- SSH operations marked with `# nosec B603` for legitimate subprocess calls
-- Structured logging for all operations with host_id context
+
+- **SSH Key Authentication Only**: No passwords, only SSH keys from host configuration
+- **Dedicated SSH Keys**: Use separate keys for Docker MCP, isolated from personal keys
+- **Security Annotations**: SSH operations marked with `# nosec B603` for legitimate subprocess calls
+- **Structured Logging**: All operations logged with host_id context for audit trails
+- **Connection Timeouts**: All SSH operations have mandatory timeouts to prevent hanging
+- **Host Key Verification**: StrictHostKeyChecking disabled only for automation, with logging
+
+```python
+# SSH command execution with security best practices
+def build_ssh_command(host: DockerHost, remote_command: list[str]) -> list[str]:
+    """Build secure SSH command with proper options."""
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",  # Required for automation
+        "-o", "UserKnownHostsFile=/dev/null",  # Prevent host key issues
+        "-o", "LogLevel=ERROR",  # Reduce noise
+        "-o", f"ConnectTimeout=10",  # Connection timeout
+        "-o", f"ServerAliveInterval=30",  # Keep connection alive
+    ]
+    
+    if host.identity_file:
+        ssh_cmd.extend(["-i", host.identity_file])
+    
+    ssh_cmd.append(f"{host.user}@{host.hostname}")
+    ssh_cmd.extend(remote_command)
+    
+    return ssh_cmd
+```
 
 ### Migration Safety Patterns
 
@@ -300,8 +443,49 @@ async def test_list_containers(client: Client, test_host_id: str):
 
 ## Code Standards
 
-- **Type Hints**: Mandatory Python 3.10+ syntax (`str | None`)
+### Modern Type Hinting (Python 3.10+)
+
+```python
+# CORRECT: Modern Python 3.10+ union syntax
+config: dict[str, Any] | None = None
+result: list[ContainerInfo] | None = None
+hosts: dict[str, DockerHost] = {}
+operation_result: OperationResult[ContainerInfo] | None = None
+
+# Type aliases for complex types (Python 3.12+)
+from typing import TypeAlias
+
+HostId: TypeAlias = str
+ContainerId: TypeAlias = str
+StackName: TypeAlias = str
+ResourceDict: TypeAlias = dict[str, Any]
+
+# Generic types with modern syntax
+from typing import TypeVar, Generic
+
+T = TypeVar('T')
+
+class OperationResult(BaseModel, Generic[T]):
+    """Generic operation result with type safety."""
+    success: bool
+    data: T | None = None
+    error: str | None = None
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+# Usage with type safety
+container_result: OperationResult[ContainerInfo] = await get_container_info(host_id, container_id)
+stack_list: list[StackInfo] = await list_stacks(host_id)
+
+# AVOID: Legacy Union syntax (pre-Python 3.10)
+from typing import Union, Optional  # Don't use these anymore
+config: Union[dict, None] = None  # Use dict | None instead
+result: Optional[list] = None     # Use list | None instead
+```
+
+- **Type Hints**: Mandatory Python 3.10+ union syntax (`str | None` not `Optional[str]`)
+- **Type Aliases**: Use `TypeAlias` for complex recurring types (Python 3.12+)
 - **Pydantic Models**: All data structures with `Field(default_factory=list)`
+- **Generic Types**: Use modern `Generic[T]` syntax with union types
 - **Structured Logging**: `structlog` with context (host_id, operation)
 - **Async/Await**: All I/O operations must be async
 

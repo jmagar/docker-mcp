@@ -2,37 +2,76 @@
 
 ## FastMCP Middleware Architecture
 
-### Function-based Middleware Pattern (Preferred)
+### Function-based Middleware Pattern (FastMCP 2.12.2+)
 ```python
-from fastmcp import Context
+from fastmcp import FastMCP
+from fastmcp.types import Context
+import asyncio
 import time
+from typing import Callable, Any
 
-async def logging_middleware(ctx: Context, next_handler):
-    """Middleware for structured logging of MCP requests."""
-    start_time = time.time()
+# Modern function-based middleware (FastMCP 2.12.2+ preferred pattern)
+async def logging_middleware(
+    ctx: Context,
+    next_handler: Callable[[Context], Any]
+) -> Any:
+    """Structured logging middleware with modern async patterns."""
+    start_time = time.perf_counter()  # High precision timing
     
-    # Pre-processing: Log request start
-    await ctx.info(
-        "MCP request started",
-        method=getattr(ctx, "method", "unknown"),
-        params=_sanitize_params(getattr(ctx, "params", {})),
-    )
-    
+    # Pre-processing with proper error handling
     try:
-        # Execute the request
-        response = await next_handler(ctx)
+        await ctx.info(
+            "MCP request started",
+            method=getattr(ctx, "method", "unknown"),
+            params=_sanitize_params(getattr(ctx, "params", {})),
+            request_id=getattr(ctx, "request_id", None)
+        )
         
-        # Post-processing: Log success
-        duration = time.time() - start_time
-        await ctx.info("MCP request completed", duration_ms=round(duration * 1000, 2))
+        # Execute with timeout protection
+        async with asyncio.timeout(60.0):  # Prevent hanging requests
+            response = await next_handler(ctx)
+        
+        # Post-processing: Log successful completion
+        duration = time.perf_counter() - start_time
+        await ctx.info(
+            "MCP request completed successfully",
+            duration_ms=round(duration * 1000, 2),
+            response_type=type(response).__name__
+        )
         
         return response
         
+    except asyncio.TimeoutError:
+        duration = time.perf_counter() - start_time
+        await ctx.error(
+            "MCP request timed out",
+            duration_ms=round(duration * 1000, 2),
+            timeout_seconds=60.0
+        )
+        raise  # Preserve timeout context
+        
+    except* (Exception,) as eg:  # Exception groups (Python 3.11+)
+        duration = time.perf_counter() - start_time
+        errors = [str(e) for e in eg.exceptions]
+        
+        await ctx.error(
+            "MCP request failed with errors",
+            errors=errors,
+            duration_ms=round(duration * 1000, 2),
+            error_count=len(errors)
+        )
+        raise  # Preserve original exception context
+        
     except Exception as e:
-        # Error handling: Log failure
-        duration = time.time() - start_time
-        await ctx.error("MCP request failed", error=str(e), duration_ms=round(duration * 1000, 2))
-        raise  # Re-raise for FastMCP to handle
+        # Fallback for single exceptions
+        duration = time.perf_counter() - start_time
+        await ctx.error(
+            "MCP request failed",
+            error=str(e),
+            error_type=type(e).__name__,
+            duration_ms=round(duration * 1000, 2)
+        )
+        raise  # Always preserve context for FastMCP error handling
 ```
 
 ### Middleware Dependencies
@@ -166,17 +205,129 @@ async def error_handling_middleware(ctx: Context, next_handler):
         raise
 ```
 
-### Error Context Preservation
+### Enhanced Error Context Preservation (Python 3.11+)
 ```python
-# CORRECT: Re-raise to preserve stack trace and context
-except Exception as e:
-    logger.exception("Error occurred", error=str(e))
-    raise  # Preserves original traceback
+import asyncio
+from contextlib import AsyncExitStack
+from typing import Any
 
-# INCORRECT: Don't swallow exceptions or create new ones
-except Exception as e:
-    logger.error("Error occurred", error=str(e))
-    return {"error": "Something went wrong"}  # Loses context!
+# CORRECT: Modern error context preservation with full traceability
+async def error_context_middleware(ctx: Context, next_handler) -> Any:
+    """Enhanced error handling with full context preservation."""
+    operation_context = {
+        "request_id": getattr(ctx, "request_id", None),
+        "method": getattr(ctx, "method", "unknown"),
+        "start_time": time.perf_counter(),
+    }
+    
+    try:
+        async with AsyncExitStack() as stack:
+            # Add cleanup handlers if needed
+            response = await next_handler(ctx)
+            return response
+            
+    except* (DockerMCPError, SSHError) as eg:  # Exception groups
+        # Preserve all error contexts with structured logging
+        for error in eg.exceptions:
+            await ctx.error(
+                "Specific error in middleware chain",
+                error=str(error),
+                error_type=type(error).__name__,
+                **operation_context
+            )
+        raise  # Preserve exception group context
+        
+    except asyncio.TimeoutError:
+        await ctx.error(
+            "Request timeout in middleware",
+            timeout_exceeded=True,
+            **operation_context
+        )
+        raise  # Preserve timeout context
+        
+    except Exception as e:
+        # Preserve original exception with enhanced context
+        enhanced_context = {
+            **operation_context,
+            "error_module": getattr(e, "__module__", "unknown"),
+            "error_class": type(e).__qualname__,
+            "has_cause": e.__cause__ is not None,
+            "has_context": e.__context__ is not None,
+        }
+        
+        await ctx.error(
+            "Unhandled error in middleware chain",
+            error=str(e),
+            **enhanced_context
+        )
+        
+        # CRITICAL: Always re-raise to preserve full traceback
+        raise  # Maintains original exception chain
+
+# ERROR ANTI-PATTERNS - DO NOT DO THESE:
+
+# ❌ WRONG: Swallowing exceptions loses context
+async def bad_middleware_swallow(ctx: Context, next_handler):
+    try:
+        return await next_handler(ctx)
+    except Exception as e:
+        await ctx.error("Error occurred", error=str(e))
+        return {"error": "Generic error"}  # LOSES ORIGINAL CONTEXT!
+
+# ❌ WRONG: Creating new exceptions loses traceback
+async def bad_middleware_replace(ctx: Context, next_handler):
+    try:
+        return await next_handler(ctx)
+    except Exception as e:
+        await ctx.error("Error occurred", error=str(e))
+        raise RuntimeError("Middleware error")  # LOSES ORIGINAL TRACEBACK!
+
+# ❌ WRONG: Not preserving exception chain
+async def bad_middleware_chain(ctx: Context, next_handler):
+    try:
+        return await next_handler(ctx)
+    except Exception as e:
+        await ctx.error("Error occurred", error=str(e))
+        raise RuntimeError("New error") from None  # BREAKS EXCEPTION CHAIN!
+
+# ✅ CORRECT: Exception chaining when you must wrap
+async def correct_middleware_wrap(ctx: Context, next_handler):
+    try:
+        return await next_handler(ctx)
+    except Exception as e:
+        await ctx.error("Middleware layer error", original_error=str(e))
+        # If you must wrap, preserve the chain
+        raise MiddlewareError("Error in middleware") from e  # PRESERVES CHAIN
+```
+
+### Context Enrichment Patterns
+```python
+# Automatic context enrichment for all middleware
+async def context_enrichment_middleware(ctx: Context, next_handler) -> Any:
+    """Automatically enrich context for downstream middleware."""
+    import contextvars
+    
+    # Create context variables that persist through async calls
+    request_id = contextvars.ContextVar('request_id', default=None)
+    operation_id = contextvars.ContextVar('operation_id', default=None)
+    
+    # Set context for this request chain
+    request_id.set(getattr(ctx, "request_id", f"req_{int(time.time())}"))
+    operation_id.set(getattr(ctx, "method", "unknown_operation"))
+    
+    try:
+        # All downstream operations inherit this context
+        return await next_handler(ctx)
+    except Exception as e:
+        # Context variables automatically available in exception handlers
+        await ctx.error(
+            "Error with full context",
+            error=str(e),
+            request_id=request_id.get(),
+            operation_id=operation_id.get(),
+            context_preserved=True
+        )
+        raise  # Context preserved through exception chain
 ```
 
 ## Data Sanitization Patterns

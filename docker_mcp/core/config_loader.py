@@ -90,6 +90,9 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
     project_config_path = Path(config_path or default_config_file)
     _load_config_file(config, project_config_path)
 
+    # Set the actual config file path on the config object
+    config.config_file = str(project_config_path)
+
     # Override with environment variables (highest priority)
     _apply_env_overrides(config)
 

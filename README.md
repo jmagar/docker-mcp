@@ -196,6 +196,36 @@ Consolidated Docker Compose stack management tool.
 "Migrate database stack and remove it from the source after"
 ```
 
+## 🏗 Architecture: Why 3 Consolidated Tools?
+
+Docker Manager MCP uses the **Consolidated Action-Parameter Pattern** instead of 27 individual tools. This architectural choice provides:
+
+### **Token Efficiency** 
+- **2.6x more efficient**: Our 3 tools use ~5k tokens vs. 27 individual tools using ~9.7k tokens
+- **Better scaling**: Adding new actions to existing tools is more efficient than creating new tools
+- **Context savings**: Each tool adds ~400-500 tokens - consolidation reduces this multiplicatively
+
+### **Complex Operation Support**
+Docker management requires sophisticated multi-step operations:
+- **Migration**: stop → verify → archive → transfer → deploy → validate
+- **Cleanup**: analyze → confirm → execute → verify
+- **Deployment**: validate → pull → configure → start → health-check
+
+### **Hybrid Connection Model** 
+Different operations need different approaches:
+- **Container operations**: Docker contexts (API over SSH tunnel) for efficiency
+- **Stack operations**: Direct SSH (filesystem access) for compose file management
+
+### **Service Layer Benefits**
+- **Centralized validation**: Consistent input validation across all operations  
+- **Error handling**: Uniform error reporting and recovery
+- **Resource management**: Connection pooling, context caching, and cleanup
+- **Business logic**: Complex orchestration that simple decorators can't handle
+
+*For technical details, see [`docs/consolidated-action-pattern.md`](docs/consolidated-action-pattern.md)*
+
+---
+
 **🚀 Advanced Migration Features:**
 
 **Automatic Transfer Method Selection:**

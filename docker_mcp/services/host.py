@@ -1432,7 +1432,8 @@ class HostService:
         selected_hosts = params.get("selected_hosts")
 
         config_service = ConfigService(self.config, self.context_manager)  # type: ignore[arg-type]
-        result = await config_service.import_ssh_config(ssh_config_path, selected_hosts)
+        config_path = getattr(self.config, "config_file", None)
+        result = await config_service.import_ssh_config(ssh_config_path, selected_hosts, config_path)
 
         if hasattr(result, "structured_content"):
             import_result = result.structured_content or {

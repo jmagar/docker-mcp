@@ -4,6 +4,7 @@ Configuration Management Service
 Business logic for configuration discovery, import, and management operations.
 """
 
+import difflib
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -320,8 +321,9 @@ class ConfigService:
                 )
 
             # Save configuration
-            if config_path:
-                save_config(self.config, config_path)
+            config_file_to_use = config_path or getattr(self.config, "config_file", None)
+            if config_file_to_use:
+                save_config(self.config, config_file_to_use)
 
             # Build result summary
             summary_lines = self._format_import_results(imported_hosts, compose_path_configs)
@@ -372,12 +374,21 @@ class ConfigService:
 
         summary_lines.extend(
             [
-                "To import specific hosts, use:",
-                '  import_ssh_config(selected_hosts="1,3,5")  # Import hosts 1, 3, and 5',
-                '  import_ssh_config(selected_hosts="all")     # Import all hosts',
+                "To import specific hosts, use any of these formats:",
                 "",
-                "To import all hosts:",
+                "By index:",
+                '  import_ssh_config(selected_hosts="1,3,5")    # Import hosts 1, 3, and 5',
+                "",
+                "By hostname:",
+                '  import_ssh_config(selected_hosts="dookie,squirts,slam")  # Import by name',
+                "",
+                "Mixed format:",
+                '  import_ssh_config(selected_hosts="1,dookie,5")  # Mix indices and names',
+                "",
+                "Import all hosts:",
                 '  import_ssh_config(selected_hosts="all")',
+                "",
+                "Note: Hostname matching is fuzzy and case-insensitive.",
             ]
         )
 
@@ -399,43 +410,164 @@ class ConfigService:
             },
         )
 
+    def _fuzzy_match_host(self, query: str, importable_hosts: list) -> tuple[Any, float] | None:
+        """Find best matching host using fuzzy string matching.
+
+        Args:
+            query: The search term (hostname or partial match)
+            importable_hosts: List of SSH host entries to search
+
+        Returns:
+            Tuple of (matched_host, confidence_score) or None if no good match
+        """
+        best_match = None
+        best_score = 0.0
+        min_threshold = 0.6  # Minimum similarity score to consider a match
+
+        for host in importable_hosts:
+            # Get all searchable strings for this host
+            searchable_strings = [
+                host.name.lower(),  # SSH config name
+                (host.hostname or host.name).lower(),  # Hostname
+            ]
+
+            # Check for exact matches first
+            query_lower = query.lower().strip()
+            for search_string in searchable_strings:
+                if query_lower == search_string:
+                    return host, 1.0  # Perfect match
+
+            # Check for partial matches
+            for search_string in searchable_strings:
+                # Check if query is contained in string (partial match)
+                if query_lower in search_string:
+                    score = len(query_lower) / len(search_string)
+                    if score > best_score:
+                        best_match = host
+                        best_score = score
+
+                # Use difflib for fuzzy matching
+                similarity = difflib.SequenceMatcher(None, query_lower, search_string).ratio()
+                if similarity > best_score and similarity >= min_threshold:
+                    best_match = host
+                    best_score = similarity
+
+        return (best_match, best_score) if best_match else None
+
     def _parse_host_selection(
         self, selected_hosts: str, importable_hosts: list
     ) -> list | ToolResult:
-        """Parse host selection string and return hosts to import."""
-        if selected_hosts.lower() == "all":
+        """Parse host selection string and return hosts to import.
+
+        Supports multiple formats:
+        - "all" - select all hosts
+        - "1,3,5" - numeric indices
+        - "dookie,squirts,slam" - hostnames with fuzzy matching
+        - "1,dookie,3" - mixed indices and hostnames
+        """
+        if selected_hosts.lower().strip() == "all":
             return importable_hosts
 
+        # Split by comma and clean up whitespace
+        selection_items = [item.strip() for item in selected_hosts.split(",") if item.strip()]
+
+        if not selection_items:
+            return self._create_empty_selection_error()
+
+        hosts_to_import, errors = self._process_selection_items(selection_items, importable_hosts)
+
+        if errors:
+            return self._create_selection_error(errors, importable_hosts)
+
+        return self._remove_duplicate_hosts(hosts_to_import)
+
+    def _create_empty_selection_error(self) -> ToolResult:
+        """Create error result for empty selection."""
+        return ToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text="❌ Empty selection. Provide host indices, hostnames, or 'all'",
+                )
+            ],
+            structured_content={"success": False, "error": "Empty selection"},
+        )
+
+    def _process_selection_items(
+        self, selection_items: list[str], importable_hosts: list
+    ) -> tuple[list, list[str]]:
+        """Process each selection item and return hosts and errors."""
+        hosts_to_import = []
+        errors = []
+
+        for item in selection_items:
+            host, error = self._process_single_selection_item(item, importable_hosts)
+            if host:
+                hosts_to_import.append(host)
+            if error:
+                errors.append(error)
+
+        return hosts_to_import, errors
+
+    def _process_single_selection_item(
+        self, item: str, importable_hosts: list
+    ) -> tuple[Any, str | None]:
+        """Process a single selection item and return host and optional error."""
+        # Try to parse as numeric index first
         try:
-            indices = [int(x.strip()) for x in selected_hosts.split(",")]
-            hosts_to_import = []
-            for idx in indices:
-                if 1 <= idx <= len(importable_hosts):
-                    hosts_to_import.append(importable_hosts[idx - 1])
-                else:
-                    return ToolResult(
-                        content=[
-                            TextContent(
-                                type="text",
-                                text=f"❌ Invalid host index: {idx}. Valid range: 1-{len(importable_hosts)}",
-                            )
-                        ],
-                        structured_content={
-                            "success": False,
-                            "error": f"Invalid host index: {idx}",
-                        },
-                    )
-            return hosts_to_import
+            idx = int(item)
+            if 1 <= idx <= len(importable_hosts):
+                return importable_hosts[idx - 1], None
+            else:
+                return None, f"Index {idx} out of range (1-{len(importable_hosts)})"
         except ValueError:
-            return ToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text="❌ Invalid selection format. Use comma-separated numbers or 'all'",
-                    )
-                ],
-                structured_content={"success": False, "error": "Invalid selection format"},
-            )
+            # Not a number, try hostname matching
+            pass
+
+        # Try fuzzy matching for hostname
+        match_result = self._fuzzy_match_host(item, importable_hosts)
+        if match_result:
+            matched_host, confidence = match_result
+
+            # Log fuzzy matches with low confidence for user awareness
+            if confidence < 0.9:
+                self.logger.info(
+                    "Fuzzy matched hostname",
+                    query=item,
+                    matched=matched_host.name,
+                    confidence=confidence,
+                )
+            return matched_host, None
+        else:
+            return None, f"No match found for '{item}'"
+
+    def _create_selection_error(self, errors: list[str], importable_hosts: list) -> ToolResult:
+        """Create error result for selection errors."""
+        error_msg = "Selection errors: " + "; ".join(errors)
+        available_names = [host.name for host in importable_hosts]
+        return ToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"❌ {error_msg}\n\nAvailable hosts: {', '.join(available_names)}\nUse indices (1-{len(importable_hosts)}), hostnames, or 'all'",
+                )
+            ],
+            structured_content={
+                "success": False,
+                "error": error_msg,
+                "available_hosts": available_names,
+            },
+        )
+
+    def _remove_duplicate_hosts(self, hosts_to_import: list) -> list:
+        """Remove duplicate hosts while preserving order."""
+        unique_hosts = []
+        seen_names = set()
+        for host in hosts_to_import:
+            if host.name not in seen_names:
+                unique_hosts.append(host)
+                seen_names.add(host.name)
+        return unique_hosts
 
     async def _import_selected_hosts(
         self,

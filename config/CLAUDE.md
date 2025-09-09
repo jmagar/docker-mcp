@@ -117,18 +117,193 @@ DEVELOPMENT_MODE=false                # Enable development features (default: fa
 HOT_RELOAD=true                       # Config file hot reload (default: true)
 ```
 
-### Environment Variable Patterns
+### Modern Environment Variable Patterns (Python 3.10+)
 ```python
-# Environment variable naming convention
-FASTMCP_*      # FastMCP server settings
-DOCKER_*       # Docker-specific configuration
-SSH_*          # SSH-related settings
-LOG_*          # Logging configuration
+import os
+from typing import Annotated, Literal
+from pydantic import BaseSettings, Field, validator
+from pathlib import Path
 
-# Variable expansion in YAML
-user: ${USER}                         # Expands to current user
-home: ${HOME}                         # Expands to home directory
-path: ${DOCKER_COMPOSE_PATH:/opt/compose}  # With default value
+# Pydantic v2 Settings with environment integration
+class ModernDockerMCPSettings(BaseSettings):
+    """Modern environment variable configuration with Pydantic v2."""
+    
+    model_config = SettingsConfigDict(
+        env_file='.env',
+        env_file_encoding='utf-8',
+        case_sensitive=False,
+        extra='ignore'
+    )
+    
+    # FastMCP server settings
+    fastmcp_host: Annotated[str, Field(
+        default="127.0.0.1",
+        description="FastMCP server bind address",
+        json_schema_extra={"env": "FASTMCP_HOST"}
+    )]
+    
+    fastmcp_port: Annotated[int, Field(
+        default=8000,
+        ge=1024, le=65535,
+        description="FastMCP server port",
+        json_schema_extra={"env": "FASTMCP_PORT"}
+    )]
+    
+    # Logging configuration with validation
+    log_level: Annotated[Literal["DEBUG", "INFO", "WARNING", "ERROR"], Field(
+        default="INFO",
+        description="Application log level",
+        json_schema_extra={"env": "LOG_LEVEL"}
+    )]
+    
+    # Docker configuration paths
+    docker_hosts_config: Annotated[Path, Field(
+        default=Path("config/hosts.yml"),
+        description="Path to Docker hosts configuration",
+        json_schema_extra={"env": "DOCKER_HOSTS_CONFIG"}
+    )]
+    
+    # SSH configuration
+    ssh_config_path: Annotated[Path | None, Field(
+        default=None,
+        description="Custom SSH config file path",
+        json_schema_extra={"env": "SSH_CONFIG_PATH"}
+    )]
+    
+    ssh_debug_level: Annotated[int, Field(
+        default=0,
+        ge=0, le=3,
+        description="SSH debug verbosity (0-3)",
+        json_schema_extra={"env": "SSH_DEBUG"}
+    )]
+    
+    # Development settings
+    development_mode: Annotated[bool, Field(
+        default=False,
+        description="Enable development features",
+        json_schema_extra={"env": "DEVELOPMENT_MODE"}
+    )]
+    
+    hot_reload: Annotated[bool, Field(
+        default=True,
+        description="Enable configuration hot reload",
+        json_schema_extra={"env": "HOT_RELOAD"}
+    )]
+    
+    # Performance settings
+    max_concurrent_operations: Annotated[int, Field(
+        default=10,
+        ge=1, le=100,
+        description="Maximum concurrent Docker operations",
+        json_schema_extra={"env": "MAX_CONCURRENT_OPS"}
+    )]
+    
+    operation_timeout: Annotated[float, Field(
+        default=300.0,
+        ge=10.0, le=3600.0,
+        description="Default operation timeout in seconds",
+        json_schema_extra={"env": "OPERATION_TIMEOUT"}
+    )]
+    
+    # Security settings
+    allowed_hosts: Annotated[list[str], Field(
+        default_factory=lambda: ["localhost", "127.0.0.1"],
+        description="Allowed client IP addresses/hostnames",
+        json_schema_extra={"env": "ALLOWED_HOSTS"}
+    )]
+    
+    # Field validators (Pydantic v2 syntax)
+    @field_validator('docker_hosts_config', mode='after')
+    @classmethod
+    def validate_config_path(cls, v: Path) -> Path:
+        """Ensure config path is accessible."""
+        if not v.exists() and v.name != 'hosts.yml':
+            # Only warn for non-default paths
+            logger.warning(f"Configuration file not found: {v}")
+        return v
+    
+    @field_validator('ssh_config_path', mode='after')
+    @classmethod
+    def validate_ssh_config(cls, v: Path | None) -> Path | None:
+        """Validate SSH config file if specified."""
+        if v and not v.exists():
+            raise ValueError(f"SSH config file not found: {v}")
+        return v
+    
+    # Model validator for cross-field validation
+    @model_validator(mode='after')
+    def validate_development_settings(self) -> 'ModernDockerMCPSettings':
+        """Adjust settings for development mode."""
+        if self.development_mode:
+            # Override some settings for development
+            if self.log_level == "INFO":
+                self.log_level = "DEBUG"
+            if not self.hot_reload:
+                self.hot_reload = True
+        return self
+
+# Environment variable expansion with type safety
+class SecureEnvExpansion:
+    """Secure environment variable expansion with validation."""
+    
+    @staticmethod
+    def expand_env_vars(value: str, allowed_vars: set[str] | None = None) -> str:
+        """Securely expand environment variables with allowlist."""
+        import re
+        
+        def replace_var(match):
+            var_name = match.group(1)
+            default_value = match.group(2) if match.group(2) else ""
+            
+            # Security: Only allow specific environment variables
+            if allowed_vars and var_name not in allowed_vars:
+                raise ValueError(f"Environment variable '{var_name}' not allowed")
+            
+            return os.getenv(var_name, default_value)
+        
+        # Match ${VAR} or ${VAR:default}
+        pattern = r'\$\{([A-Z_][A-Z0-9_]*):?([^}]*)\}'
+        return re.sub(pattern, replace_var, value)
+    
+    @staticmethod
+    def get_safe_env_vars() -> set[str]:
+        """Get list of safe environment variables for expansion."""
+        return {
+            'USER', 'HOME', 'PATH',
+            'DOCKER_COMPOSE_PATH', 'SSH_AUTH_SOCK',
+            'DEV_HOST', 'DEV_USER', 'STAGING_HOST', 'STAGING_USER'
+        }
+
+# Modern variable expansion in configuration
+def expand_yaml_config(yaml_data: dict) -> dict:
+    """Expand environment variables in YAML config with security."""
+    import copy
+    
+    expanded = copy.deepcopy(yaml_data)
+    safe_vars = SecureEnvExpansion.get_safe_env_vars()
+    
+    def expand_recursive(obj):
+        if isinstance(obj, dict):
+            return {k: expand_recursive(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [expand_recursive(item) for item in obj]
+        elif isinstance(obj, str):
+            return SecureEnvExpansion.expand_env_vars(obj, safe_vars)
+        else:
+            return obj
+    
+    return expand_recursive(expanded)
+
+# Environment variable naming convention (updated)
+ENV_VAR_PREFIXES = {
+    'FASTMCP_*': 'FastMCP server settings',
+    'DOCKER_*': 'Docker-specific configuration', 
+    'SSH_*': 'SSH-related settings',
+    'LOG_*': 'Logging configuration',
+    'DEV_*': 'Development environment variables',
+    'STAGING_*': 'Staging environment variables',
+    'PROD_*': 'Production environment variables'
+}
 ```
 
 ## Configuration Loading Implementation

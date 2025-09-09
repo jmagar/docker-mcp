@@ -1,20 +1,147 @@
 # Tools Layer - Development Memory
 
-## MCP Tool Architecture
+## Consolidated Action-Parameter Tool Architecture
 
-### Tool Class Pattern
+### Why Consolidated Tools Pattern
+
+The Docker MCP project uses **Consolidated Action-Parameter Pattern** instead of simple `@mcp.tool()` decorators. This is the CORRECT approach for complex Docker management operations.
+
+**Why This Pattern Over Simple Decorators:**
+- **Complex Multi-Step Operations**: Docker operations need orchestration and state management
+- **Hybrid Connection Models**: Different operations require Docker API vs direct SSH
+- **Service Composition**: Business logic requires dependency injection and service layers
+- **Token Efficiency**: 3 consolidated tools vs 27 individual tools (2.6x more efficient)
+
+### Server Method Pattern (CORRECT)
+
 ```python
-class ContainerTools:
-    """Container management tools for MCP."""
+class DockerMCPServer:
+    """Server with methods that become MCP tools via FastMCP registration."""
     
-    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+    def __init__(self, config: DockerMCPConfig):
         self.config = config
-        self.context_manager = context_manager
+        self.context_manager = DockerContextManager(config)
+        # Service delegation for complex operations
+        self.host_service = HostService(config, self.context_manager)
+        self.container_service = ContainerService(config, self.context_manager)
+        self.stack_service = StackService(config, self.context_manager)
+    
+    # This method becomes an MCP tool automatically via FastMCP
+    async def docker_container(
+        self,
+        action: Literal["list", "info", "start", "stop", "restart", "logs", "stats"],
+        host_id: str,
+        container_id: str = "",
+        **kwargs
+    ) -> ToolResult:
+        """Consolidated Docker container management.
+        
+        This single tool handles all container operations through action parameter.
+        Each action routes to appropriate service methods with sub-actions and state management.
+        """
+        # Delegate to service layer for business logic and complex orchestration
+        return await self.container_service.handle_action(action, host_id, container_id, **kwargs)
+    
+    async def docker_hosts(
+        self,
+        action: Literal["list", "add", "ports", "cleanup", "import_ssh", ...],
+        host_id: str = "",
+        **kwargs
+    ) -> ToolResult:
+        """Consolidated Docker hosts management."""
+        return await self.host_service.handle_action(action, host_id, **kwargs)
+        
+    async def docker_compose(
+        self,
+        action: Literal["list", "deploy", "up", "down", "migrate", ...],
+        host_id: str,
+        stack_name: str = "",
+        **kwargs
+    ) -> ToolResult:
+        """Consolidated Docker Compose stack management."""
+        return await self.stack_service.handle_action(action, host_id, stack_name, **kwargs)
 ```
+
+### Service Delegation Benefits (CORRECT for Complex Operations)
+
+**Why Service Delegation Pattern:**
+
+```python
+# Service Layer Pattern handles complex orchestration
+class ContainerService:
+    """Service handles business logic for container operations."""
+    
+    async def handle_action(self, action: str, host_id: str, container_id: str, **kwargs):
+        """Route action to appropriate handler with validation and state management."""
+        # 1. Validate inputs and host existence
+        is_valid, error_msg = self._validate_host(host_id)
+        if not is_valid:
+            return self._error_result(error_msg)
+        
+        # 2. Acquire resources (connections, locks) for stateful operations
+        async with self._get_operation_context(host_id, container_id) as ctx:
+            # 3. Execute action (potentially multi-step with sub-actions)
+            if action == "start":
+                return await self._start_container_with_validation(ctx, container_id, **kwargs)
+            elif action == "migrate":
+                # Complex multi-step operation requiring orchestration
+                return await self._migrate_container_multi_step(ctx, container_id, **kwargs)
+            elif action == "stop":
+                # May require graceful shutdown, health checks, cleanup
+                return await self._stop_container_gracefully(ctx, container_id, **kwargs)
+            
+        # 4. Format results for MCP client (ToolResult with both content and structured data)
+        # 5. Handle errors consistently across all operations
+    
+    async def _migrate_container_multi_step(self, ctx, container_id: str, target_host: str, **kwargs):
+        """Example of complex orchestration that simple decorators cannot handle."""
+        try:
+            # Step 1: Pre-migration validation
+            await self._validate_migration_requirements(container_id, target_host)
+            
+            # Step 2: Create snapshot/backup
+            backup_result = await self._create_container_backup(ctx, container_id)
+            
+            # Step 3: Stop container gracefully
+            await self._graceful_stop_with_health_check(ctx, container_id)
+            
+            # Step 4: Transfer data (hybrid SSH + Docker context usage)
+            await self._transfer_container_data(ctx, container_id, target_host)
+            
+            # Step 5: Deploy on target with verification
+            deploy_result = await self._deploy_and_verify(target_host, container_id, backup_result)
+            
+            # Step 6: Cleanup source if successful
+            if deploy_result.success:
+                await self._cleanup_source_container(ctx, container_id)
+            
+            return ToolResult(
+                content=[TextContent(type="text", text=f"✅ Container migration completed")],
+                structured_content={
+                    "success": True,
+                    "migration_id": deploy_result.migration_id,
+                    "source_host": ctx.host_id,
+                    "target_host": target_host,
+                    "steps_completed": 6
+                }
+            )
+        except Exception as e:
+            # Rollback logic for failed multi-step operations
+            await self._rollback_partial_migration(ctx, container_id, step_reached)
+            raise
+```
+
+### Architecture Layer Responsibilities
+
+- **Services**: Business logic, validation, complex orchestration, state management, multi-step operations
+- **Tool Classes**: Direct Docker/SSH operations, data structures, low-level implementation
+- **Server Methods** (MCP Tools): Action routing, parameter validation, service delegation  
+- **Simple Decorators** ❌: Only suitable for stateless, single-step operations (NOT applicable here)
 
 ### Tool Dependencies
 - **Config**: `DockerMCPConfig` for host configurations and settings
 - **Context Manager**: `DockerContextManager` for Docker command execution
+- **Service Layer**: Business logic, validation, complex orchestration
 - **Models**: Pydantic models for data validation and serialization
 - **Structured Logger**: `structlog` for operation tracking
 
@@ -112,19 +239,105 @@ async def _execute_compose_with_file(self, context_name: str, project_name: str,
 
 ## Error Handling Pattern
 
-### Exception Hierarchy
+### Modern Async Exception Handling (Python 3.11+)
+
 ```python
-# Custom exceptions for specific error types
-try:
-    result = await self.context_manager.execute_docker_command(host_id, cmd)
-except (DockerCommandError, DockerContextError) as e:
-    # Docker-specific errors - log and return structured error
-    logger.error("Docker operation failed", host_id=host_id, error=str(e))
-    return self._build_error_response(str(e))
-except Exception as e:
-    # Unexpected errors - log with full context
-    logger.error("Unexpected error", host_id=host_id, operation="operation_name", error=str(e))
-    return self._build_error_response(f"Unexpected error: {e}")
+import asyncio
+from contextlib import AsyncExitStack
+
+# Custom exception hierarchy
+class DockerMCPError(Exception):
+    """Base exception for Docker MCP operations"""
+    
+class DockerCommandError(DockerMCPError):
+    """Docker command execution failed"""
+    
+class DockerContextError(DockerMCPError):
+    """Docker context operation failed"""
+
+# Modern async patterns with timeout and exception groups
+async def complex_docker_operation(self, host_id: str, container_id: str):
+    """Modern async operation with proper timeout and error handling."""
+    try:
+        # Use asyncio.timeout for all operations (Python 3.11+)
+        async with asyncio.timeout(30.0):
+            result = await self.context_manager.execute_docker_command(host_id, cmd)
+            return self._build_success_response(result)
+            
+    except* (DockerCommandError, DockerContextError) as eg:  # Exception groups
+        errors = [str(e) for e in eg.exceptions]
+        logger.error("Docker operation failed", 
+                    host_id=host_id, 
+                    container_id=container_id,
+                    errors=errors)
+        return self._build_error_response(f"Docker operation failed: {'; '.join(errors)}")
+        
+    except TimeoutError:
+        logger.error("Docker operation timed out", host_id=host_id, timeout=30.0)
+        return self._build_error_response("Docker operation timed out after 30 seconds")
+        
+    except Exception as e:
+        logger.error("Unexpected error", 
+                    host_id=host_id, 
+                    container_id=container_id, 
+                    error=str(e))
+        return self._build_error_response(f"Unexpected error: {e}")
+
+# Batch operations with TaskGroup (Python 3.11+)
+async def batch_container_operations(self, operations: list[ContainerOperation]):
+    """Execute multiple container operations concurrently with proper error handling."""
+    results: list[OperationResult] = []
+    
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tasks = [
+                tg.create_task(self._execute_container_operation(op))
+                for op in operations
+            ]
+        
+        # All tasks completed successfully
+        results = [await task for task in tasks]
+        
+    except* (DockerCommandError, DockerContextError) as eg:
+        # Handle partial failures in batch operations
+        for error in eg.exceptions:
+            logger.error("Batch operation partial failure", 
+                        operation=error.operation_name,
+                        error=str(error))
+        
+        # Return partial results with error information
+        return BatchOperationResult(
+            success=False,
+            partial_results=results,
+            errors=[str(e) for e in eg.exceptions],
+            completed_count=len(results)
+        )
+    
+    return BatchOperationResult(
+        success=True,
+        results=results,
+        completed_count=len(results)
+    )
+
+# Resource management with async context managers
+async def managed_container_operation(self, host_id: str, container_id: str):
+    """Complex operation with proper resource management."""
+    async with AsyncExitStack() as stack:
+        # Acquire multiple resources with automatic cleanup
+        connection = await stack.enter_async_context(
+            self._get_docker_connection(host_id)
+        )
+        
+        # Optional: Acquire container lock for exclusive operations
+        container_lock = await stack.enter_async_context(
+            self._acquire_container_lock(container_id)
+        )
+        
+        # Use asyncio.timeout at operation level
+        async with asyncio.timeout(60.0):
+            return await self._perform_complex_operation(
+                connection, container_lock, container_id
+            )
 ```
 
 ### Error Response Helpers
