@@ -5,7 +5,10 @@ Business logic for Docker container operations with formatted output.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
 
 import structlog
 from fastmcp.tools.tool import ToolResult
@@ -25,7 +28,7 @@ class ContainerService:
     def __init__(
         self,
         config: DockerMCPConfig,
-        context_manager: DockerContextManager,
+        context_manager: "DockerContextManager",
         logs_service: LogsService | None = None,
     ):
         self.config = config

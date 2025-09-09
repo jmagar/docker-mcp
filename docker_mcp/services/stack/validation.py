@@ -210,11 +210,9 @@ class StackValidation:
             df_cmd = ssh_cmd + [
                 f"df -B1 {shlex.quote(appdata_path)} | tail -1 | awk '{{print $2,$3,$4}}'"
             ]
-
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(df_cmd, capture_output=True, text=True, check=False),  # nosec B603
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                df_cmd, capture_output=True, text=True, check=False
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -270,13 +268,12 @@ class StackValidation:
                 check_cmd = ssh_cmd + [
                     f"which {shlex.quote(tool)} >/dev/null 2>&1 && echo 'AVAILABLE' || echo 'MISSING'"
                 ]
-
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda cmd=check_cmd: subprocess.run(
-                        cmd, capture_output=True, text=True, check=False
-                    ),  # nosec B603
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    check_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,  # nosec B603
                 )
 
                 is_available = result.returncode == 0 and "AVAILABLE" in result.stdout
@@ -403,13 +400,12 @@ class StackValidation:
                 check_cmd = ssh_cmd + [
                     f"(netstat -tuln 2>/dev/null | grep ':{port} ' || ss -tuln 2>/dev/null | grep ':{port} ') && echo 'IN_USE' || echo 'AVAILABLE'"
                 ]
-
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda cmd=check_cmd: subprocess.run(  # nosec B603
-                        cmd, capture_output=True, text=True, check=False
-                    ),
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    check_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,  # nosec B603
                 )
 
                 is_in_use = result.returncode == 0 and "IN_USE" in result.stdout
@@ -490,13 +486,12 @@ class StackValidation:
                 check_cmd = ssh_cmd + [
                     f"docker ps -a --filter name=^{shlex.quote(service_name)}$ --format '{{{{.Names}}}}' | grep -x {shlex.quote(service_name)} && echo 'CONFLICT' || echo 'AVAILABLE'"
                 ]
-
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda cmd=check_cmd: subprocess.run(  # nosec B603
-                        cmd, capture_output=True, text=True, check=False
-                    ),
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    check_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,  # nosec B603
                 )
 
                 has_conflict = result.returncode == 0 and "CONFLICT" in result.stdout
@@ -523,13 +518,12 @@ class StackValidation:
                 check_cmd = ssh_cmd + [
                     f"docker network ls --filter name=^{shlex.quote(network_name)}$ --format '{{{{.Name}}}}' | grep -x {shlex.quote(network_name)} && echo 'CONFLICT' || echo 'AVAILABLE'"
                 ]
-
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda cmd=check_cmd: subprocess.run(  # nosec B603
-                        cmd, capture_output=True, text=True, check=False
-                    ),
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    check_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,  # nosec B603
                 )
 
                 has_conflict = result.returncode == 0 and "CONFLICT" in result.stdout

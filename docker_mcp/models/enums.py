@@ -3,8 +3,10 @@
 from enum import Enum
 from typing import Literal
 
-# Type alias for protocol strings
+# Type aliases
 ProtocolLiteral = Literal["tcp", "udp", "sctp"]
+CleanupType = Literal["check", "safe", "moderate", "aggressive"]
+ScheduleFrequency = Literal["daily", "weekly", "monthly", "custom"]
 
 
 class HostAction(Enum):

@@ -4,7 +4,10 @@ Configuration Management Service
 Business logic for configuration discovery, import, and management operations.
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
 
 import structlog
 from fastmcp.tools.tool import ToolResult
@@ -20,7 +23,7 @@ from ..utils import validate_host
 class ConfigService:
     """Service for configuration management operations."""
 
-    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+    def __init__(self, config: DockerMCPConfig, context_manager: "DockerContextManager"):
         self.config = config
         self.context_manager = context_manager
         self.compose_manager = ComposeManager(config, context_manager)

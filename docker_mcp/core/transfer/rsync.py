@@ -44,11 +44,12 @@ class RsyncTransfer(BaseTransfer):
         check_cmd = ssh_cmd + ["which rsync > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    check_cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                check_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
             )
 
             if "OK" in result.stdout:
@@ -120,11 +121,12 @@ class RsyncTransfer(BaseTransfer):
         )
 
         # Execute rsync
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                rsync_cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            rsync_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode != 0:

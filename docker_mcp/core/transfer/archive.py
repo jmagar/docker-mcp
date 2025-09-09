@@ -225,11 +225,13 @@ class ArchiveUtils:
             exclusions=len(all_exclusions),
         )
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603  # nosec B603
-                full_cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            # nosec B603
+            full_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode != 0:
@@ -253,11 +255,13 @@ class ArchiveUtils:
             f"tar tzf {shlex.quote(archive_path)} > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"
         ]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603  # nosec B603
-                verify_cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            # nosec B603
+            verify_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         return "OK" in result.stdout
@@ -284,11 +288,13 @@ class ArchiveUtils:
             f"tar xzf {shlex.quote(archive_path)} -C {shlex.quote(extract_dir)}"
         ]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603  # nosec B603
-                extract_cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            # nosec B603
+            extract_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode == 0:

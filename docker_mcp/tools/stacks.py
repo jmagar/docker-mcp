@@ -108,10 +108,8 @@ class StackTools:
             if client is None:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
-            loop = asyncio.get_event_loop()
-
             # Get all containers and group by compose project using Docker SDK
-            containers = await loop.run_in_executor(None, lambda: client.containers.list(all=True))
+            containers = await asyncio.to_thread(client.containers.list, all=True)
 
             # Group containers by compose project
             projects = defaultdict(list)
@@ -394,15 +392,13 @@ class StackTools:
         )
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd,
-                    check=False,
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout,
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                ssh_cmd,
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
             )
 
             if result.returncode != 0:
@@ -737,15 +733,13 @@ class StackTools:
             ssh_cmd = build_ssh_command(host)
             ssh_cmd.append(f"cat {compose_file_path}")
 
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                ssh_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
 
             if result.returncode == 0:

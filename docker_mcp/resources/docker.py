@@ -9,11 +9,14 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
-    from docker_mcp.services import ContainerService, HostService, StackService
+    from docker_mcp.services.container import ContainerService
+    from docker_mcp.services.host import HostService
+    from docker_mcp.services.stack_service import StackService
 
 import docker
 import structlog
 from fastmcp.resources.resource import FunctionResource
+from pydantic import AnyUrl
 
 logger = structlog.get_logger()
 
@@ -105,8 +108,6 @@ class DockerInfoResource(FunctionResource):
                     "resource_uri": f"docker://{host_id}/info",
                     "resource_type": "docker_info",
                 }
-
-        from pydantic import AnyUrl
 
         super().__init__(
             fn=_get_docker_info,
@@ -203,8 +204,6 @@ class DockerContainersResource(FunctionResource):
                     "resource_uri": f"docker://{host_id}/containers",
                     "resource_type": "containers",
                 }
-
-        from pydantic import AnyUrl
 
         super().__init__(
             fn=_get_containers,
@@ -306,8 +305,6 @@ class DockerComposeResource(FunctionResource):
                     "resource_uri": f"docker://{host_id}/compose",
                     "resource_type": "compose",
                 }
-
-        from pydantic import AnyUrl
 
         super().__init__(
             fn=_get_compose_info,

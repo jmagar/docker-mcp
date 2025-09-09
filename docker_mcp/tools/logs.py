@@ -47,12 +47,8 @@ class LogTools:
             if client is None:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
-            loop = asyncio.get_event_loop()
-
             # Get container and retrieve logs using Docker SDK
-            container = await loop.run_in_executor(
-                None, lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(client.containers.get, container_id)
 
             # Build kwargs for logs method
             logs_kwargs = {
@@ -63,7 +59,7 @@ class LogTools:
                 logs_kwargs["since"] = since
 
             # Get logs using Docker SDK
-            logs_bytes = await loop.run_in_executor(None, lambda: container.logs(**logs_kwargs))
+            logs_bytes = await asyncio.to_thread(container.logs, **logs_kwargs)
 
             # Parse logs (logs_bytes is bytes, need to decode)
             logs_str = logs_bytes.decode("utf-8", errors="replace")
@@ -89,7 +85,7 @@ class LogTools:
 
         except docker.errors.NotFound:
             logger.error("Container not found for logs", host_id=host_id, container_id=container_id)
-            return {"error": f"Container {container_id} not found"}
+            return {"success": False, "error": f"Container {container_id} not found"}
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error getting container logs",
@@ -97,7 +93,7 @@ class LogTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"error": f"Failed to get logs: {str(e)}"}
+            return {"success": False, "error": f"Failed to get logs: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container logs",

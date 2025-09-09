@@ -6,7 +6,12 @@ Business logic for Docker host management operations.
 
 import asyncio
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
+else:
+    DockerContextManager = "DockerContextManager"
 
 import structlog
 
@@ -18,7 +23,12 @@ from ..utils import build_ssh_command
 class HostService:
     """Service for Docker host management operations."""
 
-    def __init__(self, config: DockerMCPConfig, context_manager=None, cache_manager=None):
+    def __init__(
+        self,
+        config: DockerMCPConfig,
+        context_manager: "DockerContextManager | None" = None,
+        cache_manager=None,
+    ):
         self.config = config
         self.context_manager = context_manager
         self.logger = structlog.get_logger()
@@ -932,7 +942,7 @@ class HostService:
             return await self._discover_compose_paths_ssh(host)
         except Exception as e:
             self.logger.error("Compose path discovery failed", host_id=host.hostname, error=str(e))
-            return {"paths": [], "recommended": None, "error": str(e)}
+            return {"success": False, "paths": [], "recommended": None, "error": str(e)}
 
     async def _discover_compose_paths_ssh(self, host: DockerHost) -> dict[str, Any]:
         """Discover compose paths using SSH (fallback method)."""
@@ -1001,7 +1011,7 @@ class HostService:
             return await self._discover_appdata_paths_ssh(host)
         except Exception as e:
             self.logger.error("Appdata path discovery failed", host_id=host.hostname, error=str(e))
-            return {"paths": [], "recommended": None, "error": str(e)}
+            return {"success": False, "paths": [], "recommended": None, "error": str(e)}
 
     async def _discover_appdata_paths_ssh(self, host: DockerHost) -> dict[str, Any]:
         """Discover appdata paths using SSH (fallback method)."""
@@ -1387,6 +1397,9 @@ class HostService:
 
         if not host_id:
             return {"success": False, "error": "host_id is required for ports action"}
+
+        if self.context_manager is None:
+            return {"success": False, "error": "Context manager not available"}
 
         container_service = ContainerService(self.config, self.context_manager)
 

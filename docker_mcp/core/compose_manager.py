@@ -107,12 +107,8 @@ class ComposeManager:
             if client is None:
                 return None
 
-            loop = asyncio.get_event_loop()
-
             # Use Docker SDK to get containers
-            docker_containers = await loop.run_in_executor(
-                None, lambda: client.containers.list(all=True)
-            )
+            docker_containers = await asyncio.to_thread(client.containers.list, all=True)
 
             # Format output to match expected JSON lines format
             json_lines = []
@@ -196,12 +192,8 @@ class ComposeManager:
             if client is None:
                 return None
 
-            loop = asyncio.get_event_loop()
-
             # Get container using Docker SDK
-            container = await loop.run_in_executor(
-                None, lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(client.containers.get, container_id)
 
             # Return container attributes (inspect data)
             return container.attrs
@@ -271,7 +263,8 @@ class ComposeManager:
 
         if not location_analysis:
             discovery_result["analysis"] = (
-                "No Docker Compose stacks found. Please set compose_path in hosts.yml configuration for new deployments."
+                "No Docker Compose stacks found. Please set compose_path in hosts.yml "
+                "configuration for new deployments."
             )
         elif len(location_analysis) == 1:
             self._handle_single_location(discovery_result, location_analysis)
@@ -307,8 +300,8 @@ class ComposeManager:
         discovery_result["suggested_path"] = primary_location
         discovery_result["analysis"] = (
             f"Found stacks in {len(location_analysis)} different locations. "
-            f"The majority ({primary_data['count']} stacks) are in subdirectories of {primary_location}. "
-            f"Other locations: {', '.join([loc for loc, _ in sorted_locations[1:]])}"
+            f"The majority ({primary_data['count']} stacks) are in subdirectories of "
+            f"{primary_location}. Other locations: {', '.join([loc for loc, _ in sorted_locations[1:]])}"
         )
 
     def _create_error_result(self, host_id: str, error: str) -> dict[str, Any]:
@@ -420,11 +413,13 @@ class ComposeManager:
 
             logger.debug("Creating remote directory", host_id=host_id, stack_dir=stack_dir)
 
-            mkdir_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=mkdir_cmd: subprocess.run(  # nosec B603
-                    cmd, check=False, capture_output=True, text=True, timeout=30
-                ),
+            mkdir_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                mkdir_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
 
             if mkdir_result.returncode != 0:
@@ -462,11 +457,13 @@ class ComposeManager:
                 compose_file=compose_file_path,
             )
 
-            scp_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603 - SCP command execution is intentional
-                    scp_cmd, check=False, capture_output=True, text=True, timeout=60
-                ),
+            scp_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603 - SCP command execution is intentional
+                scp_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
 
             if scp_result.returncode != 0:
@@ -542,11 +539,13 @@ class ComposeManager:
             ssh_cmd.extend([ssh_host, f"test -f {file_path}"])
 
             # Execute the command
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd, check=False, capture_output=True, text=True, timeout=10
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                ssh_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
 
             # Return code 0 means file exists, non-zero means it doesn't
@@ -657,11 +656,13 @@ class ComposeManager:
             ssh_cmd.extend([ssh_host, f"test -f {compose_file_path}"])
 
             # Execute the command
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd, check=False, capture_output=True, text=True, timeout=10
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                ssh_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
 
             # Return code 0 means file exists, non-zero means it doesn't

@@ -47,12 +47,9 @@ class StackNetwork:
             # Test source host SSH
             source_ssh_cmd = build_ssh_command(source_host) + ["echo 'SSH_OK'"]
             try:
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda: subprocess.run(  # nosec B603
-                        source_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
-                    ),
+                result = await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    source_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
                 )
                 ssh_tests["source_ssh"] = {
                     "success": result.returncode == 0 and "SSH_OK" in result.stdout,
@@ -65,11 +62,9 @@ class StackNetwork:
             # Test target host SSH
             target_ssh_cmd = build_ssh_command(target_host) + ["echo 'SSH_OK'"]
             try:
-                result = await loop.run_in_executor(
-                    None,
-                    lambda: subprocess.run(  # nosec B603
-                        target_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
-                    ),
+                result = await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    target_ssh_cmd, capture_output=True, text=True, check=False, timeout=10
                 )
                 ssh_tests["target_ssh"] = {
                     "success": result.returncode == 0 and "SSH_OK" in result.stdout,
@@ -89,15 +84,13 @@ class StackNetwork:
                     create_test_file_cmd = source_ssh_cmd[:-1] + [
                         "dd if=/dev/zero of=/tmp/speed_test bs=1M count=1 2>/dev/null && echo 'FILE_CREATED'"  # noqa: S108
                     ]
-                    result = await loop.run_in_executor(
-                        None,
-                        lambda: subprocess.run(  # nosec B603
-                            create_test_file_cmd,
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                            timeout=15,
-                        ),
+                    result = await asyncio.to_thread(
+                        subprocess.run,  # nosec B603
+                        create_test_file_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=15,
                     )
 
                     if result.returncode == 0 and "FILE_CREATED" in result.stdout:
@@ -113,15 +106,13 @@ class StackNetwork:
                             )
                         ]
 
-                        result = await loop.run_in_executor(
-                            None,
-                            lambda: subprocess.run(  # nosec B603
-                                rsync_test_cmd,
-                                capture_output=True,
-                                text=True,
-                                check=False,
-                                timeout=30,
-                            ),
+                        result = await asyncio.to_thread(
+                            subprocess.run,  # nosec B603
+                            rsync_test_cmd,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=30,
                         )
 
                         transfer_time = time.time() - start_time
@@ -144,13 +135,11 @@ class StackNetwork:
                             cleanup_target = target_ssh_cmd[:-1] + ["rm -f /tmp/speed_test_recv"]  # noqa: S108
 
                             await asyncio.gather(
-                                loop.run_in_executor(
-                                    None,
-                                    lambda: subprocess.run(cleanup_source, check=False),  # nosec B603
+                                asyncio.to_thread(
+                                    subprocess.run, cleanup_source, check=False  # nosec B603
                                 ),
-                                loop.run_in_executor(
-                                    None,
-                                    lambda: subprocess.run(cleanup_target, check=False),  # nosec B603
+                                asyncio.to_thread(
+                                    subprocess.run, cleanup_target, check=False  # nosec B603
                                 ),
                             )
                         else:
@@ -331,18 +320,14 @@ class StackNetwork:
         try:
             source_ssh_cmd = build_ssh_command(source_host)
             target_ssh_cmd = build_ssh_command(target_host)
-            loop = asyncio.get_running_loop()
-
             # Create test file on source
             create_cmd = source_ssh_cmd + [
                 f"dd if=/dev/zero of=/tmp/bandwidth_test bs=1M count={test_size_mb} 2>/dev/null && echo 'CREATED'"  # noqa: S108
             ]
 
-            create_result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    create_cmd, capture_output=True, text=True, check=False, timeout=30
-                ),
+            create_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                create_cmd, capture_output=True, text=True, check=False, timeout=30
             )
 
             if create_result.returncode != 0 or "CREATED" not in create_result.stdout:
@@ -357,11 +342,9 @@ class StackNetwork:
                 + (f" -e 'ssh -i {target_host.identity_file}'" if target_host.identity_file else "")
             ]
 
-            transfer_result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    transfer_cmd, capture_output=True, text=True, check=False, timeout=60
-                ),
+            transfer_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                transfer_cmd, capture_output=True, text=True, check=False, timeout=60
             )
 
             transfer_time = time.time() - start_time
@@ -390,9 +373,8 @@ class StackNetwork:
 
             await asyncio.gather(
                 *[
-                    loop.run_in_executor(
-                        None,
-                        lambda cmd=cmd: subprocess.run(cmd, check=False),  # nosec B603
+                    asyncio.to_thread(
+                        subprocess.run, cmd, check=False  # nosec B603
                     )
                     for cmd in cleanup_commands
                 ]

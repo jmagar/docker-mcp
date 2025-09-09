@@ -8,10 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from docker_mcp.server import DockerMCPServer
-    from docker_mcp.services import ContainerService
+    from docker_mcp.services.container import ContainerService
 
 import structlog
 from fastmcp.resources.resource import FunctionResource
+from pydantic import AnyUrl
 
 logger = structlog.get_logger()
 
@@ -118,8 +119,6 @@ class PortMappingResource(FunctionResource):
                 }
 
         # Initialize FunctionResource with closure-based function
-        from pydantic import AnyUrl
-
         super().__init__(
             fn=_get_port_data,
             uri=AnyUrl("ports://{host_id}"),

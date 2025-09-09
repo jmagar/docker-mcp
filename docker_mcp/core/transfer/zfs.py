@@ -49,11 +49,12 @@ class ZFSTransfer(BaseTransfer):
         check_cmd = ssh_cmd + ["which zfs > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    check_cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                check_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
             )
 
             if "FAILED" in result.stdout:
@@ -61,11 +62,12 @@ class ZFSTransfer(BaseTransfer):
 
             # Check if we can list ZFS pools (basic functionality test)
             list_cmd = ssh_cmd + ["zfs list > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    list_cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                list_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
             )
 
             if "FAILED" in result.stdout:
@@ -119,11 +121,12 @@ class ZFSTransfer(BaseTransfer):
         df_cmd = ssh_cmd + [f"df -T {shlex.quote(path)} | tail -1"]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    df_cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                df_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
             )
 
             if result.returncode != 0:
@@ -136,11 +139,12 @@ class ZFSTransfer(BaseTransfer):
 
             # Get the actual dataset name using zfs list
             zfs_cmd = ssh_cmd + [f"zfs list -H -o name {shlex.quote(path)} 2>/dev/null | head -1"]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    zfs_cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                zfs_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -150,11 +154,12 @@ class ZFSTransfer(BaseTransfer):
             mount_cmd = ssh_cmd + [
                 f"zfs list -H -o name,mountpoint | grep {shlex.quote(path)} | head -1 | cut -f1"
             ]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    mount_cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                mount_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -185,11 +190,12 @@ class ZFSTransfer(BaseTransfer):
             f"zfs list {expected_dataset} >/dev/null 2>&1 && echo 'EXISTS' || echo 'MISSING'"
         ]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                check_cmd, capture_output=True, text=True, check=False
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            check_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
         if "EXISTS" in result.stdout:
@@ -205,11 +211,12 @@ class ZFSTransfer(BaseTransfer):
         path_check_cmd = ssh_cmd + [
             f"test -d {shlex.quote(service_path)} && echo 'DIR_EXISTS' || echo 'NO_DIR'"
         ]
-        path_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                path_check_cmd, capture_output=True, text=True, check=False
-            ),
+        path_result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            path_check_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
         if "DIR_EXISTS" in path_result.stdout:
@@ -218,11 +225,12 @@ class ZFSTransfer(BaseTransfer):
         else:
             # No existing data - create empty dataset
             create_cmd = ssh_cmd + [f"zfs create {expected_dataset}"]
-            create_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    create_cmd, capture_output=True, text=True, check=False
-                ),
+            create_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                create_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
 
             if create_result.returncode != 0:
@@ -243,11 +251,12 @@ class ZFSTransfer(BaseTransfer):
 
         # 1. Move existing data to temp location
         move_cmd = ssh_cmd + [f"mv {shlex.quote(dir_path)} {shlex.quote(temp_path)}"]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                move_cmd, capture_output=True, text=True, check=False
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            move_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
         if result.returncode != 0:
@@ -256,11 +265,12 @@ class ZFSTransfer(BaseTransfer):
         try:
             # 2. Create ZFS dataset
             create_cmd = ssh_cmd + [f"zfs create {dataset_name}"]
-            create_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    create_cmd, capture_output=True, text=True, check=False
-                ),
+            create_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                create_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
 
             if create_result.returncode != 0:
@@ -268,11 +278,12 @@ class ZFSTransfer(BaseTransfer):
 
             # 3. Move data back
             restore_cmd = ssh_cmd + [f"cp -r {shlex.quote(temp_path)}/* {shlex.quote(dir_path)}/"]
-            restore_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    restore_cmd, capture_output=True, text=True, check=False
-                ),
+            restore_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                restore_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
 
             if restore_result.returncode != 0:
@@ -280,11 +291,12 @@ class ZFSTransfer(BaseTransfer):
 
             # 4. Cleanup temp directory
             cleanup_cmd = ssh_cmd + [f"rm -rf {shlex.quote(temp_path)}"]
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    cleanup_cmd, capture_output=True, text=True, check=False
-                ),
+            await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                cleanup_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
 
             self.logger.info("Successfully converted directory to dataset", dataset=dataset_name)
@@ -293,11 +305,12 @@ class ZFSTransfer(BaseTransfer):
             # Rollback on failure
             self.logger.error("Dataset creation failed, rolling back", error=str(e))
             rollback_cmd = ssh_cmd + [f"mv {shlex.quote(temp_path)} {shlex.quote(dir_path)}"]
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    rollback_cmd, capture_output=True, text=True, check=False
-                ),
+            await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                rollback_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
             raise
 
@@ -331,11 +344,12 @@ class ZFSTransfer(BaseTransfer):
 
         self.logger.info("Creating ZFS snapshot", snapshot=full_snapshot, recursive=recursive)
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                snap_cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            snap_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode != 0:
@@ -380,11 +394,12 @@ class ZFSTransfer(BaseTransfer):
             "Cleaning up ZFS snapshot", snapshot=full_snapshot, recursive=recursive, validated=True
         )
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                destroy_cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            destroy_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode == 0:
@@ -523,11 +538,12 @@ class ZFSTransfer(BaseTransfer):
         )
 
         # Execute the combined command
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                ["/bin/bash", "-c", full_cmd], check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            ["/bin/bash", "-c", full_cmd],
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode != 0:
@@ -569,9 +585,12 @@ class ZFSTransfer(BaseTransfer):
         target_exists_cmd = target_ssh_cmd + [
             f"zfs list {shlex.quote(target_dataset)} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
         ]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(target_exists_cmd, capture_output=True, text=True, check=False),  # nosec B603
+        result = await asyncio.to_thread(
+            subprocess.run,
+            target_exists_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
 
         if "NOT_FOUND" in result.stdout:
@@ -581,9 +600,12 @@ class ZFSTransfer(BaseTransfer):
         source_props_cmd = source_ssh_cmd + [
             f"zfs get -H -p used,referenced,compressratio {shlex.quote(source_snapshot)} 2>/dev/null || echo 'FAILED'"
         ]
-        source_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(source_props_cmd, capture_output=True, text=True, check=False),  # nosec B603
+        source_result = await asyncio.to_thread(
+            subprocess.run,
+            source_props_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
 
         if "FAILED" in source_result.stdout or source_result.returncode != 0:
@@ -593,11 +615,12 @@ class ZFSTransfer(BaseTransfer):
             target_props_cmd = target_ssh_cmd + [
                 f"zfs get -H -p used,referenced,compressratio {shlex.quote(target_dataset)} 2>/dev/null || echo 'FAILED'"
             ]
-            target_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    target_props_cmd, capture_output=True, text=True, check=False
-                ),
+            target_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                target_props_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
 
             if "FAILED" not in target_result.stdout and target_result.returncode == 0:
@@ -631,9 +654,12 @@ class ZFSTransfer(BaseTransfer):
         access_test_cmd = target_ssh_cmd + [
             f"ls {target_dataset} >/dev/null 2>&1 || zfs get -H mountpoint {target_dataset} >/dev/null 2>&1"
         ]
-        access_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(access_test_cmd, capture_output=True, text=True, check=False),  # nosec B603
+        access_result = await asyncio.to_thread(
+            subprocess.run,
+            access_test_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
 
         if access_result.returncode != 0:
@@ -961,9 +987,12 @@ class ZFSTransfer(BaseTransfer):
             f"zfs get -H -o value mountpoint {shlex.quote(dataset)} 2>/dev/null || echo 'NOT_FOUND'"
         ]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
 
         if result.returncode == 0 and "NOT_FOUND" not in result.stdout:
@@ -972,62 +1001,6 @@ class ZFSTransfer(BaseTransfer):
                 return mountpoint
 
         return None
-
-    async def _cleanup_target_snapshots(self, host: DockerHost, dataset: str) -> None:
-        """Clean up existing snapshots on target dataset to prepare for migration.
-
-        This prevents ZFS receive failures due to existing snapshots on the target.
-        In migration scenarios, we want to completely replace the target dataset.
-
-        Args:
-            host: Target host configuration
-            dataset: Target dataset name
-        """
-        ssh_cmd = self.build_ssh_cmd(host)
-
-        # List existing snapshots for this dataset
-        list_cmd = ssh_cmd + [
-            f"zfs list -H -t snapshot -o name {shlex.quote(dataset)} 2>/dev/null || true"
-        ]
-
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(list_cmd, capture_output=True, text=True, check=False),  # nosec B603
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            snapshots = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
-
-            if snapshots:
-                self.logger.info(
-                    "Cleaning up existing snapshots on target dataset for migration",
-                    dataset=dataset,
-                    snapshots_to_remove=len(snapshots),
-                    snapshots=snapshots[:3],  # Log first 3 for reference
-                )
-
-                # Destroy each snapshot
-                for snapshot in snapshots:
-                    destroy_cmd = ssh_cmd + [
-                        f"zfs destroy {shlex.quote(snapshot)} 2>/dev/null || true"
-                    ]
-                    destroy_result = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: subprocess.run(
-                            destroy_cmd, capture_output=True, text=True, check=False
-                        ),  # nosec B603
-                    )
-
-                    if destroy_result.returncode != 0:
-                        self.logger.warning(
-                            "Failed to destroy snapshot, continuing anyway",
-                            snapshot=snapshot,
-                            error=destroy_result.stderr.strip(),
-                        )
-
-                self.logger.info("Target dataset snapshot cleanup completed", dataset=dataset)
-            else:
-                self.logger.debug("No existing snapshots found on target dataset", dataset=dataset)
 
     async def _prepare_target_dataset(self, host: DockerHost, dataset: str) -> None:
         """Prepare target dataset for migration by checking if it exists and destroying it if needed.
@@ -1046,9 +1019,12 @@ class ZFSTransfer(BaseTransfer):
             f"zfs list {shlex.quote(dataset)} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
         ]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(check_cmd, capture_output=True, text=True, check=False),  # nosec B603
+        result = await asyncio.to_thread(
+            subprocess.run,
+            check_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
 
         if "EXISTS" in result.stdout:
@@ -1060,9 +1036,12 @@ class ZFSTransfer(BaseTransfer):
 
             # Destroy the entire dataset (this also removes all snapshots)
             destroy_cmd = ssh_cmd + [f"zfs destroy -r {shlex.quote(dataset)} 2>/dev/null || true"]
-            destroy_result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(destroy_cmd, capture_output=True, text=True, check=False),  # nosec B603
+            destroy_result = await asyncio.to_thread(
+                subprocess.run,
+                destroy_cmd,
+                capture_output=True,
+                text=True,
+                check=False,  # nosec B603
             )
 
             if destroy_result.returncode == 0:

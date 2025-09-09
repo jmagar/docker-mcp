@@ -24,12 +24,9 @@ class MigrationVerifier:
     async def _run_remote(self, cmd: list[str], description: str = "", timeout: int = 60):
         """Run a remote SSH/Docker command with timeout and consistent annotation."""
         self.logger.debug("exec_remote", description=description, cmd=cmd)
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False, timeout=timeout
-            ),
+        return await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            cmd, capture_output=True, text=True, check=False, timeout=timeout
         )
 
     async def create_source_inventory(
@@ -89,15 +86,22 @@ class MigrationVerifier:
             )
 
             # Find and checksum critical files (databases, configs)
+            # Use SHA256 first, fallback to MD5 (consistent with target verification)
             critical_cmd = ssh_cmd + [
-                f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
-                f"-exec md5sum {{}} + 2>/dev/null"
+                f"if command -v sha256sum >/dev/null 2>&1; then "
+                f"  find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
+                f"  -exec sha256sum {{}} + 2>/dev/null; "
+                f"else "
+                f"  find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
+                f"  -exec md5sum {{}} + 2>/dev/null; "
+                f"fi"
             ]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=critical_cmd: subprocess.run(  # nosec B603
-                    cmd, capture_output=True, text=True, check=False
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                critical_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
 
             critical_files: dict[str, str] = {}
@@ -167,31 +171,36 @@ class MigrationVerifier:
         # Get target inventory using same methods as source
         # File count
         file_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f 2>/dev/null | wc -l"]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=file_count_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            file_count_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["files_found"] = target_files
 
         # Directory count
         dir_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type d 2>/dev/null | wc -l"]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=dir_count_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            dir_count_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["dirs_found"] = target_dirs
 
         # Total size
         size_cmd = ssh_cmd + [f"du -sb {shlex.quote(target_path)} 2>/dev/null | cut -f1"]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+        result = await asyncio.to_thread(
+            subprocess.run,
+            size_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
         target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["size_found"] = target_size
@@ -200,11 +209,12 @@ class MigrationVerifier:
         file_list_cmd = ssh_cmd + [
             f"find {shlex.quote(target_path)} -type f -printf '%P\\n' 2>/dev/null | sort"
         ]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=file_list_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            file_list_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         target_file_list = (
             result.stdout.strip().split("\n")
@@ -246,11 +256,12 @@ class MigrationVerifier:
                 f"fi"
             ]
 
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=checksum_cmd: subprocess.run(  # nosec B603
-                    cmd, capture_output=True, text=True, check=False
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                checksum_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
 
             if result.returncode == 0 and result.stdout.strip():
@@ -322,11 +333,12 @@ class MigrationVerifier:
         find_cmd = ssh_cmd + [
             f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=find_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
+        find_result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            find_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
@@ -336,11 +348,12 @@ class MigrationVerifier:
 
         # Now inspect the actual container
         inspect_cmd = ssh_cmd + [f"docker inspect {shlex.quote(container_name)} 2>/dev/null"]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=inspect_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            inspect_cmd,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
         if result.returncode != 0:
@@ -369,9 +382,12 @@ class MigrationVerifier:
         find_cmd = ssh_cmd + [
             f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+        find_result = await asyncio.to_thread(
+            subprocess.run,
+            find_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
@@ -382,9 +398,12 @@ class MigrationVerifier:
         test_cmd = ssh_cmd + [
             f"docker exec {shlex.quote(container_name)} ls /usr/share/nginx/html 2>/dev/null || docker exec {shlex.quote(container_name)} ls / 2>/dev/null"
         ]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=test_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+        result = await asyncio.to_thread(
+            subprocess.run,
+            test_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
         return result.returncode == 0
 
@@ -394,9 +413,12 @@ class MigrationVerifier:
         find_cmd = ssh_cmd + [
             f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+        find_result = await asyncio.to_thread(
+            subprocess.run,
+            find_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
@@ -409,9 +431,12 @@ class MigrationVerifier:
         logs_cmd = ssh_cmd + [
             f"docker logs {shlex.quote(container_name)} --tail 50 2>&1 | grep -i error || true"
         ]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=logs_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
+        result = await asyncio.to_thread(
+            subprocess.run,
+            logs_cmd,
+            capture_output=True,
+            text=True,
+            check=False,  # nosec B603
         )
 
         if result.stdout.strip():

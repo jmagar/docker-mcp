@@ -5,7 +5,10 @@ Thin facade that delegates to specialized stack management modules.
 Provides a clean interface while maintaining backward compatibility.
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
 
 import structlog
 from fastmcp.tools.tool import ToolResult
@@ -24,7 +27,7 @@ class StackService:
     def __init__(
         self,
         config: DockerMCPConfig,
-        context_manager: DockerContextManager,
+        context_manager: "DockerContextManager",
         logs_service: LogsService,
     ):
         self.config = config
@@ -134,7 +137,7 @@ class StackService:
         """Check if ports are already in use on host."""
         is_valid, error_msg = self._validate_host(host_id)
         if not is_valid:
-            return False, ports, {"error": error_msg}
+            return False, ports, {"success": False, "error": error_msg}
 
         host = self.config.hosts[host_id]
         return await self.validation.check_port_conflicts(host, ports)
@@ -176,7 +179,7 @@ class StackService:
         for host_id in [source_host_id, target_host_id]:
             is_valid, error_msg = self._validate_host(host_id)
             if not is_valid:
-                return False, {"error": error_msg}
+                return False, {"success": False, "error": error_msg}
 
         source_host = self.config.hosts[source_host_id]
         target_host = self.config.hosts[target_host_id]

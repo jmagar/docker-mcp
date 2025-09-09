@@ -21,7 +21,7 @@ jobs:
             echo "Warning: report.json not found"
           fi
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() }}
         with:
           name: code-hygiene-report
           path: |

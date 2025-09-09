@@ -9,7 +9,7 @@ from mcp.types import TextContent
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
 
-from ...core.config_loader import DockerMCPConfig
+from ...core.config_loader import DockerHost, DockerMCPConfig
 from ...utils import format_size
 from .migration_executor import StackMigrationExecutor
 from .network import StackNetwork
@@ -168,7 +168,7 @@ class StackMigrationOrchestrator:
 
     async def _validate_hosts(
         self, source_host_id: str, target_host_id: str, migration_steps: list[str]
-    ) -> ToolResult | tuple[Any, Any]:
+    ) -> ToolResult | tuple[DockerHost, DockerHost]:
         """Validate source and target hosts."""
         for host_id in [source_host_id, target_host_id]:
             is_valid, error_msg = self._validate_host(host_id)
@@ -260,11 +260,11 @@ class StackMigrationOrchestrator:
 
     async def _test_network_connectivity(
         self,
-        source_host,
-        target_host,
+        source_host: DockerHost,
+        target_host: DockerHost,
         estimated_data_size: int,
         migration_steps: list[str],
-        migration_data: dict,
+        migration_data: dict[str, Any],
         dry_run: bool,
     ) -> ToolResult | bool:
         """Test network connectivity between hosts."""
@@ -326,8 +326,8 @@ class StackMigrationOrchestrator:
         self,
         source_host_id: str,
         target_host_id: str,
-        source_host,
-        target_host,
+        source_host: DockerHost,
+        target_host: DockerHost,
         stack_name: str,
         skip_stop_source: bool,
         start_target: bool,
@@ -336,7 +336,7 @@ class StackMigrationOrchestrator:
         compose_content: str,
         compose_path: str,
         migration_steps: list[str],
-        migration_data: dict,
+        migration_data: dict[str, Any],
     ) -> ToolResult | bool | dict[str, Any]:
         """Execute the actual migration process."""
         migration_steps.append("🚀 Starting migration execution...")
@@ -464,7 +464,7 @@ class StackMigrationOrchestrator:
         stack_name: str,
         compose_content: str,
         path_mappings: dict[str, str],
-        target_host,
+        target_host: DockerHost,
         start_target: bool,
         migration_steps: list[str],
     ) -> ToolResult | dict[str, Any]:

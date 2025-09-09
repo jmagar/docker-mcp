@@ -65,9 +65,23 @@ except ImportError:
 
 # Import enum definitions
 try:
-    from .models.enums import ComposeAction, ContainerAction, HostAction
+    from .models.enums import (
+        CleanupType,
+        ComposeAction,
+        ContainerAction,
+        HostAction,
+        ProtocolLiteral,
+        ScheduleFrequency,
+    )
 except ImportError:
-    from docker_mcp.models.enums import ComposeAction, ContainerAction, HostAction
+    from docker_mcp.models.enums import (
+        CleanupType,
+        ComposeAction,
+        ContainerAction,
+        HostAction,
+        ProtocolLiteral,
+        ScheduleFrequency,
+    )
 
 
 def get_data_dir() -> Path:
@@ -525,6 +539,7 @@ class DockerMCPServer:
         if scopes_raw.strip().startswith("["):
             try:
                 import json
+
                 required_scopes = json.loads(scopes_raw)
             except Exception:
                 required_scopes = []
@@ -552,8 +567,9 @@ class DockerMCPServer:
             timeout = None
         return timeout
 
-    def _build_provider_kwargs(self, base_url: str, redirect_path: str,
-                              required_scopes: list[str], timeout: int | None) -> dict[str, Any]:
+    def _build_provider_kwargs(
+        self, base_url: str, redirect_path: str, required_scopes: list[str], timeout: int | None
+    ) -> dict[str, Any]:
         """Build kwargs for GoogleProvider initialization."""
         kwargs: dict[str, Any] = {
             "base_url": base_url,
@@ -742,13 +758,13 @@ class DockerMCPServer:
                 zfs_dataset=zfs_dataset,
                 port=port,
                 cleanup_type=cast(
-                    Any,
+                    CleanupType | None,
                     cleanup_type
                     if cleanup_type in ["check", "safe", "moderate", "aggressive"]
                     else None,
                 ),
                 frequency=cast(
-                    Any,
+                    ScheduleFrequency | None,
                     frequency if frequency in ["daily", "weekly", "monthly", "custom"] else None,
                 ),
                 time=time if time else None,
@@ -784,7 +800,7 @@ class DockerMCPServer:
             frequency=params.frequency,
             time=params.time,
             ssh_config_path=params.ssh_config_path,
-            selected_hosts=params.selected_hosts,
+            selected_hosts=params.selected_hosts_list,
         )
 
     async def docker_container(
@@ -1155,6 +1171,11 @@ class DockerMCPServer:
         if hasattr(result, "structured_content"):
             return result.structured_content or {"success": True, "data": fallback_msg}
         return result
+
+    def _normalize_protocol(self, proto: str) -> ProtocolLiteral:
+        """Normalize protocol string to valid ProtocolLiteral."""
+        p = proto.lower()
+        return cast(ProtocolLiteral, p if p in ("tcp", "udp", "sctp") else "tcp")
 
     def update_configuration(self, new_config: DockerMCPConfig) -> None:
         """Update server configuration and reinitialize components."""

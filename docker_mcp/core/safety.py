@@ -3,6 +3,7 @@
 import asyncio
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -113,7 +114,7 @@ class MigrationSafety:
             "path": file_path,
             "operation": operation,
             "reason": reason,
-            "timestamp": asyncio.get_event_loop().time(),
+            "timestamp": time.time(),
             "validated": False,
         }
 
@@ -169,11 +170,12 @@ class MigrationSafety:
         delete_cmd = ssh_cmd + [f"rm -f {file_path}"]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    delete_cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                delete_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
             )
 
             if result.returncode == 0:

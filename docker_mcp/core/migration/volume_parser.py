@@ -258,11 +258,12 @@ class VolumeParser:
             )
             full_cmd = ssh_cmd + [inspect_cmd]
 
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=full_cmd: subprocess.run(  # nosec B603
-                    cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                full_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
             )
 
             if result.returncode == 0:

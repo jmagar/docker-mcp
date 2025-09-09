@@ -53,10 +53,9 @@ class StackMigrationExecutor:
 
             # Read compose file
             read_cmd = ssh_cmd_source + [f"cat {shlex.quote(compose_file_path)}"]
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(read_cmd, capture_output=True, text=True, check=False),  # nosec B603
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                read_cmd, capture_output=True, text=True, check=False
             )
 
             if result.returncode != 0:
@@ -120,7 +119,11 @@ class StackMigrationExecutor:
             )
 
             if not is_valid:
-                return False, archive_path, {"error": "Archive integrity verification failed"}
+                return (
+                    False,
+                    archive_path,
+                    {"success": False, "error": "Archive integrity verification failed"},
+                )
 
             # Get archive metadata
             metadata = {
@@ -133,7 +136,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to create data archive", error=str(e))
-            return False, "", {"error": str(e)}
+            return False, "", {"success": False, "error": str(e)}
 
     async def transfer_data(
         self,
@@ -181,7 +184,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to transfer data", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def extract_archive(
         self, target_host: DockerHost, archive_path: str, target_path: str, dry_run: bool = False
@@ -220,11 +223,11 @@ class StackMigrationExecutor:
                     "extraction_path": target_path,
                 }
             else:
-                return False, {"error": "Archive extraction failed"}
+                return False, {"success": False, "error": "Archive extraction failed"}
 
         except Exception as e:
             self.logger.error("Failed to extract archive", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def deploy_stack_on_target(
         self,
@@ -299,18 +302,16 @@ class StackMigrationExecutor:
                         ]
 
                         import subprocess
-                        from typing import Any, cast
-
-                        def run_check_cmd() -> Any:  # Use Any to avoid mypy confusion
-                            return subprocess.run(
-                                check_cmd, capture_output=True, text=True, check=False
-                            )  # nosec B603
+                        from typing import cast
 
                         result = cast(
                             subprocess.CompletedProcess[str],
-                            await _asyncio.get_event_loop().run_in_executor(
-                                None,
-                                run_check_cmd,
+                            await _asyncio.to_thread(
+                                subprocess.run,
+                                check_cmd,
+                                capture_output=True,
+                                text=True,
+                                check=False,  # nosec B603
                             ),
                         )
 
@@ -341,7 +342,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to deploy stack on target", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def verify_deployment(
         self,
@@ -402,7 +403,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to verify deployment", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def cleanup_source(
         self,
@@ -446,10 +447,9 @@ class StackMigrationExecutor:
 
             # Remove compose file (safe operation)
             remove_cmd = ssh_cmd_source + [f"rm -f {shlex.quote(compose_path)}"]
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(remove_cmd, check=False),  # nosec B603
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                remove_cmd, check=False
             )
 
             cleanup_results = {
@@ -482,7 +482,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to cleanup source", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def create_backup(
         self, target_host: DockerHost, target_path: str, stack_name: str, dry_run: bool = False
@@ -517,7 +517,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to create backup", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def restore_from_backup(
         self, target_host: DockerHost, backup_info: dict, dry_run: bool = False

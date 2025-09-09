@@ -58,9 +58,7 @@ class ContainerTools:
                     "total": 0,
                 }
 
-            docker_containers = await asyncio.to_thread(
-                lambda: client.containers.list(all=all_containers)
-            )
+            docker_containers = await asyncio.to_thread(client.containers.list, all=all_containers)
 
             # Convert Docker SDK container objects to our format
             containers = []
@@ -139,7 +137,7 @@ class ContainerTools:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Use Docker SDK to get container
-            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
+            container = await asyncio.to_thread(client.containers.get, container_id)
 
             # Get container attributes (equivalent to inspect data)
             container_data = container.attrs
@@ -188,7 +186,7 @@ class ContainerTools:
 
         except docker.errors.NotFound:
             logger.error("Container not found", host_id=host_id, container_id=container_id)
-            return {"error": f"Container {container_id} not found"}
+            return {"success": False, "error": f"Container {container_id} not found"}
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error getting container info",
@@ -196,7 +194,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"error": f"Docker API error: {str(e)}"}
+            return {"success": False, "error": f"Docker API error: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container info",
@@ -204,7 +202,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"error": str(e)}
+            return {"success": False, "error": str(e)}
 
     async def start_container(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Start a container on a Docker host.
@@ -222,7 +220,7 @@ class ContainerTools:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Get container and start it using Docker SDK
-            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
+            container = await asyncio.to_thread(client.containers.get, container_id)
             await asyncio.to_thread(container.start)
 
             logger.info("Container started", host_id=host_id, container_id=container_id)
@@ -280,8 +278,8 @@ class ContainerTools:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Get container and stop it using Docker SDK
-            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
-            await asyncio.to_thread(lambda: container.stop(timeout=timeout))
+            container = await asyncio.to_thread(client.containers.get, container_id)
+            await asyncio.to_thread(container.stop, timeout=timeout)
 
             logger.info(
                 "Container stopped", host_id=host_id, container_id=container_id, timeout=timeout
@@ -356,8 +354,8 @@ class ContainerTools:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Get container and restart it using Docker SDK
-            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
-            await asyncio.to_thread(lambda: container.restart(timeout=timeout))
+            container = await asyncio.to_thread(client.containers.get, container_id)
+            await asyncio.to_thread(container.restart, timeout=timeout)
 
             logger.info(
                 "Container restarted", host_id=host_id, container_id=container_id, timeout=timeout
@@ -414,10 +412,10 @@ class ContainerTools:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Get container and retrieve stats using Docker SDK
-            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
+            container = await asyncio.to_thread(client.containers.get, container_id)
 
             # Docker SDK returns a single snapshot dict when stream=False
-            stats_raw = await asyncio.to_thread(lambda: container.stats(stream=False))
+            stats_raw = await asyncio.to_thread(container.stats, stream=False)
 
             # Parse stats data from Docker SDK format (different from CLI format)
             cpu_stats = stats_raw.get("cpu_stats", {})
@@ -473,7 +471,7 @@ class ContainerTools:
             logger.error(
                 "Container not found for stats", host_id=host_id, container_id=container_id
             )
-            return {"error": f"Container {container_id} not found"}
+            return {"success": False, "error": f"Container {container_id} not found"}
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error getting container stats",
@@ -481,7 +479,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"error": f"Failed to get stats: {str(e)}"}
+            return {"success": False, "error": f"Failed to get stats: {str(e)}"}
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container stats",
@@ -489,7 +487,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"error": str(e)}
+            return {"success": False, "error": str(e)}
 
     def _parse_ports_summary(self, ports_str: str) -> list[str]:
         """Parse Docker ports string into simplified format."""
@@ -597,10 +595,10 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {"error": f"Could not connect to Docker on host {host_id}"}
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Use Docker SDK to get container
-            container = await asyncio.to_thread(lambda: client.containers.get(container_id))
+            container = await asyncio.to_thread(client.containers.get, container_id)
 
             # Return container attributes which contain all inspect data
             container_data = container.attrs
@@ -723,7 +721,7 @@ class ContainerTools:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
             # Pull image using Docker SDK
-            image = await asyncio.to_thread(lambda: client.images.pull(image_name))
+            image = await asyncio.to_thread(client.images.pull, image_name)
 
             logger.info(
                 "Image pull completed",
@@ -845,7 +843,7 @@ class ContainerTools:
 
     async def _get_containers_for_port_analysis(
         self, host_id: str, include_stopped: bool
-    ) -> list[dict[str, Any]]:
+    ) -> list[Any]:
         """Get container data for port analysis."""
         # Get Docker client and list containers using Docker SDK
         client = await self.context_manager.get_client(host_id)

@@ -90,11 +90,12 @@ class MigrationManager:
             f"docker ps --filter 'label={DOCKER_COMPOSE_PROJECT}={shlex.quote(stack_name)}' --format '{{{{.Names}}}}'"
         ]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                check_cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            check_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode != 0:
@@ -122,11 +123,12 @@ class MigrationManager:
             # Force stop each container
             for container in running_containers:
                 stop_cmd = ssh_cmd + [f"docker kill {shlex.quote(container)}"]
-                await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda cmd=stop_cmd: subprocess.run(  # nosec B603
-                        cmd, check=False, capture_output=True, text=True
-                    ),
+                await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    stop_cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
                 )
 
             # Wait for containers to stop and processes to fully terminate
@@ -158,11 +160,12 @@ class MigrationManager:
         mkdir_cmd = f"mkdir -p {shlex.quote(stack_dir)}"
         full_cmd = ssh_cmd + [mkdir_cmd]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=full_cmd: subprocess.run(  # nosec B603
-                cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            full_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         if result.returncode != 0:

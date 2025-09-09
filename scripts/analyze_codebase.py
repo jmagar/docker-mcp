@@ -10,6 +10,7 @@ This script analyzes the codebase to find:
 
 import argparse
 import ast
+import asyncio
 import hashlib
 import json
 import sys
@@ -67,7 +68,7 @@ def extract_code_blocks(filepath: Path, min_lines: int = 5) -> list[tuple[int, i
                 if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
                     if node.end_lineno is not None and node.end_lineno - node.lineno >= min_lines:
                         # Extract and normalize the code block
-                        lines = content.split("\n")[node.lineno - 1:node.end_lineno]
+                        lines = content.split("\n")[node.lineno - 1 : node.end_lineno]
                         normalized = "\n".join(line.strip() for line in lines if line.strip())
                         blocks.append((node.lineno, node.end_lineno, normalized))
     except (SyntaxError, UnicodeDecodeError):
@@ -99,7 +100,9 @@ def find_duplicate_files(root_dir: Path, exclude_patterns: list[str]) -> dict[st
     return duplicates
 
 
-def find_duplicate_blocks(root_dir: Path, exclude_patterns: list[str]) -> dict[str, list[dict[str, Any]]]:
+def find_duplicate_blocks(
+    root_dir: Path, exclude_patterns: list[str]
+) -> dict[str, list[dict[str, Any]]]:
     """Find duplicate code blocks across files."""
     block_hashes: dict[str, dict[str, Any]] = {}
     duplicates: dict[str, list[dict[str, Any]]] = {}
@@ -119,7 +122,7 @@ def find_duplicate_blocks(root_dir: Path, exclude_patterns: list[str]) -> dict[s
                 "file": relative_path,
                 "start_line": start_line,
                 "end_line": end_line,
-                "lines": end_line - start_line + 1
+                "lines": end_line - start_line + 1,
             }
 
             if code_hash in block_hashes:
@@ -132,7 +135,9 @@ def find_duplicate_blocks(root_dir: Path, exclude_patterns: list[str]) -> dict[s
     return duplicates
 
 
-def _extract_imports_from_file(py_file: Path, package_name: str, imported_modules: set[str]) -> None:
+def _extract_imports_from_file(
+    py_file: Path, package_name: str, imported_modules: set[str]
+) -> None:
     """Extract imports from a Python file."""
     try:
         with open(py_file, encoding="utf-8") as f:
@@ -157,9 +162,14 @@ def _extract_imports_from_file(py_file: Path, package_name: str, imported_module
         pass
 
 
-def _process_python_file(py_file: Path, root_dir: Path, package_name: str,
-                        exclude_patterns: list[str], all_modules: set[str],
-                        imported_modules: set[str]) -> None:
+def _process_python_file(
+    py_file: Path,
+    root_dir: Path,
+    package_name: str,
+    exclude_patterns: list[str],
+    all_modules: set[str],
+    imported_modules: set[str],
+) -> None:
     """Process a single Python file for module and import collection."""
     # Skip excluded paths
     if any(pattern in str(py_file) for pattern in exclude_patterns):
@@ -188,26 +198,29 @@ def find_unreferenced_modules(root_dir: Path, exclude_patterns: list[str]) -> di
 
     # Process all Python files
     for py_file in root_dir.rglob("*.py"):
-        _process_python_file(py_file, root_dir, package_name, exclude_patterns,
-                           all_modules, imported_modules)
+        _process_python_file(
+            py_file, root_dir, package_name, exclude_patterns, all_modules, imported_modules
+        )
 
     # Find unreferenced modules
     unreferenced = all_modules - imported_modules
 
     # Filter out main/cli modules (entry points)
-    unreferenced = {m for m in unreferenced if not m.endswith(".__main__") and not m.endswith(".main")}
+    unreferenced = {
+        m for m in unreferenced if not m.endswith(".__main__") and not m.endswith(".main")
+    }
 
     return {
         "total_modules": len(all_modules),
         "imported_modules": len(imported_modules),
         "unreferenced_modules": sorted(unreferenced),
-        "count": len(unreferenced)
+        "count": len(unreferenced),
     }
 
 
 def generate_markdown_report(duplicates: dict[str, Any], output_file: str) -> None:
     """Generate markdown report of findings."""
-    with open(output_file, "w") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write("# Code Health: Duplicates and Dead Code Analysis\n\n")
         f.write("## Summary\n\n")
 
@@ -233,7 +246,9 @@ def generate_markdown_report(duplicates: dict[str, Any], output_file: str) -> No
             for hash_val, blocks in duplicates["duplicate_blocks"].items():
                 f.write(f"### Block (hash: {hash_val[:8]}...)\n")
                 for block in blocks:
-                    f.write(f"- {block['file']}:{block['start_line']}-{block['end_line']} ({block['lines']} lines)\n")
+                    f.write(
+                        f"- {block['file']}:{block['start_line']}-{block['end_line']} ({block['lines']} lines)\n"
+                    )
                 f.write("\n")
         else:
             f.write("No duplicate code blocks found.\n\n")
@@ -253,15 +268,16 @@ def generate_markdown_report(duplicates: dict[str, Any], output_file: str) -> No
         f.write("- **Filters**: __init__ files, settings modules, prompts package\n")
 
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Analyze codebase for duplicates and dead code")
-    parser.add_argument("--out", default="CODE_HEALTH_DUPLICATES_DEAD_CODE.md",
-                        help="Output markdown file")
+    parser.add_argument(
+        "--out", default="CODE_HEALTH_DUPLICATES_DEAD_CODE.md", help="Output markdown file"
+    )
     parser.add_argument("--json", help="Output JSON file for CI integration")
     args = parser.parse_args()
 
     root_dir = Path(".")
-    exclude_patterns = [".venv", "build", "dist", "node_modules", "__pycache__", ".git"]
+    exclude_patterns = [".venv", "build", "dist", "node_modules", "__pycache__", ".git", "tests"]
 
     # Find duplicates and unreferenced code
     duplicate_files = find_duplicate_files(root_dir, exclude_patterns)
@@ -270,13 +286,10 @@ def main():
 
     # Prepare results
     results: dict[str, Any] = {
-        "duplicates": {
-            "files": len(duplicate_files),
-            "blocks": len(duplicate_blocks)
-        },
+        "duplicates": {"files": len(duplicate_files), "blocks": len(duplicate_blocks)},
         "duplicate_files": duplicate_files,
         "duplicate_blocks": duplicate_blocks,
-        "unreferenced": unreferenced
+        "unreferenced": unreferenced,
     }
 
     # Generate markdown report
@@ -288,9 +301,13 @@ def main():
             json.dump(results, f, indent=2)
 
     # Exit with non-zero if issues found
-    total_issues = results["duplicates"]["files"] + results["duplicates"]["blocks"] + results["unreferenced"]["count"]
+    total_issues = (
+        results["duplicates"]["files"]
+        + results["duplicates"]["blocks"]
+        + results["unreferenced"]["count"]
+    )
     sys.exit(1 if total_issues > 0 else 0)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
