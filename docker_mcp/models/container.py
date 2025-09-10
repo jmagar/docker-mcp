@@ -1,6 +1,6 @@
 """Container-related data models."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -85,7 +85,7 @@ class ContainerActionRequest(BaseModel):
 
     host_id: str
     container_id: str
-    action: str  # start, stop, restart, remove
+    action: Literal["start", "stop", "restart", "remove", "pause", "unpause"]
     force: bool = False
 
 
@@ -103,6 +103,7 @@ class LogStreamRequest(BaseModel):
 class PortMapping(BaseModel):
     """Individual port mapping with container context."""
 
+    host_id: str
     host_ip: str
     host_port: str
     container_port: str
@@ -118,6 +119,7 @@ class PortMapping(BaseModel):
 class PortConflict(BaseModel):
     """Port conflict information."""
 
+    host_id: str
     host_port: str
     protocol: ProtocolLiteral
     host_ip: str

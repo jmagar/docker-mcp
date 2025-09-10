@@ -5,7 +5,7 @@ with environment variable support for operational tuning.
 """
 
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class DockerTimeoutSettings(BaseSettings):
@@ -35,9 +35,7 @@ class DockerTimeoutSettings(BaseSettings):
         300, alias="BACKUP_TIMEOUT", description="Backup operations timeout in seconds"
     )
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 # Global settings instance
@@ -47,7 +45,7 @@ timeout_settings = DockerTimeoutSettings(
     SUBPROCESS_TIMEOUT=120,
     ARCHIVE_TIMEOUT=300,
     RSYNC_TIMEOUT=600,
-    BACKUP_TIMEOUT=300
+    BACKUP_TIMEOUT=300,
 )
 
 # Timeout constants for easy import

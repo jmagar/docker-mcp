@@ -16,7 +16,6 @@ from mcp.types import TextContent
 
 from ..core.compose_manager import ComposeManager
 from ..core.config_loader import DockerMCPConfig, save_config
-from ..core.docker_context import DockerContextManager
 from ..core.ssh_config_parser import SSHConfigParser
 from ..utils import validate_host
 
@@ -126,7 +125,7 @@ class ConfigService:
             if not self.config.hosts[current_host_id].enabled:
                 continue
 
-            self.logger.info(f"Discovering compose locations for {current_host_id}")
+            self.logger.info("Discovering compose locations", host_id=current_host_id)
             discovery_result = await self.compose_manager.discover_compose_locations(
                 current_host_id
             )

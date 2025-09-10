@@ -301,7 +301,9 @@ class StackMigrationExecutor:
                         target_host = self.config.hosts[host_id]
                         ssh_cmd = build_ssh_command(target_host)
                         check_cmd = ssh_cmd + [
-                            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | grep -q . && echo 'RUNNING' || echo 'NOT_READY'"
+                            "sh",
+                            "-c",
+                            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | grep -q . && echo 'RUNNING' || echo 'NOT_READY'",
                         ]
 
                         from typing import cast

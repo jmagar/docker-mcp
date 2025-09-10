@@ -45,16 +45,30 @@ class MigrationVerifier:
         common_algorithm = None
 
         for algorithm in algorithms:
-            source_cmd = ["ssh", f"{source_host.user}@{source_host.hostname}",
-                         f"command -v {algorithm} >/dev/null 2>&1 && echo 'available' || echo 'unavailable'"]
-            target_cmd = ["ssh", f"{target_host.user}@{target_host.hostname}",
-                         f"command -v {algorithm} >/dev/null 2>&1 && echo 'available' || echo 'unavailable'"]
+            source_cmd = [
+                "ssh",
+                f"{source_host.user}@{source_host.hostname}",
+                f"command -v {algorithm} >/dev/null 2>&1 && echo 'available' || echo 'unavailable'",
+            ]
+            target_cmd = [
+                "ssh",
+                f"{target_host.user}@{target_host.hostname}",
+                f"command -v {algorithm} >/dev/null 2>&1 && echo 'available' || echo 'unavailable'",
+            ]
 
-            source_result = await self._run_remote(source_cmd, f"check_{algorithm}_source", timeout=30)
-            target_result = await self._run_remote(target_cmd, f"check_{algorithm}_target", timeout=30)
+            source_result = await self._run_remote(
+                source_cmd, f"check_{algorithm}_source", timeout=30
+            )
+            target_result = await self._run_remote(
+                target_cmd, f"check_{algorithm}_target", timeout=30
+            )
 
-            if (source_result.returncode == 0 and "available" in source_result.stdout and
-                target_result.returncode == 0 and "available" in target_result.stdout):
+            if (
+                source_result.returncode == 0
+                and "available" in source_result.stdout
+                and target_result.returncode == 0
+                and "available" in target_result.stdout
+            ):
                 common_algorithm = algorithm
                 break
 
@@ -139,9 +153,9 @@ class MigrationVerifier:
                         if len(parts) == 2:
                             checksum, filepath = parts
                             # Store relative path (handle path normalization properly)
-                            path_normalized = path.rstrip('/')
-                            if filepath.startswith(path_normalized + '/'):
-                                rel_path = filepath[len(path_normalized) + 1:]
+                            path_normalized = path.rstrip("/")
+                            if filepath.startswith(path_normalized + "/"):
+                                rel_path = filepath[len(path_normalized) + 1 :]
                             else:
                                 rel_path = filepath
                             critical_files[rel_path] = checksum
@@ -255,9 +269,7 @@ class MigrationVerifier:
             target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
             qfile = shlex.quote(target_file_path)
             # Use MD5 consistently for maximum compatibility across hosts
-            checksum_cmd = ssh_cmd + [
-                f"md5sum {qfile} 2>/dev/null | cut -d' ' -f1"
-            ]
+            checksum_cmd = ssh_cmd + [f"md5sum {qfile} 2>/dev/null | cut -d' ' -f1"]
 
             result = await self._run_remote(checksum_cmd, "checksum", timeout=300)
 
@@ -310,10 +322,11 @@ class MigrationVerifier:
 
         verification["issues"] = issues
         verification["data_transfer"]["success"] = len(issues) == 0
+        verification["success"] = len(issues) == 0  # Top-level success flag
 
         self.logger.info(
             "Migration completeness verification",
-            success=verification["data_transfer"]["success"],
+            success=verification["success"],
             files_match=f"{verification['data_transfer']['file_match_percentage']:.1f}%",
             size_match=f"{verification['data_transfer']['size_match_percentage']:.1f}%",
             critical_files_ok=len(critical_files_verified) - len(failed_critical),

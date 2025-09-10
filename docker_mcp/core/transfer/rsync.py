@@ -109,17 +109,16 @@ class RsyncTransfer(BaseTransfer):
         if hasattr(target_host, "port") and target_host.port and target_host.port != 22:
             ssh_opts.append(f"-p {target_host.port}")
 
-        # Build rsync command that will run on the source host with quoted paths
-        quoted_source = shlex.quote(source_path)
+        # Build rsync command that will run on the source host with proper argument separation
+        rsync_args = ["rsync"] + rsync_opts
         if ssh_opts:
-            ssh_command = shlex.quote(f"ssh {' '.join(ssh_opts)}")
-            rsync_inner_cmd = (
-                f"rsync {' '.join(rsync_opts)} -e {ssh_command} {quoted_source} {target_url}"
-            )
-        else:
-            rsync_inner_cmd = f"rsync {' '.join(rsync_opts)} {quoted_source} {target_url}"
+            ssh_command = f"ssh {' '.join(ssh_opts)}"
+            rsync_args.extend(["-e", ssh_command])
+        rsync_args.extend([source_path, target_url])
 
         # Full command: SSH into source, then run rsync from there to target
+        # Use shlex.join to safely construct the command string
+        rsync_inner_cmd = shlex.join(rsync_args)
         rsync_cmd = ssh_cmd + [rsync_inner_cmd]
 
         self.logger.info(

@@ -372,8 +372,8 @@ class StackService:
             return {"success": False, "error": "host_id is required for logs action"}
         if not stack_name:
             return {"success": False, "error": "stack_name is required for logs action"}
-        if lines < 1 or lines > 10000:
-            return {"success": False, "error": "lines must be between 1 and 10000"}
+        if lines < 1 or lines > 1000:
+            return {"success": False, "error": "lines must be between 1 and 1000"}
 
         try:
             if host_id not in self.config.hosts:

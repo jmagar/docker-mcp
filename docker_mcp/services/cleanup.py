@@ -586,7 +586,12 @@ class CleanupService:
             else:
                 result["container_stats"]["stopped"] += 1
                 result["cleanup_candidates"].append(
-                    {"type": "container", "name": container_name, "size": size_str, "size_bytes": size_bytes}
+                    {
+                        "type": "container",
+                        "name": container_name,
+                        "size": size_str,
+                        "size_bytes": size_bytes,
+                    }
                 )
 
             result["container_stats"]["total_size_bytes"] += size_bytes
@@ -625,9 +630,7 @@ class CleanupService:
 
         # Sort cleanup candidates by size and limit to top 10
         result["cleanup_candidates"] = sorted(
-            result["cleanup_candidates"],
-            key=lambda x: x.get("size_bytes", 0),
-            reverse=True
+            result["cleanup_candidates"], key=lambda x: x.get("size_bytes", 0), reverse=True
         )[:10]
 
     def _analyze_cleanup_potential(self, df_output: str) -> dict[str, str]:
@@ -985,8 +988,11 @@ class CleanupService:
         if not is_valid:
             return {"success": False, "error": error_msg}
 
-        # Generate schedule ID
-        schedule_id = f"{host_id}_{cleanup_type}_{schedule_frequency}"
+        # Generate schedule ID with timestamp to avoid collisions
+        import time
+
+        timestamp = int(time.time())
+        schedule_id = f"{host_id}_{cleanup_type}_{schedule_frequency}_{timestamp}"
 
         # Check if schedule already exists
         if schedule_id in self.config.cleanup_schedules:
@@ -1009,7 +1015,7 @@ class CleanupService:
             frequency=schedule_frequency,
             time=schedule_time,
             enabled=True,
-            created_at=datetime.now().isoformat(),
+            created_at=datetime.now(datetime.timezone.utc).isoformat(),
         )
 
         # Add to configuration

@@ -138,6 +138,7 @@ class ContainerTools:
             )
 
             return {
+                "success": True,
                 "containers": paginated_containers,
                 "pagination": {
                     "total": total_count,
@@ -151,7 +152,20 @@ class ContainerTools:
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error("Failed to list containers", host_id=host_id, error=str(e))
-            raise
+            return {
+                "success": False,
+                "error": str(e),
+                "host_id": host_id,
+                "containers": [],
+                "pagination": {
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": 0,
+                    "has_next": False,
+                    "has_prev": False,
+                },
+            }
 
     async def get_container_info(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Get detailed information about a specific container.
@@ -868,7 +882,12 @@ class ContainerTools:
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error("Failed to list host ports", host_id=host_id, error=str(e))
-            raise
+            return {
+                "success": False,
+                "error": str(e),
+                "host_id": host_id,
+                "timestamp": datetime.now().isoformat(),
+            }
         except Exception as e:
             logger.error("Unexpected error listing host ports", host_id=host_id, error=str(e))
             return {
@@ -904,14 +923,14 @@ class ContainerTools:
 
             # Extract port mappings directly from Docker SDK container object
             container_mappings = self._extract_port_mappings_from_container(
-                container, container_id, container_name, image
+                container, container_id, container_name, image, host_id
             )
             port_mappings.extend(container_mappings)
 
         return port_mappings
 
     def _extract_port_mappings_from_container(
-        self, container, container_id: str, container_name: str, image: str
+        self, container, container_id: str, container_name: str, image: str, host_id: str
     ) -> list[PortMapping]:
         """Extract port mappings directly from Docker SDK container object."""
         port_mappings = []
@@ -936,6 +955,7 @@ class ContainerTools:
                     compose_project = labels.get(DOCKER_COMPOSE_PROJECT, "")
 
                     port_mapping = PortMapping(
+                        host_id=host_id,
                         host_ip=host_ip,
                         host_port=host_port,
                         container_port=container_port_clean,
@@ -1006,6 +1026,7 @@ class ContainerTools:
             )
 
         return PortConflict(
+            host_id=mappings[0].host_id,  # All mappings should have the same host_id
             host_port=host_port,
             protocol=protocol,
             host_ip=host_ip,

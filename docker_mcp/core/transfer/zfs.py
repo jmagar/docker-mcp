@@ -194,8 +194,9 @@ class ZFSTransfer(BaseTransfer):
         # Check if dataset already exists
         ssh_cmd = self.build_ssh_cmd(host)
         check_cmd = ssh_cmd + [
-            f"zfs list {shlex.quote(expected_dataset)} >/dev/null 2>&1 && "
-            "echo 'EXISTS' || echo 'MISSING'"
+            "sh",
+            "-c",
+            f"zfs list {shlex.quote(expected_dataset)} >/dev/null 2>&1 && echo 'EXISTS' || echo 'MISSING'",
         ]
 
         result = await asyncio.to_thread(
@@ -218,7 +219,9 @@ class ZFSTransfer(BaseTransfer):
 
         # Check if path exists as directory
         path_check_cmd = ssh_cmd + [
-            f"test -d {shlex.quote(service_path)} && echo 'DIR_EXISTS' || echo 'NO_DIR'"
+            "sh",
+            "-c",
+            f"test -d {shlex.quote(service_path)} && echo 'DIR_EXISTS' || echo 'NO_DIR'",
         ]
         path_result = await asyncio.to_thread(
             subprocess.run,  # nosec B603
@@ -234,7 +237,7 @@ class ZFSTransfer(BaseTransfer):
             await self._convert_directory_to_dataset(host, service_path, expected_dataset)
         else:
             # No existing data - create empty dataset
-            create_cmd = ssh_cmd + [f"zfs create {shlex.quote(expected_dataset)}"]
+            create_cmd = ssh_cmd + ["zfs", "create", expected_dataset]
             create_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
                 create_cmd,
@@ -324,7 +327,9 @@ class ZFSTransfer(BaseTransfer):
 
             # Try to destroy any partially created dataset first
             cleanup_dataset_cmd = ssh_cmd + [
-                f"zfs destroy -r {shlex.quote(dataset_name)} 2>/dev/null || true"
+                "sh",
+                "-c",
+                f"zfs destroy -r {shlex.quote(dataset_name)} 2>/dev/null || true",
             ]
             await asyncio.to_thread(
                 subprocess.run,  # nosec B603
@@ -336,7 +341,7 @@ class ZFSTransfer(BaseTransfer):
             )
 
             # Restore original directory
-            rollback_cmd = ssh_cmd + [f"mv {shlex.quote(temp_path)} {shlex.quote(dir_path)}"]
+            rollback_cmd = ssh_cmd + ["mv", temp_path, dir_path]
             await asyncio.to_thread(
                 subprocess.run,  # nosec B603
                 rollback_cmd,
@@ -541,7 +546,7 @@ class ZFSTransfer(BaseTransfer):
         # Use -R (recursive) only if specifically requested, default to single snapshot
         send_flags = "-R" if getattr(self, "_use_recursive_send", False) else ""
         send_cmd = (
-            " ".join(source_ssh_cmd) + f' "zfs send {send_flags} {shlex.quote(full_snapshot)}"'
+            shlex.join(source_ssh_cmd) + f' "zfs send {send_flags} {shlex.quote(full_snapshot)}"'
         )
 
         # Clean up target dataset completely before receive to eliminate race condition
@@ -557,7 +562,7 @@ class ZFSTransfer(BaseTransfer):
 
         # Build simple ZFS receive command
         recv_cmd = (
-            " ".join(target_ssh_cmd) + f' "zfs recv {recv_flags} {shlex.quote(target_dataset)}"'
+            shlex.join(target_ssh_cmd) + f' "zfs recv {recv_flags} {shlex.quote(target_dataset)}"'
         )
 
         # Combine with pipe (send | receive)

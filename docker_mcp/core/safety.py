@@ -88,7 +88,9 @@ class MigrationSafety:
 
     def _is_in_safe_area(self, resolved_path: str) -> bool:
         """Check if path is in a safe deletion area."""
-        return any(resolved_path.startswith(safe_path + "/") for safe_path in self.SAFE_DELETE_PATHS)
+        return any(
+            resolved_path.startswith(safe_path + "/") for safe_path in self.SAFE_DELETE_PATHS
+        )
 
     def _get_forbidden_path(self, resolved_path: str) -> str | None:
         """Get forbidden path if resolved path is forbidden, None otherwise."""
@@ -97,7 +99,9 @@ class MigrationSafety:
                 return forbidden
         return None
 
-    def _validate_file_outside_safe_area(self, file_path: str, resolved_path: str) -> tuple[bool, str]:
+    def _validate_file_outside_safe_area(
+        self, file_path: str, resolved_path: str
+    ) -> tuple[bool, str]:
         """Validate files outside safe areas."""
         # Allow specific file extensions in any directory
         if file_path.endswith((".tar.gz", ".tar", ".zip", ".tmp", ".temp", ".migration")):
@@ -174,10 +178,8 @@ class MigrationSafety:
             )
             raise SafetyError(error_msg)
 
-        # Proceed with deletion with quoted path
-        import shlex
-
-        delete_cmd = ssh_cmd + [f"rm -f {shlex.quote(file_path)}"]
+        # Proceed with deletion with proper argument separation
+        delete_cmd = ssh_cmd + ["rm", "-f", file_path]
 
         try:
             result = await asyncio.to_thread(

@@ -541,17 +541,19 @@ class HostService:
         results = discovery_data["results"]
 
         compose_result: dict[str, Any] = (
-            results[0]
+            {**results[0], "success": True}
             if not isinstance(results[0], Exception)
-            else {"paths": [], "recommended": None}
+            else {"paths": [], "recommended": None, "success": False}
         )
         appdata_result: dict[str, Any] = (
-            results[1]
+            {**results[1], "success": True}
             if not isinstance(results[1], Exception)
-            else {"paths": [], "recommended": None}
+            else {"paths": [], "recommended": None, "success": False}
         )
         zfs_result: dict[str, Any] = (
-            results[2] if not isinstance(results[2], Exception) else {"capable": False}
+            {**results[2], "success": True}
+            if not isinstance(results[2], Exception)
+            else {"capable": False, "success": False}
         )
 
         return compose_result, appdata_result, zfs_result
@@ -1256,9 +1258,18 @@ class HostService:
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
         try:
-            # Normalize action to handle string inputs
+            # Normalize action to HostAction enum when provided as string
             if isinstance(action, str):
-                action = action.lower().strip()
+                from ..models.enums import HostAction
+
+                try:
+                    action = HostAction(action.lower().strip())
+                except ValueError:
+                    return {
+                        "success": False,
+                        "error": f"Unknown action: {action}",
+                        "valid_actions": [a.value for a in HostAction],
+                    }
 
             # Get action handlers mapping
             handlers = self._get_action_handlers()
@@ -1404,7 +1415,7 @@ class HostService:
 
     async def _handle_ports_action(self, **params) -> dict[str, Any]:
         """Handle PORTS action."""
-        from ..services import ContainerService
+        from ..services.container import ContainerService
 
         host_id = params.get("host_id", "")
         port = params.get("port", 0)
@@ -1433,7 +1444,9 @@ class HostService:
 
         config_service = ConfigService(self.config, self.context_manager)  # type: ignore[arg-type]
         config_path = getattr(self.config, "config_file", None)
-        result = await config_service.import_ssh_config(ssh_config_path, selected_hosts, config_path)
+        result = await config_service.import_ssh_config(
+            ssh_config_path, selected_hosts, config_path
+        )
 
         if hasattr(result, "structured_content"):
             import_result = result.structured_content or {

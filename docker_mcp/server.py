@@ -504,7 +504,11 @@ class DockerMCPServer:
         base_url = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL")
         if not base_url:
             # Check for TLS environment variable
-            scheme = "https" if os.getenv("FASTMCP_ENABLE_TLS", "").lower() in ("1", "true", "yes") else "http"
+            scheme = (
+                "https"
+                if os.getenv("FASTMCP_ENABLE_TLS", "").lower() in ("1", "true", "yes")
+                else "http"
+            )
             host = self.config.server.host
             port = self.config.server.port
             base_url = f"{scheme}://{host}:{port}"
@@ -519,8 +523,21 @@ class DockerMCPServer:
             try:
                 import json
 
-                required_scopes = json.loads(scopes_raw)
-            except Exception:
+                parsed_scopes = json.loads(scopes_raw)
+                if isinstance(parsed_scopes, list) and all(
+                    isinstance(s, str) for s in parsed_scopes
+                ):
+                    required_scopes = parsed_scopes
+                else:
+                    self.logger.warning(
+                        "Invalid scope format in FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES - expected list of strings"
+                    )
+                    required_scopes = []
+            except (json.JSONDecodeError, TypeError) as e:
+                self.logger.warning(
+                    "Failed to parse FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES as JSON",
+                    error=str(e),
+                )
                 required_scopes = []
         else:
             parts = [p.strip() for p in scopes_raw.replace(" ", ",").split(",") if p.strip()]
@@ -660,11 +677,11 @@ class DockerMCPServer:
         ] = "",
         cleanup_type: Annotated[
             Literal["check", "safe", "moderate", "aggressive"] | None,
-            Field(default=None, description="Type of cleanup to perform")
+            Field(default=None, description="Type of cleanup to perform"),
         ] = None,
         frequency: Annotated[
             Literal["daily", "weekly", "monthly", "custom"] | None,
-            Field(default=None, description="Cleanup schedule frequency")
+            Field(default=None, description="Cleanup schedule frequency"),
         ] = None,
         time: Annotated[
             str, Field(default="", description="Cleanup schedule time in HH:MM format")
@@ -757,8 +774,7 @@ class DockerMCPServer:
 
         # Delegate to service layer for business logic
         return await self.host_service.handle_action(
-            action,
-            **params.model_dump(exclude={"action"})
+            action, **params.model_dump(exclude={"action"})
         )
 
     async def docker_container(
@@ -951,8 +967,7 @@ class DockerMCPServer:
 
         # Delegate to service layer for business logic
         return await self.stack_service.handle_action(
-            action,
-            **params.model_dump(exclude={"action"})
+            action, **params.model_dump(exclude={"action"})
         )
 
     async def add_docker_host(

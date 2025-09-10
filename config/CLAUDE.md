@@ -368,7 +368,7 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
         if "hosts" in yaml_data:
             for host_id, host_data in yaml_data["hosts"].items():
                 # Environment variable expansion
-                host_data = expand_env_vars(host_data)
+                host_data = expand_yaml_config(host_data)
                 config.hosts[host_id] = DockerHost(**host_data)
     
     # 5. Apply environment variable overrides
