@@ -1,6 +1,7 @@
 """Safety guards and validation for destructive operations."""
 
 import asyncio
+import shlex
 import subprocess
 import tempfile
 import time
@@ -72,13 +73,13 @@ class MigrationSafety:
             if ".." in file_path:
                 return False, f"Path '{file_path}' contains parent directory traversal"
 
+            # SECURITY: Check for forbidden paths BEFORE safe paths to prevent bypassing
+            if forbidden_path := self._get_forbidden_path(resolved_path):
+                return False, f"Path '{resolved_path}' is in forbidden directory '{forbidden_path}'"
+
             # Check if path is in safe deletion areas
             if self._is_in_safe_area(resolved_path):
                 return True, f"Path in safe area: {resolved_path}"
-
-            # Check for forbidden paths
-            if forbidden_path := self._get_forbidden_path(resolved_path):
-                return False, f"Path '{resolved_path}' is in forbidden directory '{forbidden_path}'"
 
             # Validate files outside safe areas
             return self._validate_file_outside_safe_area(file_path, resolved_path)
@@ -89,7 +90,8 @@ class MigrationSafety:
     def _is_in_safe_area(self, resolved_path: str) -> bool:
         """Check if path is in a safe deletion area."""
         return any(
-            resolved_path.startswith(safe_path + "/") for safe_path in self.SAFE_DELETE_PATHS
+            resolved_path == safe_path or resolved_path.startswith(safe_path + "/")
+            for safe_path in self.SAFE_DELETE_PATHS
         )
 
     def _get_forbidden_path(self, resolved_path: str) -> str | None:
@@ -146,8 +148,9 @@ class MigrationSafety:
         )
 
     def get_deletion_manifest(self) -> list[dict[str, Any]]:
-        """Get the current deletion manifest."""
-        return self.deletion_manifest.copy()
+        """Get a copy of the current deletion manifest to prevent external mutation."""
+        import copy
+        return copy.deepcopy(self.deletion_manifest)
 
     def clear_deletion_manifest(self) -> None:
         """Clear the deletion manifest."""
@@ -178,8 +181,8 @@ class MigrationSafety:
             )
             raise SafetyError(error_msg)
 
-        # Proceed with deletion with proper argument separation
-        delete_cmd = ssh_cmd + ["rm", "-f", file_path]
+        # Proceed with deletion with proper argument separation and path safety
+        delete_cmd = ssh_cmd + ["rm", "-f", "--", shlex.quote(file_path)]
 
         try:
             result = await asyncio.to_thread(

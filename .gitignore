@@ -22,7 +22,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 element_clones
-docker-mcp-pr*
+
+# Temporary PR analysis files
+docs/docker-mcp-pr*
 
 # PyInstaller
 *.manifest
@@ -90,6 +92,7 @@ tmp/
 
 # Cache directories
 .cache/
+.cache/uv/
 
 # Tests (exclude from git tracking)
 tests/

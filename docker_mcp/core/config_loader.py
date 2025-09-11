@@ -1,6 +1,7 @@
 """Configuration management for Docker MCP server."""
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -35,11 +36,11 @@ class CleanupSchedule(BaseModel):
 
     host_id: str
     cleanup_type: Literal["safe", "moderate"]  # Only safe and moderate for scheduling
-    frequency: str  # daily, weekly, monthly, custom
-    time: str  # HH:MM format
+    frequency: Literal["daily", "weekly", "monthly", "custom"]
+    time: str  # HH:MM (24h)
     enabled: bool = True
     log_path: str | None = None
-    created_at: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ServerConfig(BaseModel):
@@ -151,12 +152,39 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         with open(config_path) as f:
             content = f.read()
 
-        # Expand environment variables
-        content = os.path.expandvars(content)
+        # Securely expand only allowed environment variables
+        content = _expand_yaml_config(content)
 
         return yaml.safe_load(content) or {}
     except Exception as e:
         raise ValueError(f"Failed to load config from {config_path}: {e}") from e
+
+
+def _expand_yaml_config(content: str) -> str:
+    """Securely expand environment variables with allowlist."""
+    import re
+
+    # Define allowed environment variables for Docker MCP config
+    allowed_env_vars = {
+        "HOME", "USER", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+        "DOCKER_HOSTS_CONFIG", "DOCKER_MCP_CONFIG_DIR",
+        "FASTMCP_HOST", "FASTMCP_PORT", "LOG_LEVEL",
+        "SSH_CONFIG_PATH", "COMPOSE_PATH", "APPDATA_PATH"
+    }
+
+    def replace_var(match):
+        var_name = match.group(1)
+        if var_name in allowed_env_vars:
+            return os.getenv(var_name, f"${{{var_name}}}")  # Keep original if not found
+        else:
+            logger.warning(f"Environment variable ${{{var_name}}} not in allowlist, skipping expansion")
+            return match.group(0)  # Return original unexpanded
+
+    # Replace ${VAR} and $VAR patterns with allowlist check
+    content = re.sub(r'\$\{([^}]+)\}', replace_var, content)
+    content = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', lambda m: replace_var(m) if m.group(1) in allowed_env_vars else m.group(0), content)
+
+    return content
 
 
 def save_config(config: DockerMCPConfig, config_path: str | None = None) -> None:

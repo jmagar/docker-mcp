@@ -54,11 +54,11 @@ class StackMigrationExecutor:
             # Read compose file
             read_cmd = ssh_cmd_source + [f"cat {shlex.quote(compose_file_path)}"]
             result = await asyncio.to_thread(
-                subprocess.run,
+                subprocess.run,  # nosec B603
                 read_cmd,
                 capture_output=True,
                 text=True,
-                check=False,  # nosec B603
+                check=False,
             )
 
             if result.returncode != 0:
@@ -311,11 +311,11 @@ class StackMigrationExecutor:
                         result = cast(
                             subprocess.CompletedProcess[str],
                             await _asyncio.to_thread(
-                                subprocess.run,
+                                subprocess.run,  # nosec B603
                                 check_cmd,
                                 capture_output=True,
                                 text=True,
-                                check=False,  # nosec B603
+                                check=False,
                             ),
                         )
 
@@ -454,9 +454,9 @@ class StackMigrationExecutor:
             # Remove compose file (safe operation)
             remove_cmd = ssh_cmd_source + [f"rm -f {shlex.quote(compose_path)}"]
             result = await asyncio.to_thread(
-                subprocess.run,
+                subprocess.run,  # nosec B603
                 remove_cmd,
-                check=False,  # nosec B603
+                check=False,
             )
 
             cleanup_results = {

@@ -13,6 +13,7 @@ from ..constants import (
 )
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
+from ..core.error_response import DockerMCPErrorResponse, create_success_response
 from ..core.exceptions import DockerCommandError, DockerContextError
 from ..models.container import (
     ContainerStats,
@@ -33,6 +34,25 @@ class ContainerTools:
         self.context_manager = context_manager
         self.stack_tools = StackTools(config, context_manager)
 
+    def _build_error_response(
+        self, host_id: str, operation: str, error_message: str, container_id: str | None = None
+    ) -> dict[str, Any]:
+        """Build standardized error response with container context."""
+        context = {"host_id": host_id, "operation": operation}
+        if container_id:
+            context["container_id"] = container_id
+
+        # Determine error type based on message content
+        if "not found" in error_message.lower():
+            if container_id:
+                return DockerMCPErrorResponse.container_not_found(host_id, container_id)
+            else:
+                return DockerMCPErrorResponse.host_not_found(host_id)
+        elif "could not connect" in error_message.lower():
+            return DockerMCPErrorResponse.docker_context_error(host_id, operation, error_message)
+        else:
+            return DockerMCPErrorResponse.generic_error(error_message, context)
+
     async def list_containers(
         self, host_id: str, all_containers: bool = False, limit: int = 20, offset: int = 0
     ) -> dict[str, Any]:
@@ -51,9 +71,9 @@ class ContainerTools:
             # Get Docker client and list containers using Docker SDK
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {
-                    "success": False,
-                    "error": f"Could not connect to Docker on host {host_id}",
+                error_response = self._build_error_response(host_id, "list_containers", f"Could not connect to Docker on host {host_id}")
+                # Add container-specific fields to error response
+                error_response.update({
                     "containers": [],
                     "total": 0,
                     "pagination": {
@@ -64,7 +84,8 @@ class ContainerTools:
                         "has_next": False,
                         "has_prev": offset > 0,
                     },
-                }
+                })
+                return error_response
 
             docker_containers = await asyncio.to_thread(client.containers.list, all=all_containers)
 
@@ -137,25 +158,26 @@ class ContainerTools:
                 limit=limit,
             )
 
-            return {
-                "success": True,
-                "containers": paginated_containers,
-                "pagination": {
-                    "total": total_count,
-                    "limit": limit,
-                    "offset": offset,
-                    "returned": len(paginated_containers),
-                    "has_next": (offset + limit) < total_count,
-                    "has_prev": offset > 0,
+            return create_success_response(
+                data={
+                    "containers": paginated_containers,
+                    "pagination": {
+                        "total": total_count,
+                        "limit": limit,
+                        "offset": offset,
+                        "returned": len(paginated_containers),
+                        "has_next": (offset + limit) < total_count,
+                        "has_prev": offset > 0,
+                    },
                 },
-            }
+                context={"host_id": host_id, "operation": "list_containers"}
+            )
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error("Failed to list containers", host_id=host_id, error=str(e))
-            return {
-                "success": False,
-                "error": str(e),
-                "host_id": host_id,
+            error_response = self._build_error_response(host_id, "list_containers", str(e))
+            # Add container-specific fields to error response
+            error_response.update({
                 "containers": [],
                 "pagination": {
                     "total": 0,
@@ -165,7 +187,8 @@ class ContainerTools:
                     "has_next": False,
                     "has_prev": False,
                 },
-            }
+            })
+            return error_response
 
     async def get_container_info(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Get detailed information about a specific container.
@@ -180,7 +203,7 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+                return self._build_error_response(host_id, "get_container_info", f"Could not connect to Docker on host {host_id}", container_id)
 
             # Use Docker SDK to get container
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -208,31 +231,33 @@ class ContainerTools:
             compose_project = labels.get(DOCKER_COMPOSE_PROJECT, "")
             compose_file = labels.get(DOCKER_COMPOSE_CONFIG_FILES, "")
 
-            container_info = {
-                "container_id": container_data.get("Id", ""),
-                "name": container_data.get("Name", "").lstrip("/"),
-                "image": container_data.get("Config", {}).get("Image", ""),
-                "status": container_data.get("State", {}).get("Status", ""),
-                "state": container_data.get("State", {}),
-                "created": container_data.get("Created", ""),
-                "ports": network_settings.get("Ports", {}),
-                "labels": labels,
-                "volumes": volumes,
-                "networks": networks,
-                "compose_project": compose_project,
-                "compose_file": compose_file,
-                "host_id": host_id,
-                "config": container_data.get("Config", {}),
-                "network_settings": network_settings,
-                "mounts": mounts,
-            }
-
             logger.info("Retrieved container info", host_id=host_id, container_id=container_id)
-            return container_info
+
+            return create_success_response(
+                data={
+                    "container_id": container_data.get("Id", ""),
+                    "name": container_data.get("Name", "").lstrip("/"),
+                    "image": container_data.get("Config", {}).get("Image", ""),
+                    "status": container_data.get("State", {}).get("Status", ""),
+                    "state": container_data.get("State", {}),
+                    "created": container_data.get("Created", ""),
+                    "ports": network_settings.get("Ports", {}),
+                    "labels": labels,
+                    "volumes": volumes,
+                    "networks": networks,
+                    "compose_project": compose_project,
+                    "compose_file": compose_file,
+                    "host_id": host_id,
+                    "config": container_data.get("Config", {}),
+                    "network_settings": network_settings,
+                    "mounts": mounts,
+                },
+                context={"host_id": host_id, "operation": "get_container_info", "container_id": container_id}
+            )
 
         except docker.errors.NotFound:
             logger.error("Container not found", host_id=host_id, container_id=container_id)
-            return {"success": False, "error": f"Container {container_id} not found"}
+            return self._build_error_response(host_id, "get_container_info", f"Container {container_id} not found", container_id)
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error getting container info",
@@ -240,7 +265,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"success": False, "error": f"Docker API error: {str(e)}"}
+            return self._build_error_response(host_id, "get_container_info", f"Docker API error: {str(e)}", container_id)
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container info",
@@ -248,7 +273,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"success": False, "error": str(e)}
+            return self._build_error_response(host_id, "get_container_info", str(e), container_id)
 
     async def start_container(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Start a container on a Docker host.
@@ -263,24 +288,26 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+                return self._build_error_response(host_id, "start_container", f"Could not connect to Docker on host {host_id}", container_id)
 
             # Get container and start it using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
             await asyncio.to_thread(container.start)
 
             logger.info("Container started", host_id=host_id, container_id=container_id)
-            return {
-                "success": True,
-                "message": f"Container {container_id} started successfully",
-                "container_id": container_id,
-                "host_id": host_id,
-                "timestamp": datetime.now().isoformat(),
-            }
+
+            return create_success_response(
+                data={
+                    "message": f"Container {container_id} started successfully",
+                    "container_id": container_id,
+                    "host_id": host_id,
+                },
+                context={"host_id": host_id, "operation": "start_container", "container_id": container_id}
+            )
 
         except docker.errors.NotFound:
             logger.error("Container not found", host_id=host_id, container_id=container_id)
-            return {"success": False, "error": f"Container {container_id} not found"}
+            return self._build_error_response(host_id, "start_container", f"Container {container_id} not found", container_id)
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error starting container",
@@ -288,7 +315,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"success": False, "error": f"Failed to start container: {str(e)}"}
+            return self._build_error_response(host_id, "start_container", f"Failed to start container: {str(e)}", container_id)
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to start container",
@@ -296,14 +323,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {
-                "success": False,
-                "message": f"Failed to start container {container_id}: {str(e)}",
-                "container_id": container_id,
-                "host_id": host_id,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "start_container", f"Failed to start container {container_id}: {str(e)}", container_id)
 
     async def stop_container(
         self, host_id: str, container_id: str, timeout: int = 30
@@ -321,7 +341,7 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+                return self._build_error_response(host_id, "stop_container", f"Could not connect to Docker on host {host_id}", container_id)
 
             # Get container and stop it using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -330,18 +350,19 @@ class ContainerTools:
             logger.info(
                 "Container stopped", host_id=host_id, container_id=container_id, timeout=timeout
             )
-            return {
-                "success": True,
-                "message": f"Container {container_id} stopped successfully",
-                "container_id": container_id,
-                "host_id": host_id,
-                "timeout": timeout,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return create_success_response(
+                data={
+                    "message": f"Container {container_id} stopped successfully",
+                    "container_id": container_id,
+                    "host_id": host_id,
+                    "timeout": timeout,
+                },
+                context={"host_id": host_id, "operation": "stop_container", "container_id": container_id}
+            )
 
         except docker.errors.NotFound:
             logger.error("Container not found", host_id=host_id, container_id=container_id)
-            return {"success": False, "error": f"Container {container_id} not found"}
+            return self._build_error_response(host_id, "stop_container", f"Container {container_id} not found", container_id)
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error stopping container",
@@ -349,19 +370,12 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"success": False, "error": f"Failed to stop container: {str(e)}"}
+            return self._build_error_response(host_id, "stop_container", f"Failed to stop container: {str(e)}", container_id)
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to stop container", host_id=host_id, container_id=container_id, error=str(e)
             )
-            return {
-                "success": False,
-                "message": f"Failed to stop container {container_id}: {str(e)}",
-                "container_id": container_id,
-                "host_id": host_id,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "stop_container", f"Failed to stop container {container_id}: {str(e)}", container_id)
         except Exception as e:
             # Catch network/timeout errors like "fetch failed"
             logger.error(
@@ -371,15 +385,7 @@ class ContainerTools:
                 error=str(e),
                 error_type=type(e).__name__,
             )
-            return {
-                "success": False,
-                "message": f"Network or timeout error stopping container {container_id}: {str(e)}",
-                "container_id": container_id,
-                "host_id": host_id,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "stop_container", f"Network or timeout error stopping container {container_id}: {str(e)}", container_id)
 
     async def restart_container(
         self, host_id: str, container_id: str, timeout: int = 10
@@ -397,7 +403,7 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+                return self._build_error_response(host_id, "restart_container", f"Could not connect to Docker on host {host_id}", container_id)
 
             # Get container and restart it using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -406,18 +412,19 @@ class ContainerTools:
             logger.info(
                 "Container restarted", host_id=host_id, container_id=container_id, timeout=timeout
             )
-            return {
-                "success": True,
-                "message": f"Container {container_id} restarted successfully",
-                "container_id": container_id,
-                "host_id": host_id,
-                "timeout": timeout,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return create_success_response(
+                data={
+                    "message": f"Container {container_id} restarted successfully",
+                    "container_id": container_id,
+                    "host_id": host_id,
+                    "timeout": timeout,
+                },
+                context={"host_id": host_id, "operation": "restart_container", "container_id": container_id}
+            )
 
         except docker.errors.NotFound:
             logger.error("Container not found", host_id=host_id, container_id=container_id)
-            return {"success": False, "error": f"Container {container_id} not found"}
+            return self._build_error_response(host_id, "restart_container", f"Container {container_id} not found", container_id)
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error restarting container",
@@ -425,7 +432,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"success": False, "error": f"Failed to restart container: {str(e)}"}
+            return self._build_error_response(host_id, "restart_container", f"Failed to restart container: {str(e)}", container_id)
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to restart container",
@@ -433,14 +440,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {
-                "success": False,
-                "message": f"Failed to restart container {container_id}: {str(e)}",
-                "container_id": container_id,
-                "host_id": host_id,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "restart_container", f"Failed to restart container {container_id}: {str(e)}", container_id)
 
     async def get_container_stats(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Get resource statistics for a container.
@@ -455,7 +455,7 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+                return self._build_error_response(host_id, "get_container_stats", f"Could not connect to Docker on host {host_id}", container_id)
 
             # Get container and retrieve stats using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -511,13 +511,17 @@ class ContainerTools:
             )
 
             logger.debug("Retrieved container stats", host_id=host_id, container_id=container_id)
-            return stats.model_dump()
+
+            return create_success_response(
+                data=stats.model_dump(),
+                context={"host_id": host_id, "operation": "get_container_stats", "container_id": container_id}
+            )
 
         except docker.errors.NotFound:
             logger.error(
                 "Container not found for stats", host_id=host_id, container_id=container_id
             )
-            return {"success": False, "error": f"Container {container_id} not found"}
+            return self._build_error_response(host_id, "get_container_stats", f"Container {container_id} not found", container_id)
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error getting container stats",
@@ -525,7 +529,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"success": False, "error": f"Failed to get stats: {str(e)}"}
+            return self._build_error_response(host_id, "get_container_stats", f"Failed to get stats: {str(e)}", container_id)
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container stats",
@@ -533,7 +537,7 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"success": False, "error": str(e)}
+            return self._build_error_response(host_id, "get_container_stats", str(e), container_id)
 
     def _parse_ports_summary(self, ports_str: str) -> list[str]:
         """Parse Docker ports string into simplified format."""
@@ -700,13 +704,9 @@ class ContainerTools:
         """
         valid_actions = ["start", "stop", "restart", "pause", "unpause", "remove"]
         if action not in valid_actions:
-            return {
-                "success": False,
-                "error": f"Invalid action '{action}'. Valid actions: {', '.join(valid_actions)}",
-                "container_id": container_id,
-                "host_id": host_id,
-                "timestamp": datetime.now().isoformat(),
-            }
+            error_response = self._build_error_response(host_id, "manage_container", f"Invalid action '{action}'. Valid actions: {', '.join(valid_actions)}", container_id)
+            error_response.update({"action": action})
+            return error_response
 
         try:
             # Build command based on action
@@ -722,16 +722,17 @@ class ContainerTools:
                 force=force,
             )
 
-            return {
-                "success": True,
-                "message": f"Container {container_id} {action}{'d' if action.endswith('e') else 'ed'} successfully",
-                "container_id": container_id,
-                "host_id": host_id,
-                "action": action,
-                "force": force,
-                "timeout": timeout if action in ["stop", "restart"] else None,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return create_success_response(
+                data={
+                    "message": f"Container {container_id} {action}{'d' if action.endswith('e') else 'ed'} successfully",
+                    "container_id": container_id,
+                    "host_id": host_id,
+                    "action": action,
+                    "force": force,
+                    "timeout": timeout if action in ["stop", "restart"] else None,
+                },
+                context={"host_id": host_id, "operation": "manage_container", "container_id": container_id, "action": action}
+            )
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
@@ -741,15 +742,13 @@ class ContainerTools:
                 action=action,
                 error=str(e),
             )
-            return {
-                "success": False,
-                "message": f"Failed to {action} container {container_id}: {str(e)}",
-                "container_id": container_id,
-                "host_id": host_id,
+            error_response = self._build_error_response(host_id, "manage_container", f"Failed to {action} container {container_id}: {str(e)}", container_id)
+            error_response.update({
                 "action": action,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat(),
-            }
+                "force": force,
+                "timeout": timeout if action in ["stop", "restart"] else None,
+            })
+            return error_response
 
     async def pull_image(self, host_id: str, image_name: str) -> dict[str, Any]:
         """Pull a Docker image on a remote host.
@@ -764,7 +763,7 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+                return self._build_error_response(host_id, "pull_image", f"Could not connect to Docker on host {host_id}")
 
             # Pull image using Docker SDK
             image = await asyncio.to_thread(client.images.pull, image_name)
@@ -776,19 +775,20 @@ class ContainerTools:
                 image_id=image.id[:12],
             )
 
-            return {
-                "success": True,
-                "message": f"Successfully pulled image {image_name}",
-                "image_name": image_name,
-                "image_id": image.id[:12],
-                "host_id": host_id,
-                "image_tags": image.tags,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return create_success_response(
+                data={
+                    "message": f"Successfully pulled image {image_name}",
+                    "image_name": image_name,
+                    "image_id": image.id[:12],
+                    "host_id": host_id,
+                    "image_tags": image.tags,
+                },
+                context={"host_id": host_id, "operation": "pull_image"}
+            )
 
         except docker.errors.ImageNotFound:
             logger.error("Image not found", host_id=host_id, image_name=image_name)
-            return {"success": False, "error": f"Image {image_name} not found"}
+            return self._build_error_response(host_id, "pull_image", f"Image {image_name} not found")
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error pulling image",
@@ -796,7 +796,7 @@ class ContainerTools:
                 image_name=image_name,
                 error=str(e),
             )
-            return {"success": False, "error": f"Failed to pull image: {str(e)}"}
+            return self._build_error_response(host_id, "pull_image", f"Failed to pull image: {str(e)}")
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to pull image",
@@ -804,14 +804,7 @@ class ContainerTools:
                 image_name=image_name,
                 error=str(e),
             )
-            return {
-                "success": False,
-                "message": f"Failed to pull image {image_name}: {str(e)}",
-                "image_name": image_name,
-                "host_id": host_id,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "pull_image", f"Failed to pull image {image_name}: {str(e)}")
 
     def _build_container_command(
         self, action: str, container_id: str, force: bool, timeout: int
@@ -868,34 +861,25 @@ class ContainerTools:
                 conflicts=len(conflicts),
             )
 
-            return {
-                "success": True,
-                "host_id": host_id,
-                "total_ports": len(port_mappings),
-                "total_containers": total_containers,
-                "port_mappings": [mapping.model_dump() for mapping in port_mappings],
-                "conflicts": [conflict.model_dump() for conflict in conflicts],
-                "summary": summary,
-                "timestamp": datetime.now().isoformat(),
-                "cached": False,
-            }
+            return create_success_response(
+                data={
+                    "host_id": host_id,
+                    "total_ports": len(port_mappings),
+                    "total_containers": total_containers,
+                    "port_mappings": [mapping.model_dump() for mapping in port_mappings],
+                    "conflicts": [conflict.model_dump() for conflict in conflicts],
+                    "summary": summary,
+                    "cached": False,
+                },
+                context={"host_id": host_id, "operation": "list_host_ports"}
+            )
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error("Failed to list host ports", host_id=host_id, error=str(e))
-            return {
-                "success": False,
-                "error": str(e),
-                "host_id": host_id,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "list_host_ports", str(e))
         except Exception as e:
             logger.error("Unexpected error listing host ports", host_id=host_id, error=str(e))
-            return {
-                "success": False,
-                "error": f"Failed to list ports: {e}",
-                "host_id": host_id,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "list_host_ports", f"Failed to list ports: {e}")
 
     async def _get_containers_for_port_analysis(
         self, host_id: str, include_stopped: bool

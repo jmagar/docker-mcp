@@ -536,7 +536,7 @@ class ComposeManager:
             )
 
             # Add the test command
-            ssh_cmd.extend([ssh_host, f"test -f {file_path}"])
+            ssh_cmd.extend([ssh_host, f"test -f {shlex.quote(file_path)}"])
 
             # Execute the command
             result = await asyncio.to_thread(
@@ -653,7 +653,7 @@ class ComposeManager:
             )
 
             # Add the test command
-            ssh_cmd.extend([ssh_host, f"test -f {compose_file_path}"])
+            ssh_cmd.extend([ssh_host, f"test -f {shlex.quote(compose_file_path)}"])
 
             # Execute the command
             result = await asyncio.to_thread(

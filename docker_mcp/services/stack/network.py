@@ -144,14 +144,14 @@ class StackNetwork:
 
                             await asyncio.gather(
                                 asyncio.to_thread(
-                                    subprocess.run,
+                                    subprocess.run,  # nosec B603
                                     cleanup_source,
-                                    check=False,  # nosec B603
+                                    check=False,
                                 ),
                                 asyncio.to_thread(
-                                    subprocess.run,
+                                    subprocess.run,  # nosec B603
                                     cleanup_target,
-                                    check=False,  # nosec B603
+                                    check=False,
                                 ),
                             )
                         else:
@@ -394,9 +394,9 @@ class StackNetwork:
             await asyncio.gather(
                 *[
                     asyncio.to_thread(
-                        subprocess.run,
+                        subprocess.run,  # nosec B603
                         cmd,
-                        check=False,  # nosec B603
+                        check=False,
                     )
                     for cmd in cleanup_commands
                 ]

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shlex
 import subprocess
 from collections import defaultdict
 from collections.abc import Callable
@@ -731,7 +732,7 @@ class StackTools:
             # Read the file content via SSH using centralized command builder
             host = self.config.hosts[host_id]
             ssh_cmd = build_ssh_command(host)
-            ssh_cmd.append(f"cat {compose_file_path}")
+            ssh_cmd.append(f"cat {shlex.quote(compose_file_path)}")
 
             result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603

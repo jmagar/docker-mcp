@@ -5,6 +5,7 @@ Business logic for Docker host management operations.
 """
 
 import asyncio
+import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -989,7 +990,7 @@ class HostService:
                         max(path_counts.items(), key=lambda x: x[1])[0] if path_counts else None
                     )
 
-                    return {"paths": list(path_counts.keys()), "recommended": recommended}
+                    return {"success": True, "paths": list(path_counts.keys()), "recommended": recommended}
 
             # Fallback to file system search if no running containers with compose labels
             fallback_cmd = ssh_cmd + [
@@ -1006,15 +1007,15 @@ class HostService:
                 compose_files = stdout.decode().strip().split("\n")
                 directories = list(set(str(Path(f).parent) for f in compose_files if f.strip()))
                 recommended = self._recommend_compose_path(directories)
-                return {"paths": directories, "recommended": recommended}
+                return {"success": True, "paths": directories, "recommended": recommended}
 
-            return {"paths": [], "recommended": None}
+            return {"success": True, "paths": [], "recommended": None}
 
         except Exception as e:
             self.logger.warning(
                 "Failed to discover compose paths", hostname=host.hostname, error=str(e)
             )
-            return {"paths": [], "recommended": None}
+            return {"success": True, "paths": [], "recommended": None}
 
     async def _discover_appdata_paths(self, host: DockerHost) -> dict[str, Any]:
         """Discover appdata/volume storage locations from container bind mounts."""
@@ -1042,7 +1043,7 @@ class HostService:
             self.logger.warning(
                 "Failed to discover appdata paths", hostname=host.hostname, error=str(e)
             )
-            return {"paths": [], "recommended": None}
+            return {"success": True, "paths": [], "recommended": None}
 
     async def _discover_from_bind_mounts(self, ssh_cmd: list[str]) -> dict[str, Any] | None:
         """Discover appdata paths by analyzing container bind mounts."""
@@ -1065,7 +1066,7 @@ class HostService:
                 if base_path_counts:
                     # Recommend the path with most mounted volumes
                     recommended = max(base_path_counts.items(), key=lambda x: x[1])[0]
-                    return {"paths": list(base_path_counts.keys()), "recommended": recommended}
+                    return {"success": True, "paths": list(base_path_counts.keys()), "recommended": recommended}
 
         return None
 
@@ -1104,11 +1105,11 @@ class HostService:
                 existing_paths.append(path)
 
         recommended = existing_paths[0] if existing_paths else None
-        return {"paths": existing_paths, "recommended": recommended}
+        return {"success": True, "paths": existing_paths, "recommended": recommended}
 
     async def _test_path_exists_writable(self, ssh_cmd: list[str], path: str) -> bool:
         """Test if a path exists and is writable."""
-        test_cmd = ssh_cmd + [f"test -d {path} && test -w {path} && echo '{path}'"]
+        test_cmd = ssh_cmd + [f"test -d {shlex.quote(path)} && test -w {shlex.quote(path)} && echo {shlex.quote(path)}"]
 
         process = await asyncio.create_subprocess_exec(
             *test_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE

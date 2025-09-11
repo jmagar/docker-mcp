@@ -682,8 +682,28 @@ class CleanupService:
         value = float(match.group(1))
         unit = match.group(2) or "B"
 
-        # Convert to bytes
-        multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+        # Convert to bytes - handle both SI (1000-based) and IEC (1024-based) units
+        # IEC binary prefixes (KiB, MiB, GiB) use 1024 multipliers
+        # SI decimal prefixes (kB, MB, GB) typically use 1000 multipliers
+        # Docker often uses inconsistent formats, so we support both
+        if unit.endswith('IB') or unit in ['KB', 'MB', 'GB', 'TB']:  # Default to IEC for Docker compatibility
+            # Binary/IEC units (base-1024)
+            multipliers = {
+                "B": 1, "KB": 1024, "KIB": 1024,
+                "MB": 1024**2, "MIB": 1024**2,
+                "GB": 1024**3, "GIB": 1024**3,
+                "TB": 1024**4, "TIB": 1024**4,
+                "PB": 1024**5, "PIB": 1024**5
+            }
+        else:
+            # Decimal/SI units (base-1000) for things like 'kB' (lowercase k)
+            multipliers = {
+                "B": 1, "KB": 1000, "kB": 1000,
+                "MB": 1000**2, "mB": 1000**2,
+                "GB": 1000**3, "gB": 1000**3,
+                "TB": 1000**4, "tB": 1000**4,
+                "PB": 1000**5, "pB": 1000**5
+            }
 
         return int(value * multipliers.get(unit, 1))
 
@@ -1012,10 +1032,10 @@ class CleanupService:
         schedule_config = CleanupSchedule(
             host_id=host_id,
             cleanup_type=cast(Literal["safe", "moderate"], cleanup_type),
-            frequency=schedule_frequency,
+            frequency=cast(Literal["daily", "weekly", "monthly", "custom"], schedule_frequency),
             time=schedule_time,
             enabled=True,
-            created_at=datetime.now(datetime.timezone.utc).isoformat(),
+            created_at=datetime.now(datetime.timezone.utc),
         )
 
         # Add to configuration

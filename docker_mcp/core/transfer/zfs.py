@@ -187,9 +187,15 @@ class ZFSTransfer(BaseTransfer):
             Dataset name (e.g., rpool/appdata/authelia)
         """
         service_name = service_path.split("/")[-1]
-        if not host.zfs_dataset:
-            raise ZFSError(f"Host {host.hostname} missing zfs_dataset configuration")
-        expected_dataset = f"{host.zfs_dataset}/{service_name}"
+
+        # SECURITY: Validate host.zfs_dataset exists and is not None/empty before using
+        if not host.zfs_dataset or host.zfs_dataset.strip() == "":
+            raise ZFSError(
+                f"Host '{host.hostname}' missing valid zfs_dataset configuration. "
+                f"Please configure 'zfs_dataset' in hosts.yml for ZFS operations."
+            )
+
+        expected_dataset = f"{host.zfs_dataset.strip()}/{service_name}"
 
         # Check if dataset already exists
         ssh_cmd = self.build_ssh_cmd(host)
@@ -237,7 +243,7 @@ class ZFSTransfer(BaseTransfer):
             await self._convert_directory_to_dataset(host, service_path, expected_dataset)
         else:
             # No existing data - create empty dataset
-            create_cmd = ssh_cmd + ["zfs", "create", expected_dataset]
+            create_cmd = ssh_cmd + ["zfs", "create", shlex.quote(expected_dataset)]
             create_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
                 create_cmd,
@@ -626,11 +632,11 @@ class ZFSTransfer(BaseTransfer):
             f"zfs list {shlex.quote(target_dataset)} >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
         ]
         result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             target_exists_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
             timeout=300,
         )
 
@@ -642,11 +648,11 @@ class ZFSTransfer(BaseTransfer):
             f"zfs get -H -p used,referenced,compressratio {shlex.quote(source_snapshot)} 2>/dev/null || echo 'FAILED'"
         ]
         source_result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             source_props_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
             timeout=300,
         )
 
@@ -695,14 +701,14 @@ class ZFSTransfer(BaseTransfer):
 
         # 4. Verify we can access the target dataset (basic functionality test)
         access_test_cmd = target_ssh_cmd + [
-            f"ls {target_dataset} >/dev/null 2>&1 || zfs get -H mountpoint {target_dataset} >/dev/null 2>&1"
+            f"ls {shlex.quote(target_dataset)} >/dev/null 2>&1 || zfs get -H mountpoint {shlex.quote(target_dataset)} >/dev/null 2>&1"
         ]
         access_result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             access_test_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
             timeout=300,
         )
 
@@ -713,16 +719,16 @@ class ZFSTransfer(BaseTransfer):
 
         self.logger.info("ZFS transfer verification completed successfully")
 
-    def _parse_zfs_properties(self, zfs_output: str) -> dict[str, int]:
+    def _parse_zfs_properties(self, zfs_output: str) -> dict[str, Any]:
         """Parse ZFS properties output into a dictionary.
 
         Args:
             zfs_output: Output from zfs get command
 
         Returns:
-            Dictionary of property names to values (in bytes)
+            Dictionary of property names to values (bytes as int, ratios as str)
         """
-        properties = {}
+        properties: dict[str, Any] = {}
 
         for line in zfs_output.strip().split("\n"):
             if line and "\t" in line:
@@ -732,11 +738,14 @@ class ZFSTransfer(BaseTransfer):
                     prop_name = parts[1]
                     prop_value = parts[2]
 
-                    # Convert numeric values to integers
+                    # Convert numeric values to integers, keep ratio values as strings
                     if prop_value.isdigit():
                         properties[prop_name] = int(prop_value)
+                    elif prop_name == "compressratio" and "x" in prop_value:
+                        # Handle compression ratio values like "1.00x"
+                        properties[prop_name] = prop_value
                     else:
-                        # Handle values like "1.00x" for compressratio
+                        # Keep other string values as-is
                         properties[prop_name] = prop_value
 
         return properties
@@ -1032,11 +1041,11 @@ class ZFSTransfer(BaseTransfer):
         ]
 
         result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
             timeout=300,
         )
 
@@ -1065,11 +1074,11 @@ class ZFSTransfer(BaseTransfer):
         ]
 
         result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             check_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
             timeout=300,
         )
 
@@ -1083,11 +1092,11 @@ class ZFSTransfer(BaseTransfer):
             # Destroy the entire dataset (this also removes all snapshots)
             destroy_cmd = ssh_cmd + [f"zfs destroy -r {shlex.quote(dataset)}"]
             destroy_result = await asyncio.to_thread(
-                subprocess.run,
+                subprocess.run,  # nosec B603
                 destroy_cmd,
                 capture_output=True,
                 text=True,
-                check=False,  # nosec B603
+                check=False,
                 timeout=300,
             )
 

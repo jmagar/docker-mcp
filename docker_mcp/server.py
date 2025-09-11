@@ -490,7 +490,7 @@ class DockerMCPServer:
             )
         )
 
-    def _build_auth_provider(self):
+    def _build_auth_provider(self) -> Any | None:
         """Build Google OAuth provider from environment if configured.
 
         Returns a provider instance or None if auth should be disabled.
@@ -515,33 +515,13 @@ class DockerMCPServer:
         return base_url
 
     def _parse_auth_scopes(self) -> list[str]:
-        """Parse required auth scopes from environment."""
+        """Parse required auth scopes from environment with enhanced validation."""
         scopes_raw = os.getenv("FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES", "")
-        required_scopes: list[str]
 
         if scopes_raw.strip().startswith("["):
-            try:
-                import json
-
-                parsed_scopes = json.loads(scopes_raw)
-                if isinstance(parsed_scopes, list) and all(
-                    isinstance(s, str) for s in parsed_scopes
-                ):
-                    required_scopes = parsed_scopes
-                else:
-                    self.logger.warning(
-                        "Invalid scope format in FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES - expected list of strings"
-                    )
-                    required_scopes = []
-            except (json.JSONDecodeError, TypeError) as e:
-                self.logger.warning(
-                    "Failed to parse FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES as JSON",
-                    error=str(e),
-                )
-                required_scopes = []
+            required_scopes = self._parse_json_scopes(scopes_raw)
         else:
-            parts = [p.strip() for p in scopes_raw.replace(" ", ",").split(",") if p.strip()]
-            required_scopes = parts
+            required_scopes = self._parse_comma_scopes(scopes_raw)
 
         # Provide sensible defaults
         if not required_scopes:
@@ -551,6 +531,96 @@ class DockerMCPServer:
             ]
 
         return required_scopes
+
+    def _parse_json_scopes(self, scopes_raw: str) -> list[str]:
+        """Parse JSON array format scopes."""
+        try:
+            import json
+            parsed_scopes = json.loads(scopes_raw)
+            return self._validate_parsed_scopes(parsed_scopes)
+        except (json.JSONDecodeError, TypeError) as e:
+            self.logger.warning(
+                "Failed to parse FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES as JSON",
+                error=str(e),
+                raw_value=scopes_raw[:100] + "..." if len(scopes_raw) > 100 else scopes_raw
+            )
+            return []
+
+    def _parse_comma_scopes(self, scopes_raw: str) -> list[str]:
+        """Parse comma/space-separated format scopes."""
+        parts = [p.strip() for p in scopes_raw.replace(" ", ",").split(",") if p.strip()]
+        validated_scopes = []
+        for scope in parts:
+            if self._validate_oauth_scope(scope):
+                validated_scopes.append(scope)
+            else:
+                self.logger.warning("Invalid OAuth scope format: %s - skipping", scope)
+        return validated_scopes
+
+    def _validate_parsed_scopes(self, parsed_scopes: Any) -> list[str]:
+        """Validate and filter parsed scopes."""
+        if not isinstance(parsed_scopes, list):
+            self.logger.warning(
+                "Invalid scope format - expected JSON array, got %s",
+                type(parsed_scopes).__name__
+            )
+            return []
+
+        if len(parsed_scopes) > 50:  # Reasonable limit
+            self.logger.warning(
+                "Too many scopes - maximum 50 allowed, got %d",
+                len(parsed_scopes)
+            )
+            return []
+
+        if not all(isinstance(s, str) and len(s.strip()) > 0 and len(s) < 500 for s in parsed_scopes):
+            self.logger.warning(
+                "Invalid scope entries - all entries must be non-empty strings under 500 characters"
+            )
+            return []
+
+        # Validate each scope
+        validated_scopes = []
+        for raw_scope in parsed_scopes:
+            scope = raw_scope.strip()
+            if self._validate_oauth_scope(scope):
+                validated_scopes.append(scope)
+            else:
+                self.logger.warning("Invalid OAuth scope format: %s - skipping", scope)
+
+        return validated_scopes
+
+    def _validate_oauth_scope(self, scope: str) -> bool:
+        """Validate OAuth scope format."""
+        import re
+
+        # OAuth scope should be either:
+        # 1. Simple identifier (letters, numbers, underscores, dots)
+        # 2. Full URL (https://...)
+        # 3. Known standard scopes (openid, profile, email, etc.)
+
+        if not scope or len(scope) > 500:  # Reasonable length limit
+            return False
+
+        # Known standard OpenID Connect scopes
+        standard_scopes = {
+            "openid", "profile", "email", "address", "phone", "offline_access"
+        }
+
+        if scope in standard_scopes:
+            return True
+
+        # Valid URL pattern for Google API scopes
+        url_pattern = r'^https://www\.googleapis\.com/auth/[a-zA-Z0-9._-]+$'
+        if re.match(url_pattern, scope):
+            return True
+
+        # Simple identifier pattern (letters, numbers, dots, underscores, hyphens)
+        simple_pattern = r'^[a-zA-Z][a-zA-Z0-9._-]*$'
+        if re.match(simple_pattern, scope):
+            return True
+
+        return False
 
     def _parse_auth_timeout(self) -> int | None:
         """Parse auth timeout from environment."""
@@ -655,7 +725,7 @@ class DockerMCPServer:
             str, Field(default="", description="Path to SSH private key file")
         ] = "",
         description: Annotated[str, Field(default="", description="Host description")] = "",
-        tags: Annotated[list[str] | None, Field(description="Host tags")] = None,
+        tags: Annotated[list[str] | None, Field(default=None, description="Host tags")] = None,
         compose_path: Annotated[
             str, Field(default="", description="Docker Compose file path")
         ] = "",
@@ -876,7 +946,7 @@ class DockerMCPServer:
             str, Field(default="", description="Docker Compose file content")
         ] = "",
         environment: Annotated[
-            dict[str, str] | None, Field(description="Environment variables")
+            dict[str, str] | None, Field(default=None, description="Environment variables")
         ] = None,
         pull_images: Annotated[
             bool, Field(default=True, description="Pull images before deploying")
@@ -891,7 +961,7 @@ class DockerMCPServer:
         ] = False,
         options: Annotated[
             dict[str, str] | None,
-            Field(description="Additional options for the operation"),
+            Field(default=None, description="Additional options for the operation"),
         ] = None,
         target_host_id: Annotated[
             str, Field(default="", description="Target host ID for migration operations")

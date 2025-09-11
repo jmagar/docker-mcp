@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async executor patterns for better performance and maintainability
 
 ### Removed
-- HostNotFoundError class (use DockerMCPError instead) 
+- HostNotFoundError class (use DockerMCPError instead)
 - ensure_log_directory helper function (handled directly in server init)
 - BUILD action from ContainerAction enum (build operations belong in compose/stack management)
 - **HostNotFoundError** exception class (docker_mcp/core/exceptions.py:20)

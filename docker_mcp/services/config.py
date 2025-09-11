@@ -4,6 +4,7 @@ Configuration Management Service
 Business logic for configuration discovery, import, and management operations.
 """
 
+import asyncio
 import difflib
 from typing import TYPE_CHECKING, Any
 
@@ -322,7 +323,7 @@ class ConfigService:
             # Save configuration
             config_file_to_use = config_path or getattr(self.config, "config_file", None)
             if config_file_to_use:
-                save_config(self.config, config_file_to_use)
+                await asyncio.to_thread(save_config, self.config, config_file_to_use)
 
             # Build result summary
             summary_lines = self._format_import_results(imported_hosts, compose_path_configs)

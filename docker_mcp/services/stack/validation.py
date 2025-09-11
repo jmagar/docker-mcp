@@ -281,11 +281,11 @@ class StackValidation:
                     f"which {shlex.quote(tool)} >/dev/null 2>&1 && echo 'AVAILABLE' || echo 'MISSING'"
                 ]
                 result = await asyncio.to_thread(
-                    subprocess.run,
+                    subprocess.run,  # nosec B603
                     check_cmd,
                     capture_output=True,
                     text=True,
-                    check=False,  # nosec B603
+                    check=False,
                     timeout=30,
                 )
 
@@ -367,25 +367,71 @@ class StackValidation:
             return None
 
     def _parse_port_string(self, port_spec: str) -> int | None:
-        """Parse string format ports like 'host_port:container_port' or 'port'."""
-        try:
-            if ":" in port_spec:
-                host_port = port_spec.split(":")[0]
-            else:
-                host_port = port_spec
+        """Parse string format ports with robust handling of complex formats.
 
-            return int(host_port)
-        except ValueError:
+        Handles formats like:
+        - 'port'
+        - 'host_port:container_port'
+        - 'ip:host_port:container_port'
+        - 'ip:host_port:container_port/proto'
+        - IPv6 formats like '[::1]:host_port:container_port'
+        """
+        try:
+            # Remove protocol suffix if present (e.g., /tcp, /udp)
+            if "/" in port_spec:
+                port_spec = port_spec.split("/")[0]
+
+            # Handle IPv6 format [ip]:host:container
+            if port_spec.startswith("[") and "]:" in port_spec:
+                # Extract everything after the IPv6 part: [::1]:8080:80 -> 8080:80
+                _, port_part = port_spec.split("]", 1)
+                if port_part.startswith(":"):
+                    port_part = port_part[1:]  # Remove leading colon
+                port_spec = port_part
+
+            # Split on colons to handle different formats
+            parts = port_spec.split(":")
+
+            if len(parts) == 1:
+                # Simple format: just 'port'
+                return int(parts[0])
+            elif len(parts) == 2:
+                # Format: 'host_port:container_port'
+                return int(parts[0])
+            elif len(parts) == 3:
+                # Format: 'ip:host_port:container_port' - use middle part as host port
+                return int(parts[1])
+            elif len(parts) >= 4:
+                # Complex format like host:ip:hostport:containerport - use second-to-last as host port
+                return int(parts[-2])
+            else:
+                return None
+
+        except (ValueError, IndexError):
             return None
 
     def _parse_port_dict(self, port_spec: dict) -> int | None:
-        """Parse dictionary format ports like {target: 80, published: 8080}."""
-        published_port = port_spec.get("published")
-        if published_port and isinstance(published_port, int | str):
-            try:
-                return int(published_port)
-            except ValueError:
-                return None
+        """Parse dictionary format ports with robust field handling.
+
+        Handles formats like:
+        - {target: 80, published: 8080}
+        - {target: 80, published: "8080"}
+        - {containerPort: 80, hostPort: 8080}
+        """
+        # Try different field names for published/host port
+        for field_name in ["published", "hostPort", "host_port", "external"]:
+            port_value = port_spec.get(field_name)
+            if port_value is not None:
+                try:
+                    if isinstance(port_value, str):
+                        # Handle string values that might be complex port specs
+                        parsed = self._parse_port_string(port_value)
+                        if parsed is not None:
+                            return parsed
+                    else:
+                        return int(port_value)
+                except (ValueError, TypeError):
+                    continue
         return None
 
     async def check_port_conflicts(
@@ -414,11 +460,11 @@ class StackValidation:
                     f"(netstat -tuln 2>/dev/null | grep ':{port} ' || ss -tuln 2>/dev/null | grep ':{port} ') && echo 'IN_USE' || echo 'AVAILABLE'"
                 ]
                 result = await asyncio.to_thread(
-                    subprocess.run,
+                    subprocess.run,  # nosec B603
                     check_cmd,
                     capture_output=True,
                     text=True,
-                    check=False,  # nosec B603
+                    check=False,
                     timeout=30,
                 )
 
@@ -501,11 +547,11 @@ class StackValidation:
                     f"docker ps -a --filter name=^{shlex.quote(service_name)}$ --format '{{{{.Names}}}}' | grep -x {shlex.quote(service_name)} && echo 'CONFLICT' || echo 'AVAILABLE'"
                 ]
                 result = await asyncio.to_thread(
-                    subprocess.run,
+                    subprocess.run,  # nosec B603
                     check_cmd,
                     capture_output=True,
                     text=True,
-                    check=False,  # nosec B603
+                    check=False,
                     timeout=30,
                 )
 
@@ -534,11 +580,11 @@ class StackValidation:
                     f"docker network ls --filter name=^{shlex.quote(network_name)}$ --format '{{{{.Name}}}}' | grep -x {shlex.quote(network_name)} && echo 'CONFLICT' || echo 'AVAILABLE'"
                 ]
                 result = await asyncio.to_thread(
-                    subprocess.run,
+                    subprocess.run,  # nosec B603
                     check_cmd,
                     capture_output=True,
                     text=True,
-                    check=False,  # nosec B603
+                    check=False,
                     timeout=30,
                 )
 

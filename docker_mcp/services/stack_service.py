@@ -5,10 +5,12 @@ Thin facade that delegates to specialized stack management modules.
 Provides a clean interface while maintaining backward compatibility.
 """
 
-from typing import TYPE_CHECKING, Any
+import re
+from typing import TYPE_CHECKING, Any, Union
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
+    from docker_mcp.models.enums import ComposeAction
 
 import structlog
 from fastmcp.tools.tool import ToolResult
@@ -225,7 +227,7 @@ class StackService:
         volume_utils = StackVolumeUtils()
         return volume_utils.normalize_volume_entry(volume, target_appdata, stack_name)
 
-    async def handle_action(self, action: ComposeAction | str, **params) -> dict[str, Any]:
+    async def handle_action(self, action: Union["ComposeAction", str], **params) -> dict[str, Any]:
         """Unified action handler for all stack operations.
 
         This method consolidates all dispatcher logic from server.py into the service layer.
@@ -308,7 +310,6 @@ class StackService:
 
     async def _handle_deploy_action(self, **params) -> dict[str, Any]:
         """Handle DEPLOY action."""
-        import re
 
         host_id = params.get("host_id", "")
         stack_name = params.get("stack_name", "")
@@ -324,11 +325,25 @@ class StackService:
         if not compose_content:
             return {"success": False, "error": "compose_content is required for deploy action"}
 
-        # Validate stack name format (DNS compliance)
-        if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", stack_name):
+        # Validate stack name format (allow underscores per IMPLEMENT_ME.md)
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$", stack_name):
             return {
                 "success": False,
-                "error": "stack_name must be DNS-compliant: lowercase letters, numbers, and hyphens only (no underscores)",
+                "error": "stack_name must contain only letters, numbers, underscores, and hyphens, starting with alphanumeric",
+            }
+
+        # Validate stack name length and reserved names
+        if len(stack_name) > 63:
+            return {
+                "success": False,
+                "error": "stack_name must be 63 characters or fewer",
+            }
+
+        reserved_names = {"docker", "compose", "system", "network", "volume"}
+        if stack_name.lower() in reserved_names:
+            return {
+                "success": False,
+                "error": f"stack_name '{stack_name}' is reserved",
             }
 
         result = await self.deploy_stack(
@@ -372,8 +387,8 @@ class StackService:
             return {"success": False, "error": "host_id is required for logs action"}
         if not stack_name:
             return {"success": False, "error": "stack_name is required for logs action"}
-        if lines < 1 or lines > 1000:
-            return {"success": False, "error": "lines must be between 1 and 1000"}
+        if lines < 1 or lines > 10000:
+            return {"success": False, "error": "lines must be between 1 and 10000"}
 
         try:
             if host_id not in self.config.hosts:

@@ -1,9 +1,10 @@
 """Backup and restore operations for migration rollback capability."""
 
 import asyncio
+import shlex
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +50,7 @@ class BackupManager:
         Returns:
             Backup information dictionary
         """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_filename = f"backup_{stack_name}_{timestamp}.tar.gz"
         temp_dir = tempfile.mkdtemp(prefix="docker_mcp_backup_")
         backup_path = f"{temp_dir}/{backup_filename}"
@@ -57,13 +58,13 @@ class BackupManager:
         ssh_cmd = build_ssh_command(host)
 
         # Check if source path exists
-        check_cmd = ssh_cmd + [f"test -d {source_path} && echo 'EXISTS' || echo 'NOT_FOUND'"]
+        check_cmd = ssh_cmd + [f"test -d {shlex.quote(source_path)} && echo 'EXISTS' || echo 'NOT_FOUND'"]
         result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             check_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
         )
 
         if "NOT_FOUND" in result.stdout:
@@ -91,24 +92,24 @@ class BackupManager:
         )
 
         result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             backup_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
         )
 
         if "BACKUP_FAILED" in result.stdout or result.returncode != 0:
             raise BackupError(f"Failed to create backup: {result.stderr}")
 
         # Get backup size
-        size_cmd = ssh_cmd + [f"stat -c%s {backup_path} 2>/dev/null || echo '0'"]
+        size_cmd = ssh_cmd + [f"stat -c%s {shlex.quote(backup_path)} 2>/dev/null || echo '0'"]
         size_result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             size_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
         )
 
         backup_size = int(size_result.stdout.strip()) if size_result.stdout.strip().isdigit() else 0
@@ -125,7 +126,7 @@ class BackupManager:
             "timestamp": timestamp,
             "reason": backup_reason,
             "stack_name": stack_name,
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
         self.backups.append(backup_info)
@@ -157,7 +158,7 @@ class BackupManager:
         Returns:
             Backup information dictionary
         """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         snapshot_name = f"backup_{stack_name}_{timestamp}"
         full_snapshot = f"{dataset}@{snapshot_name}"
 
@@ -175,11 +176,11 @@ class BackupManager:
         )
 
         result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             snap_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
         )
 
         if result.returncode != 0:
@@ -188,11 +189,11 @@ class BackupManager:
         # Get snapshot size
         size_cmd = ssh_cmd + [f"zfs list -H -o used {full_snapshot} 2>/dev/null || echo '0'"]
         size_result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             size_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
         )
 
         # Parse ZFS size format (e.g., "1.2G", "512M", "4K")
@@ -211,7 +212,7 @@ class BackupManager:
             "timestamp": timestamp,
             "reason": backup_reason,
             "stack_name": stack_name,
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
         self.backups.append(backup_info)
@@ -264,11 +265,11 @@ class BackupManager:
         )
 
         result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             restore_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
         )
 
         if "RESTORE_FAILED" in result.stdout or result.returncode != 0:
@@ -307,11 +308,11 @@ class BackupManager:
         )
 
         result = await asyncio.to_thread(
-            subprocess.run,
+            subprocess.run,  # nosec B603
             rollback_cmd,
             capture_output=True,
             text=True,
-            check=False,  # nosec B603
+            check=False,
         )
 
         if result.returncode != 0:

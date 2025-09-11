@@ -40,154 +40,674 @@ The Consolidated Action-Parameter Pattern is an architectural approach for organ
 ### 1. Basic Structure
 
 ```python
-from typing import Annotated, Literal
+from typing import Annotated, Any
 from pydantic import Field
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
 
-mcp = FastMCP(name="ConsolidatedServer")
+# Import enum classes for type-safe actions
+from .models.enums import HostAction
+from .models.params import DockerHostsParams
 
-@mcp.tool
-async def domain_manager(
-    # Action parameter - defines what operation to perform
-    action: Annotated[Literal["list", "create", "update", "delete"], Field(description="Action to perform")],
+class ConsolidatedServer:
+    def __init__(self, config):
+        self.app = FastMCP(name="ConsolidatedServer")
+        
+        # Register tools using method registration pattern
+        self.app.tool(
+            self.domain_manager,
+            annotations={
+                "title": "Domain Management",
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": True,
+            }
+        )
     
-    # Required parameters - used by multiple actions
-    resource_id: Annotated[str, Field(description="Resource identifier", min_length=1)],
-    
-    # Optional parameters - provide defaults for all actions
-    name: Annotated[str, Field(default="", description="Resource name")] = "",
-    description: Annotated[str, Field(default="", description="Resource description")] = "",
-    tags: Annotated[list[str], Field(default_factory=list, description="Resource tags")] = [],
-    
-    # Action-specific parameters - only used by certain actions
-    force: Annotated[bool, Field(default=False, description="Force the operation")] = False,
-    dry_run: Annotated[bool, Field(default=False, description="Perform a dry run")] = False
-) -> dict[str, Any]:
+    async def domain_manager(
+        self,
+        # Action parameter - accepts string, enum, or None with default
+        action: Annotated[
+            str | HostAction | None,
+            Field(default=None, description="Action to perform (defaults to list if not provided)")
+        ] = None,
+        
+        # Core parameters - conditionally required based on action
+        resource_id: Annotated[str, Field(default="", description="Resource identifier")] = "",
+        
+        # Optional parameters - provide defaults for all actions
+        name: Annotated[str, Field(default="", description="Resource name")] = "",
+        description: Annotated[str, Field(default="", description="Resource description")] = "",
+        tags: Annotated[list[str] | None, Field(default=None, description="Resource tags")] = None,
+        
+        # Action-specific parameters - only used by certain actions
+        force: Annotated[bool, Field(default=False, description="Force the operation")] = False,
+        dry_run: Annotated[bool, Field(default=False, description="Perform a dry run")] = False
+    ) -> ToolResult | dict[str, Any]:
     """Consolidated resource management tool.
     
     Actions:
-    - list: List all resources
-    - create: Create a new resource (requires: name)
-    - update: Update an existing resource (requires: resource_id)
-    - delete: Delete a resource (requires: resource_id; optional: force)
+    • list: List all resources
+      - Required: none
+      
+    • create: Create a new resource
+      - Required: name
+      - Optional: description, tags
+      
+    • update: Update an existing resource
+      - Required: resource_id
+      - Optional: name, description, tags
+      
+    • delete: Delete a resource
+      - Required: resource_id
+      - Optional: force, dry_run
     """
     
-    # Validate action
-    valid_actions = ["list", "create", "update", "delete"]
-    if action not in valid_actions:
-        return {
-            "success": False,
-            "error": f"Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}"
-        }
-    
-    # Route to appropriate handler
+    # Parse and validate parameters using parameter model
     try:
-        if action == "list":
-            return await handle_list_resources()
-        elif action == "create":
-            if not name:
-                return {"success": False, "error": "name is required for create action"}
-            return await handle_create_resource(name, description, tags)
-        elif action == "update":
-            if not resource_id:
-                return {"success": False, "error": "resource_id is required for update action"}
-            return await handle_update_resource(resource_id, name, description, tags)
-        elif action == "delete":
-            if not resource_id:
-                return {"success": False, "error": "resource_id is required for delete action"}
-            return await handle_delete_resource(resource_id, force, dry_run)
+        # Convert string action to enum
+        if isinstance(action, str):
+            action_enum = HostAction(action)
+        elif action is None:
+            action_enum = HostAction.LIST
+        else:
+            action_enum = action
+
+        # Use parameter model for validation
+        params = DockerHostsParams(
+            action=action_enum,
+            resource_id=resource_id,
+            name=name,
+            description=description,
+            tags=tags or [],
+            force=force,
+            dry_run=dry_run
+        )
+        
+        # Use validated enum from parameter model
+        action = params.action
     except Exception as e:
         return {
             "success": False,
-            "error": f"Action '{action}' failed: {str(e)}"
+            "error": f"Parameter validation failed: {str(e)}",
+            "action": str(action) if action else "unknown",
         }
+
+    # Delegate to service layer for business logic
+    return await self.resource_service.handle_action(
+        action, **params.model_dump(exclude={"action"})
+    )
 ```
 
 ### 2. Action Parameter Design
 
-#### Use Literal Types for Actions
+#### Use Enum Classes for Type Safety
 
 ```python
-# ✅ Good - Explicit list of valid actions
-action: Annotated[Literal["start", "stop", "restart", "status"], Field(description="Container action")]
+# ✅ Good - Enum classes for type safety and IDE support
+from enum import Enum
 
-# ❌ Avoid - Too generic
+class HostAction(Enum):
+    LIST = "list"
+    ADD = "add"
+    EDIT = "edit"
+    REMOVE = "remove"
+    TEST_CONNECTION = "test_connection"
+    DISCOVER = "discover"
+    PORTS = "ports"
+    IMPORT_SSH = "import_ssh"
+    CLEANUP = "cleanup"
+
+# Action parameter accepts string, enum, or None
+action: Annotated[
+    str | HostAction | None,
+    Field(default=None, description="Action to perform (defaults to list if not provided)")
+] = None
+
+# ❌ Avoid - Too generic without enum validation
 action: Annotated[str, Field(description="Action to perform")]
 ```
 
-#### Group Related Operations
+#### Group Related Operations by Domain
 
 ```python
-# ✅ Good groupings by domain
-docker_hosts_actions = ["list", "add", "remove", "ports", "cleanup"]
-docker_container_actions = ["list", "info", "start", "stop", "restart", "logs"]  
-docker_compose_actions = ["list", "deploy", "up", "down", "build", "logs", "migrate"]
+# ✅ Good groupings by domain with enum classes
+class HostAction(Enum):
+    LIST = "list"
+    ADD = "add"
+    EDIT = "edit" 
+    REMOVE = "remove"
+    TEST_CONNECTION = "test_connection"
+    DISCOVER = "discover"
+    PORTS = "ports"
+    IMPORT_SSH = "import_ssh"
+    CLEANUP = "cleanup"
+
+class ContainerAction(Enum):
+    LIST = "list"
+    INFO = "info"
+    START = "start"
+    STOP = "stop"
+    RESTART = "restart"
+    LOGS = "logs"
+    REMOVE = "remove"
+
+class ComposeAction(Enum):
+    LIST = "list"
+    DISCOVER = "discover"
+    VIEW = "view"
+    DEPLOY = "deploy"
+    UP = "up"
+    DOWN = "down"
+    RESTART = "restart"
+    BUILD = "build"
+    LOGS = "logs"
+    MIGRATE = "migrate"
 
 # ❌ Avoid mixing unrelated domains
 mixed_actions = ["list_hosts", "start_container", "deploy_stack"]  # Too broad
 ```
 
----
+# Part II: Enum Classes for Actions
 
-# Part II: Parameter Type Annotations
+## Why Use Enum Classes?
 
-## The Problem
+Enum classes provide several advantages over string literals for action parameters:
 
-When using FastMCP, parameters can show up as "unknown" type in MCP clients, making it difficult for users and LLMs to understand what types of values are expected. This issue is caused by incorrect type annotation patterns that confuse FastMCP's Pydantic-based type introspection system.
+1. **Type Safety**: IDE support with autocompletion and type checking
+2. **Validation**: Automatic validation of valid action values
+3. **Refactoring**: Safe renaming and restructuring of actions
+4. **Documentation**: Clear definition of available actions in one place
 
-## The Solution: Working Patterns
+## Defining Action Enums
 
-### ✅ Required Parameters
+```python
+from enum import Enum
 
-For required parameters, use this pattern:
+class HostAction(Enum):
+    """Actions available for Docker host management."""
+    LIST = "list"
+    ADD = "add"
+    EDIT = "edit" 
+    REMOVE = "remove"
+    TEST_CONNECTION = "test_connection"
+    DISCOVER = "discover"
+    PORTS = "ports"
+    IMPORT_SSH = "import_ssh"
+    CLEANUP = "cleanup"
+
+class ContainerAction(Enum):
+    """Actions available for Docker container management."""
+    LIST = "list"
+    INFO = "info"
+    START = "start"
+    STOP = "stop"
+    RESTART = "restart"
+    LOGS = "logs"
+    REMOVE = "remove"
+
+class ComposeAction(Enum):
+    """Actions available for Docker Compose stack management."""
+    LIST = "list"
+    DISCOVER = "discover"
+    VIEW = "view"
+    DEPLOY = "deploy"
+    UP = "up"
+    DOWN = "down"
+    RESTART = "restart"
+    BUILD = "build"
+    LOGS = "logs"
+    MIGRATE = "migrate"
+```
+
+## Using Enums in Tool Parameters
 
 ```python
 from typing import Annotated
 from pydantic import Field
 
-@mcp.tool
-def example_tool(
-    # Required string with validation
-    host_id: Annotated[str, Field(description="Host identifier", min_length=1)],
+class DockerMCPServer:
+    def __init__(self, config):
+        self.app = FastMCP("Docker Context Manager")
+        
+        # Register tools using method registration pattern
+        self.app.tool(
+            self.docker_hosts,
+            annotations={
+                "title": "Docker Host Management", 
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": True,
+            }
+        )
     
-    # Required integer with constraints
-    port: Annotated[int, Field(description="Port number", ge=1, le=65535)],
+    async def docker_hosts(
+        self,
+        action: Annotated[
+            str | HostAction | None,  # Accept string, enum, or None
+            Field(default=None, description="Action to perform (defaults to list if not provided)")
+        ] = None,
+        # ... other parameters
+    ) -> dict[str, Any]:
+    # Convert string to enum with validation
+    try:
+        if isinstance(action, str):
+            action_enum = HostAction(action)  # Raises ValueError if invalid
+        elif action is None:
+            action_enum = HostAction.LIST  # Default action
+        else:
+            action_enum = action  # Already an enum
+    except ValueError:
+        return {
+            "success": False,
+            "error": f"Invalid action '{action}'. Valid actions: {[a.value for a in HostAction]}"
+        }
     
-    # Required literal (enum-like)
-    action: Annotated[Literal["start", "stop", "restart"], Field(description="Action to perform")],
+    # Use the validated enum
+    return await handle_host_action(action_enum, **params)
+```
+
+## Enum Conversion Pattern
+
+```python
+def convert_string_to_enum(action: str | EnumType | None, enum_class: type[EnumType], default: EnumType) -> EnumType:
+    """Convert string action to enum with validation."""
+    if isinstance(action, str):
+        try:
+            return enum_class(action)
+        except ValueError:
+            valid_actions = [a.value for a in enum_class]
+            raise ValueError(f"Invalid action '{action}'. Valid actions: {valid_actions}")
+    elif action is None:
+        return default
+    else:
+        return action  # Already the correct enum type
+
+# Usage in tools
+action_enum = convert_string_to_enum(action, HostAction, HostAction.LIST)
+```
+
+## Benefits in Practice
+
+```python
+# ✅ Type-safe action handling
+async def handle_host_action(action: HostAction, **params):
+    if action == HostAction.LIST:
+        return await list_hosts()
+    elif action == HostAction.ADD:
+        return await add_host(**params)
+    elif action == HostAction.PORTS:
+        return await list_host_ports(**params)
+    # IDE knows all possible enum values
+
+# ✅ Clear documentation of available actions
+def get_available_actions() -> list[str]:
+    return [action.value for action in HostAction]
+
+# ✅ Safe refactoring - renaming enum values updates everywhere
+HostAction.TEST_CONNECTION  # IDE will find all usages
+```
+
+---
+
+# Part III: Parameter Model Classes
+
+## Why Parameter Models?
+
+Parameter model classes provide:
+
+1. **Centralized Validation**: All parameter validation in one place
+2. **Type Safety**: Pydantic model validation and conversion
+3. **Consistency**: Same parameter handling across all actions
+4. **Reusability**: Models can be reused in tests and other code
+
+## Defining Parameter Models
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+
+class DockerHostsParams(BaseModel):
+    """Parameter model for docker_hosts tool."""
+    action: HostAction
+    host_id: str = ""
+    ssh_host: str = ""
+    ssh_user: str = ""
+    ssh_port: int = Field(default=22, ge=1, le=65535, description="SSH port number")
+    ssh_key_path: str | None = None
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    compose_path: str | None = None
+    appdata_path: str | None = None
+    enabled: bool = True
+    zfs_capable: bool = False
+    zfs_dataset: str = ""
+    port: int = Field(default=0, ge=0, le=65535, description="Port number to check availability")
+    cleanup_type: Literal["check", "safe", "moderate", "aggressive"] | None = None
+    frequency: Literal["daily", "weekly", "monthly", "custom"] | None = None
+    time: str | None = None
+    ssh_config_path: str | None = None
+    selected_hosts: str | None = None
+
+class DockerContainerParams(BaseModel):
+    """Parameter model for docker_container tool."""
+    action: ContainerAction
+    host_id: str = ""
+    container_id: str = ""
+    all_containers: bool = False
+    limit: int = Field(default=20, ge=1, le=1000)
+    offset: int = Field(default=0, ge=0)
+    follow: bool = False
+    lines: int = Field(default=100, ge=1, le=10000)
+    force: bool = False
+    timeout: int = Field(default=10, ge=1, le=300)
+
+class DockerComposeParams(BaseModel):
+    """Parameter model for docker_compose tool."""
+    action: ComposeAction
+    host_id: str = ""
+    stack_name: str = Field(
+        default="",
+        max_length=63,
+        pattern=r"^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        description="Stack name (DNS-compliant: lowercase letters, numbers, hyphens; no underscores)"
+    )
+    compose_content: str = ""
+    environment: dict[str, str] = Field(default_factory=dict)
+    pull_images: bool = True
+    recreate: bool = False
+    follow: bool = False
+    lines: int = Field(default=100, ge=1, le=10000)
+    dry_run: bool = False
+    options: dict[str, str] = Field(default_factory=dict)
+    target_host_id: str = ""
+    remove_source: bool = False
+    skip_stop_source: bool = False
+    start_target: bool = True
+```
+
+## Advanced Validation Patterns
+
+The actual implementation uses sophisticated Pydantic validation patterns for enhanced type safety and data integrity:
+
+```python
+from pydantic import BaseModel, Field, computed_field, field_validator
+
+def _validate_enum_action(value: Any, enum_class: type) -> Any:
+    """Generic validator for enum action fields."""
+    if isinstance(value, str):
+        # Handle "EnumClass.VALUE" format
+        if "." in value:
+            enum_value = value.split(".")[-1].lower()
+        else:
+            enum_value = value.lower()
+
+        # Match by value or name
+        for action in enum_class:
+            if action.value == enum_value or action.name.lower() == enum_value:
+                return action
+    elif isinstance(value, enum_class):
+        return value
+
+    # Let Pydantic handle the error if no match
+    return value
+
+class DockerHostsParams(BaseModel):
+    """Parameter model with advanced validation patterns."""
     
-    # Required boolean
-    enabled: Annotated[bool, Field(description="Whether feature is enabled")]
-) -> dict:
+    action: HostAction = Field(
+        default=HostAction.LIST, 
+        description="Action to perform (defaults to list if not provided)"
+    )
+    host_id: str = Field(default="", description="Host identifier")
+    ssh_port: int = Field(default=22, ge=1, le=65535, description="SSH port number")
+    
+    # Regex pattern validation for time fields
+    time: str | None = Field(
+        default=None,
+        pattern=r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$",
+        description="Cleanup schedule time in HH:MM format (24-hour)",
+    )
+    
+    # Comma-separated list handling
+    selected_hosts: str | None = Field(
+        default=None, 
+        description="Comma-separated list of hosts to select"
+    )
+
+    # Computed field for parsing comma-separated values
+    @computed_field(return_type=list[str])
+    @property
+    def selected_hosts_list(self) -> list[str]:
+        """Parse selected_hosts into a list."""
+        if not self.selected_hosts:
+            return []
+        return [h.strip() for h in self.selected_hosts.split(",") if h.strip()]
+
+    # Custom field validator for enum conversion
+    @field_validator("action", mode="before")
+    @classmethod
+    def validate_action(cls, v):
+        """Validate action field to handle various enum input formats."""
+        return _validate_enum_action(v, HostAction)
+
+class DockerComposeParams(BaseModel):
+    """Parameter model with DNS-compliant validation."""
+    
+    action: ComposeAction = Field(..., description="Action to perform")
+    
+    # Stack name with Docker Compose naming constraints
+    stack_name: str = Field(
+        default="",
+        max_length=63,
+        pattern=r"^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+        description="Stack name (DNS-compliant: lowercase letters, numbers, hyphens; no underscores)",
+    )
+    
+    lines: int = Field(
+        default=100, 
+        ge=1, 
+        le=10000, 
+        description="Number of log lines to retrieve"
+    )
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def validate_action(cls, v):
+        """Validate action field to handle various enum input formats."""
+        return _validate_enum_action(v, ComposeAction)
+```
+
+## Using Parameter Models in Tools
+
+```python
+class DockerMCPServer:
+    def __init__(self, config):
+        self.app = FastMCP("Docker Context Manager")
+        # Method registration pattern
+        self.app.tool(self.docker_hosts, annotations={"title": "Docker Host Management"})
+    
+    async def docker_hosts(
+        self,
+        action: Annotated[str | HostAction | None, Field(default=None, description="...")] = None,
+        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
+        # ... all other parameters with defaults
+    ) -> ToolResult | dict[str, Any]:
+    # Parse and validate parameters using the parameter model
+    try:
+        # Convert string action to enum
+        if isinstance(action, str):
+            action_enum = HostAction(action)
+        elif action is None:
+            action_enum = HostAction.LIST
+        else:
+            action_enum = action
+
+        # Create and validate parameter model
+        params = DockerHostsParams(
+            action=action_enum,
+            host_id=host_id,
+            ssh_host=ssh_host,
+            ssh_user=ssh_user,
+            # ... all parameters
+        )
+        
+        # Use validated enum from parameter model
+        action = params.action
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Parameter validation failed: {str(e)}",
+            "action": str(action) if action else "unknown",
+        }
+
+    # Delegate to service layer with validated parameters
+    return await self.host_service.handle_action(
+        action, **params.model_dump(exclude={"action"})
+    )
+```
+
+## Model Validation Benefits
+
+```python
+# ✅ Automatic type conversion and validation
+params = DockerHostsParams(
+    action="add",  # Automatically converted to HostAction.ADD
+    host_id="prod-server",
+    ssh_port="22",  # Automatically converted to int
+    tags=["production", "web"]  # List validation
+)
+
+# ✅ Field validation with constraints
+class DockerContainerParams(BaseModel):
+    limit: int = Field(default=20, ge=1, le=1000)  # Must be 1-1000
+    timeout: int = Field(default=10, ge=1, le=300)  # Must be 1-300
+    
+# ✅ Custom validation methods
+class DockerHostsParams(BaseModel):
+    @validator('ssh_port')
+    def validate_ssh_port(cls, v):
+        if not 1 <= v <= 65535:
+            raise ValueError('SSH port must be between 1 and 65535')
+        return v
+    
+    @validator('tags')
+    def validate_tags(cls, v):
+        if len(v) > 10:
+            raise ValueError('Maximum 10 tags allowed')
+        return v
+```
+
+---
+
+# Part IV: Parameter Type Annotations
+
+## The Problem
+
+When using FastMCP, parameters can show up as "unknown" type in MCP clients, making it difficult for users and LLMs to understand what types of values are expected. This issue is caused by incorrect type annotation patterns that confuse FastMCP's Pydantic-based type introspection system.
+
+## The Solution: Working Patterns (Actual Implementation)
+
+### ✅ Action Parameters (Required)
+
+For action parameters, use the enum union pattern:
+
+```python
+from typing import Annotated
+from pydantic import Field
+from .models.enums import ComposeAction
+
+# Method registration pattern - self.app.tool(self.method_name)
+async def docker_compose(
+    # Action parameter - accepts string, enum, or None
+    action: Annotated[str | ComposeAction, Field(description="Action to perform")],
+    
+    # Required for some actions, conditionally validated
+    host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
+    stack_name: Annotated[str, Field(default="", description="Stack name")] = "",
+) -> ToolResult | dict[str, Any]:
     pass
 ```
 
-### ✅ Optional Parameters
+### ✅ Optional Parameters (Actual Patterns)
 
-For optional parameters, **always include `default=` in the Field AND provide a default value**:
+Real examples from the Docker MCP implementation:
 
 ```python
-@mcp.tool
-def example_tool(
-    # Optional string
-    ssh_key_path: Annotated[str, Field(default="", description="Path to SSH private key file")] = "",
+# Method registration pattern - self.app.tool(self.method_name)
+async def docker_compose(
+    # String parameters with defaults
+    host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
+    stack_name: Annotated[str, Field(default="", description="Stack name")] = "",
+    compose_content: Annotated[str, Field(default="", description="Docker Compose file content")] = "",
     
-    # Optional integer with constraints
-    timeout: Annotated[int, Field(default=30, ge=1, le=300, description="Timeout in seconds")] = 30,
+    # Optional union types (note: dict[str, str] | None pattern)
+    environment: Annotated[
+        dict[str, str] | None, Field(default=None, description="Environment variables")
+    ] = None,
+    options: Annotated[
+        dict[str, str] | None, Field(default=None, description="Additional options")
+    ] = None,
     
-    # Optional boolean
-    test_connection: Annotated[bool, Field(default=True, description="Test connection")] = True,
+    # Boolean parameters with defaults
+    pull_images: Annotated[bool, Field(default=True, description="Pull images before deploying")] = True,
+    recreate: Annotated[bool, Field(default=False, description="Recreate containers")] = False,
+    dry_run: Annotated[bool, Field(default=False, description="Perform a dry run")] = False,
     
-    # Optional list with default_factory
-    tags: Annotated[list[str], Field(default_factory=list, description="List of tags")] = [],
+    # Integer parameters with constraints
+    lines: Annotated[
+        int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve")
+    ] = 100,
     
-    # Optional dict with default_factory
-    metadata: Annotated[dict[str, str], Field(default_factory=dict, description="Metadata")] = {},
-    
-    # Optional enum-like parameter (use str, not Literal for optional)
-    log_level: Annotated[str, Field(default="info", description="Log level")] = "info"
-) -> dict:
+    # Target host for migration operations
+    target_host_id: Annotated[
+        str, Field(default="", description="Target host ID for migration operations")
+    ] = "",
+) -> ToolResult | dict[str, Any]:
     pass
+```
+
+### ✅ Host Management Parameters (Complex Example)
+
+```python
+async def docker_hosts(
+    # Action with enum union and default=None
+    action: Annotated[
+        str | HostAction | None,
+        Field(default=None, description="Action to perform (defaults to list if not provided)")
+    ] = None,
+    
+    # Core parameters
+    host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
+    ssh_host: Annotated[str, Field(default="", description="SSH hostname or IP address")] = "",
+    ssh_user: Annotated[str, Field(default="", description="SSH username")] = "",
+    
+    # Integer with constraints
+    ssh_port: Annotated[
+        int, Field(default=22, ge=1, le=65535, description="SSH port number")
+    ] = 22,
+    
+    # Optional path (string | None pattern)
+    ssh_key_path: Annotated[
+        str, Field(default="", description="Path to SSH private key file")
+    ] = "",
+    
+    # List with default_factory pattern
+    tags: Annotated[list[str] | None, Field(default=None, description="Host tags")] = None,
+    
+    # Literal constraints for specific values
+    cleanup_type: Annotated[
+        Literal["check", "safe", "moderate", "aggressive"] | None,
+        Field(default=None, description="Type of cleanup to perform"),
+    ] = None,
+    
+    # Port number with validation
+    port: Annotated[
+        int, Field(default=0, ge=0, le=65535, description="Port number to check availability")
+    ] = 0,
+) -> ToolResult | dict[str, Any]:
+    pass
+```
 ```
 
 ### Key Rules for Optional Parameters
@@ -240,7 +760,7 @@ tags: list[str] | None = None
 
 ---
 
-# Part III: Complete Implementation Example
+# Part V: Complete Implementation Example
 
 ## Real-World Example: Docker MCP Server
 
@@ -248,46 +768,142 @@ tags: list[str] | None = None
 
 ```python
 # Before: 27 separate tools
-@mcp.tool
-async def list_docker_hosts(): pass
+# Method registration pattern - self.app.tool(self.method_name)
+async def list_stacks(): pass
 
-@mcp.tool  
-async def add_docker_host(): pass
+# Method registration pattern - self.app.tool(self.method_name)  
+async def deploy_stack(): pass
 
-@mcp.tool
-async def list_host_ports(): pass
+# Method registration pattern - self.app.tool(self.method_name)
+async def manage_stack(): pass
 
 # ... 24 more tools
 
-# After: 3 consolidated tools
-@mcp.tool
-async def docker_hosts(action: Literal["list", "add", "ports", ...], ...): pass
+# After: 3 consolidated tools with enum-based actions
+# Method registration pattern - self.app.tool(self.method_name)
+async def docker_compose(action: str | ComposeAction, ...): pass
 
-@mcp.tool
-async def docker_container(action: Literal["list", "info", "start", ...], ...): pass
+# Method registration pattern - self.app.tool(self.method_name)
+async def docker_container(action: str | ContainerAction, ...): pass
 
-@mcp.tool
-async def docker_compose(action: Literal["list", "deploy", "up", ...], ...): pass
+# Method registration pattern - self.app.tool(self.method_name)
+async def docker_hosts(action: str | HostAction, ...): pass
 ```
 
-### Complete Implementation with Proper Annotations
+### Complete Implementation: docker_compose Tool
+
+Here's the actual implementation from server.py showing the real patterns used:
 
 ```python
-from typing import Annotated, Literal
+from typing import Annotated, Any
 from pydantic import Field
-from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from .models.enums import ComposeAction
+from .models.params import DockerComposeParams
 
-mcp = FastMCP(name="DockerMCPServer")
+async def docker_compose(
+    self,
+    action: Annotated[str | ComposeAction, Field(description="Action to perform")],
+    host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
+    stack_name: Annotated[str, Field(default="", description="Stack name")] = "",
+    compose_content: Annotated[
+        str, Field(default="", description="Docker Compose file content")
+    ] = "",
+    environment: Annotated[
+        dict[str, str] | None, Field(default=None, description="Environment variables")
+    ] = None,
+    pull_images: Annotated[
+        bool, Field(default=True, description="Pull images before deploying")
+    ] = True,
+    recreate: Annotated[bool, Field(default=False, description="Recreate containers")] = False,
+    follow: Annotated[bool, Field(default=False, description="Follow log output")] = False,
+    lines: Annotated[
+        int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve")
+    ] = 100,
+    dry_run: Annotated[
+        bool, Field(default=False, description="Perform a dry run without making changes")
+    ] = False,
+    options: Annotated[
+        dict[str, str] | None,
+        Field(default=None, description="Additional options for the operation"),
+    ] = None,
+    target_host_id: Annotated[
+        str, Field(default="", description="Target host ID for migration operations")
+    ] = "",
+    remove_source: Annotated[
+        bool, Field(default=False, description="Remove source stack after migration")
+    ] = False,
+    skip_stop_source: Annotated[
+        bool, Field(default=False, description="Skip stopping source stack before migration")
+    ] = False,
+    start_target: Annotated[
+        bool, Field(default=True, description="Start target stack after migration")
+    ] = True,
+) -> ToolResult | dict[str, Any]:
+    """Consolidated Docker Compose stack management tool.
 
-@mcp.tool
-async def docker_hosts(
-    # Action parameter with Literal type
-    action: Annotated[Literal[
-        "list", "add", "ports", "compose_path", "import_ssh", 
-        "cleanup", "schedule", "reserve_port", "release_port"
-    ], Field(description="Action to perform")],
-    
-    # Core parameters with proper defaults
+    Actions:
+    • list: List stacks on a host
+      - Required: host_id
+
+    • deploy: Deploy a stack
+      - Required: host_id, stack_name, compose_content
+      - Optional: environment, pull_images, recreate
+
+    • up/down/restart/build: Manage stack lifecycle
+      - Required: host_id, stack_name
+      - Optional: options
+
+    • discover: Discover compose paths on a host
+      - Required: host_id
+
+    • logs: Get stack logs
+      - Required: host_id, stack_name
+      - Optional: follow, lines
+
+    • migrate: Migrate stack between hosts
+      - Required: host_id, target_host_id, stack_name
+      - Optional: remove_source, skip_stop_source, start_target, dry_run
+    """
+    # Parse and validate parameters using the parameter model
+    try:
+        # Convert string action to enum
+        if isinstance(action, str):
+            action_enum = ComposeAction(action)
+        else:
+            action_enum = action
+
+        params = DockerComposeParams(
+            action=action_enum,
+            host_id=host_id,
+            stack_name=stack_name,
+            compose_content=compose_content,
+            environment=environment or {},
+            pull_images=pull_images,
+            recreate=recreate,
+            follow=follow,
+            lines=lines,
+            dry_run=dry_run,
+            options=options or {},
+            target_host_id=target_host_id,
+            remove_source=remove_source,
+            skip_stop_source=skip_stop_source,
+            start_target=start_target,
+        )
+        # Use validated enum from parameter model
+        action = params.action
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Parameter validation failed: {str(e)}",
+            "action": str(action) if action else "unknown",
+        }
+
+    # Delegate to service layer for business logic
+    return await self.stack_service.handle_action(
+        action, **params.model_dump(exclude={"action"})
+    )
+```
     host_id: Annotated[str, Field(default="", description="Host identifier", min_length=1)] = "",
     ssh_host: Annotated[str, Field(default="", description="SSH hostname or IP address", min_length=1)] = "",
     ssh_user: Annotated[str, Field(default="", description="SSH username", min_length=1)] = "",
@@ -380,7 +996,7 @@ async def docker_hosts(
 ### Required vs Optional Parameters
 
 ```python
-@mcp.tool
+# Method registration pattern - self.app.tool(self.method_name)
 async def resource_manager(
     # Required for all actions - no default
     action: Annotated[Literal["list", "create", "update"], Field(description="Action to perform")],
@@ -400,7 +1016,7 @@ async def resource_manager(
 ### Parameter Grouping by Usage
 
 ```python
-@mcp.tool
+# Method registration pattern - self.app.tool(self.method_name)
 async def container_manager(
     action: Annotated[Literal["list", "start", "stop", "logs"], Field(description="Action to perform")],
     
@@ -488,103 +1104,415 @@ items: Annotated[list[str], Field(default_factory=list, min_length=0, max_length
 
 ---
 
-# Part V: Routing and Dispatch
+# Part VI: Routing and Dispatch
 
-## Service Layer Pattern
+## Service Layer Pattern (Actual Implementation)
+
+The Docker MCP server uses a sophisticated service layer pattern for routing actions:
 
 ```python
-class ResourceService:
-    async def list_resources(self) -> dict:
-        """List all resources."""
-        pass
+class StackService:
+    """Service layer for Docker Compose stack operations."""
     
-    async def create_resource(self, name: str, **kwargs) -> dict:
-        """Create a new resource."""
-        pass
-    
-    async def update_resource(self, resource_id: str, **kwargs) -> dict:
-        """Update existing resource."""
-        pass
+    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager, logs_service):
+        self.config = config
+        self.context_manager = context_manager
+        self.logs_service = logs_service
+        self.compose_manager = ComposeManager(config, context_manager)
 
-@mcp.tool 
-async def resource_manager(action: str, **params) -> dict:
-    service = ResourceService()
-    
-    # Route to appropriate service method
-    if action == "list":
-        return await service.list_resources()
-    elif action == "create":
-        return await service.create_resource(**params)
-    elif action == "update":
-        return await service.update_resource(**params)
-    # ... etc
+    async def handle_action(self, action: ComposeAction, **params) -> ToolResult | dict[str, Any]:
+        """Central dispatcher for all stack actions.
+        
+        The **params come from model_dump(exclude={"action"}) in server.py
+        """
+        
+        # Route to specific action handlers
+        if action == ComposeAction.LIST:
+            return await self.list_stacks(params["host_id"])
+        elif action == ComposeAction.DEPLOY:
+            return await self.deploy_stack(
+                params["host_id"], 
+                params["stack_name"], 
+                params["compose_content"],
+                params.get("environment"),
+                params.get("pull_images", True),
+                params.get("recreate", False)
+            )
+        elif action == ComposeAction.UP:
+            return await self.manage_stack(
+                params["host_id"], 
+                params["stack_name"], 
+                "up", 
+                params.get("options")
+            )
+        elif action == ComposeAction.DOWN:
+            return await self.manage_stack(
+                params["host_id"], 
+                params["stack_name"], 
+                "down", 
+                params.get("options")
+            )
+        elif action == ComposeAction.LOGS:
+            return await self.get_stack_logs(
+                params["host_id"], 
+                params["stack_name"],
+                params.get("follow", False),
+                params.get("lines", 100)
+            )
+        elif action == ComposeAction.MIGRATE:
+            return await self.migrate_stack(
+                params["host_id"],
+                params["target_host_id"], 
+                params["stack_name"],
+                params.get("remove_source", False),
+                params.get("skip_stop_source", False),
+                params.get("start_target", True),
+                params.get("dry_run", False)
+            )
+        else:
+            return {
+                "success": False,
+                "error": f"Action '{action.value}' not implemented",
+                "action": action.value
+            }
+
+    async def list_stacks(self, host_id: str) -> dict[str, Any]:
+        """List Docker Compose stacks on a host."""
+        # Implementation uses Docker SDK for efficiency
+        try:
+            client = await self.context_manager.get_client(host_id)
+            if client is None:
+                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+
+            # Get all containers and group by compose project
+            containers = await asyncio.to_thread(client.containers.list, all=True)
+            # ... implementation details
+            
+        except Exception as e:
+            logger.error("Failed to list stacks", host_id=host_id, error=str(e))
+            return {
+                "success": False,
+                "error": str(e),
+                "host_id": host_id,
+                "timestamp": datetime.now().isoformat(),
+            }
 ```
 
-## Direct Dispatch Pattern
+## Tool → Service Delegation Pattern
 
 ```python
-@mcp.tool
-async def container_manager(action: str, host_id: str, container_id: str, **kwargs) -> dict:
-    """Direct dispatch to handler functions."""
-    
-    # Route to handler functions
-    handlers = {
-        "list": handle_list_containers,
-        "info": handle_container_info, 
-        "start": handle_start_container,
-        "stop": handle_stop_container,
-        "logs": handle_container_logs
-    }
-    
-    handler = handlers.get(action)
-    if not handler:
-        return {"success": False, "error": f"Unknown action: {action}"}
-    
-    try:
-        return await handler(host_id, container_id, **kwargs)
-    except Exception as e:
-        return {"success": False, "error": f"Action '{action}' failed: {str(e)}"}
+class DockerMCPServer:
+    def __init__(self, config: DockerMCPConfig):
+        # Initialize FastMCP app
+        self.app = FastMCP("Docker Context Manager")
+        
+        # Initialize service layer
+        self.stack_service = StackService(config, self.context_manager, self.logs_service)
+        self.container_service = ContainerService(config, self.context_manager, self.logs_service)
+        self.host_service = HostService(config, self.context_manager)
+        
+        # Register tools with method registration pattern
+        self.app.tool(
+            self.docker_compose,
+            annotations={
+                "title": "Docker Compose Management",
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "openWorldHint": True,
+            }
+        )
 
-async def handle_list_containers(host_id: str, **kwargs) -> dict:
-    """Handle container listing."""
-    all_containers = kwargs.get("all_containers", False)
-    limit = kwargs.get("limit", 20)
-    # Implementation...
-    return {"success": True, "containers": []}
+    async def docker_compose(self, action: str | ComposeAction, **kwargs) -> ToolResult | dict[str, Any]:
+        """MCP tool delegates to service layer."""
+        # Parameter validation with model
+        params = DockerComposeParams(action=action_enum, **kwargs)
+        
+        # Delegate to service layer for business logic
+        return await self.stack_service.handle_action(
+            params.action, **params.model_dump(exclude={"action"})
+        )
 ```
 
-## Error Handling Pattern
+## Action-Specific Method Routing
 
 ```python
-async def consolidated_tool(action: str, **params) -> dict:
-    # Always return consistent error format
-    def error_response(message: str) -> dict:
-        return {
-            "success": False,
-            "error": message,
-            "action": action  # Include action for debugging
-        }
-    
-    # Validate action
-    if action not in VALID_ACTIONS:
-        return error_response(f"Invalid action '{action}'")
-    
-    # Validate parameters
-    validation_result = validate_params_for_action(action, **params)
-    if not validation_result.success:
-        return error_response(validation_result.error)
-    
-    try:
-        # Execute action
-        result = await execute_action(action, **params)
+class StackService:
+    async def manage_stack(
+        self, host_id: str, stack_name: str, action: str, options: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Unified stack lifecycle management with SSH execution."""
+        
+        # Build compose arguments for the action
+        compose_args = self._build_compose_args(action, options or {})
+        
+        # Execute via SSH with compose file access
+        result = await self._execute_compose_with_file(
+            context_name, stack_name, compose_file_path, compose_args, None, timeout
+        )
+        
         return {
             "success": True,
-            "action": action,
-            **result
+            "message": f"Stack {stack_name} {action} completed successfully",
+            "output": result,
+            "execution_method": "ssh",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def _build_compose_args(self, action: str, options: dict[str, Any]) -> list[str]:
+        """Build compose arguments based on action and options."""
+        builders = {
+            "up": self._build_up_args,
+            "down": self._build_down_args,
+            "restart": self._build_restart_args,
+            "logs": self._build_logs_args,
+            "build": self._build_build_args,
+        }
+        
+        builder = builders.get(action)
+        if builder:
+            return builder(options)
+        else:
+            raise ValueError(f"Action '{action}' not supported")
+```
+
+## Complete Service Layer Implementation
+
+The actual Docker MCP server shows sophisticated service layer patterns with full initialization and routing:
+
+```python
+class DockerMCPServer:
+    """Complete server implementation with service layer."""
+    
+    def __init__(self, config: DockerMCPConfig, config_path: str | None = None):
+        self.config = config
+        self.logger = get_server_logger()
+        
+        # Initialize core managers
+        self.context_manager = DockerContextManager(config)
+        
+        # Initialize service layer with dependencies
+        from .services.logs import LogsService
+        
+        self.logs_service: LogsService = LogsService(config, self.context_manager)
+        self.host_service: HostService = HostService(config, self.context_manager)
+        self.container_service: ContainerService = ContainerService(
+            config, self.context_manager, self.logs_service
+        )
+        self.stack_service: StackService = StackService(
+            config, self.context_manager, self.logs_service
+        )
+        self.config_service = ConfigService(config, self.context_manager)
+        self.cleanup_service = CleanupService(config)
+
+class HostService:
+    """Complete host service with action routing."""
+    
+    def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
+        self.config = config
+        self.context_manager = context_manager
+        
+    async def handle_action(self, action: HostAction, **params) -> dict[str, Any]:
+        """Central dispatcher for all host actions.
+        
+        Note: **params comes from model_dump(exclude={"action"}) in the tool layer.
+        """
+        
+        # Route to specific action handlers based on enum
+        if action == HostAction.LIST:
+            return await self.list_docker_hosts()
+        elif action == HostAction.ADD:
+            return await self.add_docker_host(
+                params["host_id"],
+                params["ssh_host"], 
+                params["ssh_user"],
+                params.get("ssh_port", 22),
+                params.get("ssh_key_path"),
+                params.get("description", ""),
+                params.get("tags", []),
+                params.get("compose_path"),
+                params.get("enabled", True)
+            )
+        elif action == HostAction.PORTS:
+            return await self.list_host_ports(params["host_id"])
+        elif action == HostAction.TEST_CONNECTION:
+            return await self.test_host_connection(params["host_id"])
+        elif action == HostAction.DISCOVER:
+            return await self.discover_host_paths(params["host_id"])
+        elif action == HostAction.CLEANUP:
+            return await self.cleanup_host(
+                params["host_id"],
+                params.get("cleanup_type", "check")
+            )
+        elif action == HostAction.IMPORT_SSH:
+            return await self.import_ssh_config(
+                params.get("ssh_config_path"),
+                params.get("selected_hosts")
+            )
+        else:
+            return {
+                "success": False,
+                "error": f"Action '{action.value}' not implemented",
+                "action": action.value
+            }
+    
+    async def list_docker_hosts(self) -> dict[str, Any]:
+        """List all configured Docker hosts."""
+        try:
+            hosts_data = []
+            for host_id, host_config in self.config.hosts.items():
+                hosts_data.append({
+                    "host_id": host_id,
+                    "hostname": host_config.hostname,
+                    "user": host_config.user,
+                    "port": host_config.port,
+                    "enabled": host_config.enabled,
+                    "description": host_config.description,
+                    "tags": host_config.tags
+                })
+            
+            return {
+                "success": True,
+                "hosts": hosts_data,
+                "total": len(hosts_data),
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as e:
+            self.logger.error("Failed to list hosts", error=str(e))
+            return {
+                "success": False,
+                "error": f"Failed to list hosts: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }
+```
+
+## Error Handling Pattern (Actual Implementation)
+
+The Docker MCP server uses comprehensive error handling with parameter models:
+
+```python
+async def docker_compose(self, action: str | ComposeAction, **kwargs) -> ToolResult | dict[str, Any]:
+    """Error handling with parameter model validation."""
+    
+    # Parse and validate parameters using the parameter model
+    try:
+        # Convert string action to enum with validation
+        if isinstance(action, str):
+            action_enum = ComposeAction(action)  # Raises ValueError if invalid
+        else:
+            action_enum = action
+
+        # Parameter model handles all validation
+        params = DockerComposeParams(
+            action=action_enum,
+            host_id=kwargs.get("host_id", ""),
+            stack_name=kwargs.get("stack_name", ""),
+            # ... all other parameters
+        )
+        
+        # Use validated enum from parameter model
+        action = params.action
+        
+    except ValueError as e:
+        # Invalid enum value
+        valid_actions = [a.value for a in ComposeAction]
+        return {
+            "success": False,
+            "error": f"Invalid action '{action}'. Valid actions: {valid_actions}",
+            "action": str(action) if action else "unknown",
+        }
+    except ValidationError as e:
+        # Pydantic validation error
+        return {
+            "success": False,
+            "error": f"Parameter validation failed: {str(e)}",
+            "action": str(action) if action else "unknown",
         }
     except Exception as e:
-        logger.error(f"Action '{action}' failed", exc_info=True)
-        return error_response(f"Execution failed: {str(e)}")
+        # Unexpected error during validation
+        return {
+            "success": False,
+            "error": f"Parameter processing failed: {str(e)}",
+            "action": str(action) if action else "unknown",
+        }
+
+    # Delegate to service layer with proper error context
+    try:
+        return await self.stack_service.handle_action(
+            action, **params.model_dump(exclude={"action"})
+        )
+    except Exception as e:
+        logger.error(
+            "Service layer error", 
+            action=action.value, 
+            error=str(e), 
+            exc_info=True
+        )
+        return {
+            "success": False,
+            "error": f"Action '{action.value}' failed: {str(e)}",
+            "action": action.value,
+            "timestamp": datetime.now().isoformat(),
+        }
+```
+
+## Service Layer Error Handling
+
+```python
+class StackService:
+    def _build_error_response(
+        self, host_id: str, stack_name: str, action: str, error: str
+    ) -> dict[str, Any]:
+        """Build standardized error response."""
+        logger.error(
+            f"Failed to {action} stack",
+            host_id=host_id,
+            stack_name=stack_name,
+            action=action,
+            error=error,
+        )
+        return {
+            "success": False,
+            "error": error,
+            "host_id": host_id,
+            "stack_name": stack_name,
+            "action": action,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    async def deploy_stack(self, host_id: str, stack_name: str, compose_content: str, **kwargs):
+        """Deploy with comprehensive error handling."""
+        try:
+            # Validate stack name
+            if not self._validate_stack_name(stack_name):
+                return self._build_error_response(
+                    host_id, stack_name, "deploy",
+                    f"Invalid stack name: {stack_name}. Must be alphanumeric with hyphens/underscores."
+                )
+
+            # Write compose file to persistent location
+            compose_file_path = await self.compose_manager.write_compose_file(
+                host_id, stack_name, compose_content
+            )
+
+            # Deploy using persistent compose file
+            result = await self._deploy_stack_with_persistent_file(
+                host_id, stack_name, compose_file_path, environment, pull_images, recreate
+            )
+
+            return result
+
+        except (DockerCommandError, DockerContextError) as e:
+            return self._build_error_response(host_id, stack_name, "deploy", str(e))
+        except Exception as e:
+            logger.error(
+                "Unexpected deployment error", 
+                host_id=host_id, 
+                stack_name=stack_name, 
+                error=str(e)
+            )
+            return self._build_error_response(
+                host_id, stack_name, "deploy", f"Deployment failed: {e}"
+            )
 ```
 
 ---
@@ -610,7 +1538,7 @@ async def consolidated_tool(action: str, **params) -> dict:
 ## 2. Parameter Organization
 
 ```python
-@mcp.tool
+# Method registration pattern - self.app.tool(self.method_name)
 async def consolidated_tool(
     # 1. Action parameter (always first)
     action: Annotated[Literal[...], Field(description="Action to perform")],
@@ -635,7 +1563,7 @@ async def consolidated_tool(
 ## 3. Documentation Patterns
 
 ```python
-@mcp.tool
+# Method registration pattern - self.app.tool(self.method_name)
 async def domain_manager(action, ...):
     """Consolidated domain management tool.
 
@@ -799,24 +1727,30 @@ After making changes:
 - **Easier maintenance**: Centralized validation and error handling
 - **Consistent UX**: Uniform parameter patterns across actions
 
-### For Parameter Type Annotations:
-1. **Required**: `Annotated[Type, Field(description="...")]`
-2. **Optional**: `Annotated[Type, Field(default=value, description="...")] = value`
-3. **Collections**: Use `default_factory=list` or `default_factory=dict`
-4. **No Unions**: Avoid `| None` entirely
-5. **Explicit Defaults**: Always specify `default=` in Field for optional parameters
-6. **Use Enums**: For action parameters, use proper Enum classes instead of Literal types for better type safety
+### For Parameter Type Annotations (Updated):
+1. **Action Parameters**: `Annotated[str | EnumAction | None, Field(default=None, description="...")] = None`
+2. **Required Parameters**: `Annotated[Type, Field(description="...")]` (no default)
+3. **Optional Parameters**: `Annotated[Type, Field(default=value, description="...")] = value`
+4. **Union Types**: Use `Type | None` patterns for optional complex types (dict, list)
+5. **Parameter Models**: Use Pydantic models for validation and type conversion
+6. **Enum Classes**: Use proper Enum classes for actions, not Literal types
 
 ### For Documentation Format:
 - **Use bullet points**: • for main actions, - for sub-bullets
 - **Clear parameter organization**: Separate Required and Optional sections
 - **Consistent formatting**: Same format across all consolidated tools
 
-Together, these patterns create FastMCP servers that are:
-- **Token-efficient** (critical for context limits)
-- **User-friendly** (clean, discoverable interfaces)
-- **Type-safe** (proper introspection and validation)
-- **Maintainable** (consistent patterns and centralized logic)
-- **Scalable** (easy to add new actions and parameters)
+### For Implementation Architecture:
+- **Service Layer**: Business logic in service classes with handle_action() methods
+- **Parameter Models**: Pydantic models for validation and type conversion
+- **Error Handling**: Consistent dict-based error responses with success: False
+- **Enum Actions**: Type-safe action enums instead of string literals
 
-This approach is especially valuable for domain-rich APIs where you have many related operations that share common parameters and validation logic.
+Together, these patterns create FastMCP servers that are:
+- **Token-efficient** (critical for context limits) - 2.6x more efficient than individual tools
+- **User-friendly** (clean, discoverable interfaces with proper type introspection)
+- **Type-safe** (enum validation and parameter model validation)
+- **Maintainable** (service layer architecture with centralized logic)
+- **Scalable** (easy to add new actions via enums and service methods)
+
+This approach is especially valuable for domain-rich APIs like Docker management where you have many related operations that share common parameters and validation logic. The Docker MCP server demonstrates these patterns in production with 3 consolidated tools handling 27+ operations efficiently.

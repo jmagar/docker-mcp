@@ -22,6 +22,7 @@ class ErrorDetail(BaseModel):
     - title: Short, human-readable summary of the problem type
     - detail: Human-readable explanation specific to this occurrence
     - instance: URI reference that identifies the specific occurrence
+    - status: HTTP-style status code for the error
     """
 
     success: bool = Field(default=False, description="Always False for errors")
@@ -30,6 +31,7 @@ class ErrorDetail(BaseModel):
     title: str | None = Field(default=None, description="Problem type summary")
     detail: str | None = Field(default=None, description="Specific problem details")
     instance: str | None = Field(default=None, description="Problem occurrence URI")
+    status: int | None = Field(default=None, description="HTTP-style status code")
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -103,6 +105,7 @@ class DockerMCPErrorResponse:
         problem_type: str | None = None,
         detail: str | None = None,
         instance: str | None = None,
+        status: int | None = None,
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a standardized error response.
@@ -112,12 +115,13 @@ class DockerMCPErrorResponse:
             problem_type: Standard problem type key or custom type URI
             detail: Additional problem-specific details
             instance: Identifier for this specific occurrence
+            status: HTTP-style status code for the error
             context: Additional context fields (host_id, container_id, etc.)
 
         Returns:
             RFC 7807 compliant error response dictionary
         """
-        error_detail = ErrorDetail(error=error_message, detail=detail, instance=instance)
+        error_detail = ErrorDetail(error=error_message, detail=detail, instance=instance, status=status)
 
         # Add standard problem type if provided
         if problem_type and problem_type in cls.PROBLEM_TYPES:
@@ -140,6 +144,7 @@ class DockerMCPErrorResponse:
                 "title",
                 "detail",
                 "instance",
+                "status",
                 "timestamp",
             }
             filtered_context = {k: v for k, v in context.items() if k not in reserved_fields}
@@ -256,3 +261,39 @@ class DockerMCPErrorResponse:
             error_message=error_message,
             context=context or {},
         )
+
+
+def create_success_response(
+    data: Any = None,
+    message: str | None = None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create a standardized success response.
+
+    Args:
+        data: Response data payload
+        message: Optional success message
+        context: Additional context fields
+
+    Returns:
+        Standardized success response dictionary
+    """
+    response: dict[str, Any] = {
+        "success": True,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if data is not None:
+        response["data"] = data
+
+    if message:
+        response["message"] = message
+
+    if context:
+        response.update(context)
+
+    return response
+
+
+# Convenience aliases for backward compatibility
+create_error_response = DockerMCPErrorResponse.create_error
