@@ -2,7 +2,9 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import Field, computed_field, field_validator
+
+from .container import MCPModel
 
 # Import Enum types
 from .enums import ComposeAction, ContainerAction, HostAction
@@ -28,7 +30,7 @@ def _validate_enum_action(value: Any, enum_class: type) -> Any:
     return value
 
 
-class DockerHostsParams(BaseModel):
+class DockerHostsParams(MCPModel):
     """Parameters for the docker_hosts consolidated tool."""
 
     action: HostAction = Field(
@@ -84,7 +86,7 @@ class DockerHostsParams(BaseModel):
         return _validate_enum_action(v, HostAction)
 
 
-class DockerContainerParams(BaseModel):
+class DockerContainerParams(MCPModel):
     """Parameters for the docker_container consolidated tool."""
 
     action: ContainerAction = Field(..., description="Action to perform")
@@ -107,7 +109,7 @@ class DockerContainerParams(BaseModel):
         return _validate_enum_action(v, ContainerAction)
 
 
-class DockerComposeParams(BaseModel):
+class DockerComposeParams(MCPModel):
     """Parameters for the docker_compose consolidated tool."""
 
     action: ComposeAction = Field(..., description="Action to perform")

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shlex
 import subprocess
 from collections import defaultdict
 from collections.abc import Callable
@@ -108,10 +109,8 @@ class StackTools:
             if client is None:
                 return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
 
-            loop = asyncio.get_event_loop()
-
             # Get all containers and group by compose project using Docker SDK
-            containers = await loop.run_in_executor(None, lambda: client.containers.list(all=True))
+            containers = await asyncio.to_thread(client.containers.list, all=True)
 
             # Group containers by compose project
             projects = defaultdict(list)
@@ -385,24 +384,23 @@ class StackTools:
 
         ssh_cmd.append(remote_cmd)
 
-        # Debug logging
+        # Debug logging (redact potential secrets from remote command)
         logger.debug(
             "Executing SSH command",
             host_id=host_id,
-            ssh_command=" ".join(ssh_cmd),
-            remote_command=remote_cmd,
+            ssh_host=host_config.hostname,
+            compose_action=" ".join(compose_cmd),  # Safe to log
+            # Note: remote_command may contain env vars with secrets - not logged
         )
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd,
-                    check=False,
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout,
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                ssh_cmd,
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
             )
 
             if result.returncode != 0:
@@ -544,7 +542,9 @@ class StackTools:
         except Exception as e:
             return self._build_error_response(host_id, stack_name, action, str(e))
 
-    def _build_compose_args(self, action: str, options: dict[str, Any]) -> list[str] | dict[str, Any]:
+    def _build_compose_args(
+        self, action: str, options: dict[str, Any]
+    ) -> list[str] | dict[str, Any]:
         """Build compose arguments based on action and options."""
         # Get the argument builder for the action
         builders = self._get_compose_args_builders()
@@ -733,17 +733,15 @@ class StackTools:
             # Read the file content via SSH using centralized command builder
             host = self.config.hosts[host_id]
             ssh_cmd = build_ssh_command(host)
-            ssh_cmd.append(f"cat {compose_file_path}")
+            ssh_cmd.append(f"cat {shlex.quote(compose_file_path)}")
 
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    ssh_cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                ssh_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
 
             if result.returncode == 0:

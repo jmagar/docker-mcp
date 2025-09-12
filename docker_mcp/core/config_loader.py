@@ -1,6 +1,8 @@
 """Configuration management for Docker MCP server."""
 
+import asyncio
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -35,11 +37,11 @@ class CleanupSchedule(BaseModel):
 
     host_id: str
     cleanup_type: Literal["safe", "moderate"]  # Only safe and moderate for scheduling
-    frequency: str  # daily, weekly, monthly, custom
-    time: str  # HH:MM format
+    frequency: Literal["daily", "weekly", "monthly", "custom"]
+    time: str  # HH:MM (24h)
     enabled: bool = True
     log_path: str | None = None
-    created_at: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ServerConfig(BaseModel):
@@ -81,14 +83,17 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
 
     # Load user config if exists
     user_config_path = Path.home() / ".config" / "docker-mcp" / "hosts.yml"
-    _load_config_file(config, user_config_path)
+    asyncio.run(_load_config_file(config, user_config_path))
 
     # Load project config (from env var or default)
     from ..server import get_config_dir  # Import at use to avoid circular imports
 
     default_config_file = os.getenv("DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml"))
     project_config_path = Path(config_path or default_config_file)
-    _load_config_file(config, project_config_path)
+    asyncio.run(_load_config_file(config, project_config_path))
+
+    # Set the actual config file path on the config object
+    config.config_file = str(project_config_path)
 
     # Override with environment variables (highest priority)
     _apply_env_overrides(config)
@@ -96,12 +101,12 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
     return config
 
 
-def _load_config_file(config: DockerMCPConfig, config_path: Path) -> None:
+async def _load_config_file(config: DockerMCPConfig, config_path: Path) -> None:
     """Load and apply configuration from a YAML file."""
     if not config_path.exists():
         return
 
-    yaml_config = _load_yaml_config(config_path)
+    yaml_config = await _load_yaml_config(config_path)
     _apply_host_config(config, yaml_config)
     _apply_server_config(config, yaml_config)
     _apply_cleanup_schedules(config, yaml_config)
@@ -142,18 +147,51 @@ def _apply_env_overrides(config: DockerMCPConfig) -> None:
         config.server.log_level = os.getenv("LOG_LEVEL", config.server.log_level)
 
 
-def _load_yaml_config(config_path: Path) -> dict[str, Any]:
+async def _load_yaml_config(config_path: Path) -> dict[str, Any]:
     """Load YAML configuration file."""
     try:
-        with open(config_path) as f:
-            content = f.read()
+        content = await asyncio.to_thread(config_path.read_text)
 
-        # Expand environment variables
-        content = os.path.expandvars(content)
+        # Securely expand only allowed environment variables
+        content = _expand_yaml_config(content)
 
         return yaml.safe_load(content) or {}
     except Exception as e:
         raise ValueError(f"Failed to load config from {config_path}: {e}") from e
+
+
+def _expand_yaml_config(content: str) -> str:
+    """Securely expand environment variables with allowlist."""
+    import re
+
+    # Define allowed environment variables for Docker MCP config
+    allowed_env_vars = {
+        "HOME", "USER", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+        "DOCKER_HOSTS_CONFIG", "DOCKER_MCP_CONFIG_DIR",
+        "FASTMCP_HOST", "FASTMCP_PORT", "LOG_LEVEL",
+        "SSH_CONFIG_PATH", "COMPOSE_PATH", "APPDATA_PATH"
+    }
+
+    def replace_var(match):
+        var_name = match.group(1)
+        if var_name in allowed_env_vars:
+            return os.getenv(var_name, f"${{{var_name}}}")  # Keep original if not found
+        else:
+            logger.warning(f"Environment variable ${{{var_name}}} not in allowlist, skipping expansion")
+            return match.group(0)  # Return original unexpanded
+
+    def replace_if_allowed(match):
+        """Helper to conditionally replace $VAR pattern based on allowlist."""
+        if match.group(1) in allowed_env_vars:
+            return replace_var(match)
+        else:
+            return match.group(0)  # Return original unexpanded
+
+    # Replace ${VAR} and $VAR patterns with allowlist check
+    content = re.sub(r'\$\{([^}]+)\}', replace_var, content)
+    content = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', replace_if_allowed, content)
+
+    return content
 
 
 def save_config(config: DockerMCPConfig, config_path: str | None = None) -> None:
@@ -280,6 +318,12 @@ def _write_yaml_value(f, key: str, value: Any) -> None:
         f.write(f"    {key}: {value}\n")
     elif isinstance(value, list):
         f.write(f"    {key}: {yaml.dump(value, default_flow_style=True).strip()}\n")
+    elif isinstance(value, dict):
+        dumped = yaml.safe_dump(value, default_flow_style=False, sort_keys=False, indent=2).rstrip()
+        indented = "".join(f"      {line}" for line in dumped.splitlines(True))
+        f.write(f"    {key}:\n{indented}\n")
+    elif value is None:
+        f.write(f"    {key}: null\n")
 
 
 def _merge_config(base: dict[str, Any], update: dict[str, Any]) -> None:

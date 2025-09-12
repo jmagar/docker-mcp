@@ -4,7 +4,11 @@ This resource provides port mapping information using the ports:// URI scheme.
 It serves as a clean, cacheable alternative to the ports action in the docker_hosts tool.
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from docker_mcp.server import DockerMCPServer
+    from docker_mcp.services.container import ContainerService
 
 import structlog
 from fastmcp.resources.resource import FunctionResource
@@ -27,7 +31,7 @@ class PortMappingResource(FunctionResource):
     - use_cache: Use cached data (default: True)
     """
 
-    def __init__(self, container_service, server_instance):
+    def __init__(self, _container_service: "ContainerService", server_instance: "DockerMCPServer"):
         """Initialize the port mapping resource.
 
         Dependencies are captured in a closure to avoid setting attributes
@@ -66,7 +70,13 @@ class PortMappingResource(FunctionResource):
                 else:
                     data = {"success": False, "error": "Unexpected response type"}
 
-                if filter_project or filter_range or filter_protocol or scan_available or suggest_next:
+                if (
+                    filter_project
+                    or filter_range
+                    or filter_protocol
+                    or scan_available
+                    or suggest_next
+                ):
                     if isinstance(data, dict) and data.get("success"):
                         data["warning"] = "Advanced filtering parameters not yet implemented"
 
@@ -108,14 +118,12 @@ class PortMappingResource(FunctionResource):
                 }
 
         # Initialize FunctionResource with closure-based function
-        from pydantic import AnyUrl
-
         super().__init__(
             fn=_get_port_data,
-            uri=AnyUrl("ports://{host_id}"),
+            uri="ports://{host_id}",
             name="Docker Port Mappings",
             title="Port mappings for Docker hosts",
             description="Provides comprehensive port mapping information for Docker containers on a host",
             mime_type="application/json",
-            tags=["docker", "ports", "networking"],
+            tags=("docker", "ports", "networking"),
         )

@@ -2,43 +2,184 @@
 
 ## AI Prompt Template Architecture
 
-### Function-based Prompt Templates
+### Modern Type-Safe Prompt Templates (Python 3.10+)
 ```python
+from typing import Annotated, TypedDict, Literal, Any
+from pydantic import BaseModel, Field, validator
+from enum import Enum
+
+# Type-safe resource information
+class HostResources(TypedDict, total=False):
+    cpu_count: int
+    memory_total: int
+    disk_free: int
+    docker_version: str
+    compose_version: str
+
+# Enum for prompt categories
+class PromptCategory(str, Enum):
+    OPTIMIZATION = "optimization"
+    TROUBLESHOOTING = "troubleshooting" 
+    SECURITY_AUDIT = "security_audit"
+    DEPLOYMENT = "deployment"
+    MONITORING = "monitoring"
+
+# Type-safe prompt generation with validation
 def compose_optimization_prompt(
-    compose_content: str, 
-    host_id: str, 
-    host_resources: dict[str, Any] | None = None
+    compose_content: Annotated[str, Field(min_length=10, description="Docker Compose YAML content")],
+    host_id: Annotated[str, Field(min_length=1, description="Target deployment host ID")],
+    host_resources: HostResources | None = None,
+    optimization_focus: list[Literal["performance", "security", "costs", "reliability"]] | None = None
 ) -> str:
-    """Generate a prompt for optimizing Docker Compose files.
+    """Generate a type-safe prompt for optimizing Docker Compose files.
     
     Args:
-        compose_content: The Docker Compose YAML content
-        host_id: Target deployment host ID
-        host_resources: Available resources on the host (optional)
+        compose_content: The Docker Compose YAML content (validated)
+        host_id: Target deployment host ID (validated)
+        host_resources: Available resources on the host (optional, typed)
+        optimization_focus: Specific areas to focus on (type-safe)
         
     Returns:
-        Formatted optimization prompt string
+        Formatted optimization prompt string with type safety
     """
-    # Dynamic section based on available context
-    resources_info = ""
+    # Input validation
+    if not compose_content.strip():
+        raise ValueError("Compose content cannot be empty")
+    
+    # Dynamic sections with type safety
+    resources_section = ""
     if host_resources:
-        resources_info = f"""
-Available resources on {host_id}:
-- CPU cores: {host_resources.get("cpu_count", "Unknown")}
-- Memory: {host_resources.get("memory_total", "Unknown")} bytes total
+        resources_section = f"""
+**Available Resources on {host_id}:**
+- CPU cores: {host_resources.get("cpu_count", "Not specified")}
+- Memory: {format_bytes(host_resources.get("memory_total", 0)) if host_resources.get("memory_total") else "Not specified"}
+- Free disk: {format_bytes(host_resources.get("disk_free", 0)) if host_resources.get("disk_free") else "Not specified"}
+- Docker version: {host_resources.get("docker_version", "Unknown")}
 """
     
-    # Return structured prompt with context injection
-    return f"""Analyze this Docker Compose file and suggest optimizations...
+    focus_section = ""
+    if optimization_focus:
+        focus_areas = {
+            "performance": "CPU/memory efficiency, startup time, resource utilization",
+            "security": "Container security, secrets management, network isolation",
+            "costs": "Resource optimization, image size reduction, scaling efficiency", 
+            "reliability": "Health checks, restart policies, data persistence"
+        }
+        
+        focus_section = f"""
+**Optimization Focus Areas:**
+{chr(10).join(f"- **{area.title()}**: {focus_areas[area]}" for area in optimization_focus)}
+"""
     
-Docker Compose content:
+    return f"""Analyze this Docker Compose configuration and provide specific optimization recommendations for production deployment.
+
+**Docker Compose Content:**
 ```yaml
 {compose_content}
 ```
 
-Current deployment target: {host_id}
-{resources_info}
+**Deployment Context:**
+- Target host: {host_id}
+{resources_section}
+{focus_section}
+
+**Please provide comprehensive analysis including:**
+
+1. **Security Hardening**
+   - Container privilege escalation risks
+   - Network segmentation improvements  
+   - Secrets and credential management
+   - Image security best practices
+
+2. **Performance Optimization**
+   - Resource allocation tuning
+   - Container startup optimization
+   - Network performance improvements
+   - Storage and volume optimization
+
+3. **Reliability Enhancements**
+   - Health check implementations
+   - Restart policy configurations
+   - Data persistence strategies
+   - Monitoring and logging setup
+
+4. **Production Readiness**
+   - Environment-specific configurations
+   - Scaling considerations
+   - Backup and recovery procedures
+   - Maintenance and update strategies
+
+**Output Format:**
+- Provide specific configuration changes with code examples
+- Rate issues by severity (High/Medium/Low)
+- Include rationale for each recommendation
+- Suggest implementation priority order
 """
+
+# Type-safe helper functions
+def format_bytes(bytes_value: int) -> str:
+    """Format bytes to human-readable string with type safety."""
+    if bytes_value <= 0:
+        return "0 B"
+    
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if bytes_value < 1024.0:
+            return f"{bytes_value:.1f} {unit}"
+        bytes_value /= 1024.0
+    return f"{bytes_value:.1f} PB"
+
+# Generic prompt builder with type constraints
+class PromptBuilder(BaseModel):
+    """Type-safe prompt builder with validation."""
+    
+    category: PromptCategory
+    title: Annotated[str, Field(min_length=5, max_length=100)]
+    context: dict[str, Any]
+    requirements: list[str] = Field(default_factory=list)
+    format_specs: list[str] = Field(default_factory=list)
+    
+    @validator('context')
+    @classmethod
+    def validate_context_types(cls, v):
+        """Ensure context values are serializable."""
+        for key, value in v.items():
+            if not isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                raise ValueError(f"Context value for '{key}' must be JSON-serializable")
+        return v
+    
+    def build_prompt(self) -> str:
+        """Build the complete prompt with type safety."""
+        
+        # Header section
+        prompt = f"**{self.title}**\n\n"
+        
+        # Context section with safe value rendering
+        if self.context:
+            prompt += "**Context Information:**\n"
+            for key, value in self.context.items():
+                if isinstance(value, dict):
+                    prompt += f"- **{key.title()}**:\n"
+                    for sub_key, sub_value in value.items():
+                        prompt += f"  - {sub_key}: {sub_value}\n"
+                else:
+                    prompt += f"- **{key.title()}**: {value}\n"
+            prompt += "\n"
+        
+        # Requirements section
+        if self.requirements:
+            prompt += "**Analysis Requirements:**\n"
+            for i, req in enumerate(self.requirements, 1):
+                prompt += f"{i}. {req}\n"
+            prompt += "\n"
+        
+        # Format specifications
+        if self.format_specs:
+            prompt += "**Output Format:**\n"
+            for spec in self.format_specs:
+                prompt += f"- {spec}\n"
+            prompt += "\n"
+        
+        return prompt
 ```
 
 ### Prompt Dependencies

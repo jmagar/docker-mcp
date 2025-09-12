@@ -1,7 +1,7 @@
 """Log streaming MCP tools."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import docker
@@ -9,6 +9,7 @@ import structlog
 
 from ..core.config_loader import DockerMCPConfig
 from ..core.docker_context import DockerContextManager
+from ..core.error_response import DockerMCPErrorResponse, create_success_response
 from ..core.exceptions import DockerCommandError, DockerContextError
 from ..models.container import ContainerLogs, LogStreamRequest
 
@@ -21,6 +22,27 @@ class LogTools:
     def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
         self.config = config
         self.context_manager = context_manager
+
+    def _build_error_response(
+        self, host_id: str, operation: str, error_message: str, container_id: str | None = None, **context
+    ) -> dict[str, Any]:
+        """Build standardized error response with container context."""
+        base_context = {"host_id": host_id, "operation": operation}
+        if container_id:
+            base_context["container_id"] = container_id
+        # Merge additional context parameters
+        base_context.update(context)
+
+        # Determine error type based on message content
+        if "not found" in error_message.lower():
+            if container_id:
+                return DockerMCPErrorResponse.container_not_found(host_id, container_id)
+            else:
+                return DockerMCPErrorResponse.host_not_found(host_id)
+        elif "could not connect" in error_message.lower():
+            return DockerMCPErrorResponse.docker_context_error(host_id, operation, error_message)
+        else:
+            return DockerMCPErrorResponse.generic_error(error_message, base_context)
 
     async def get_container_logs(
         self,
@@ -45,17 +67,10 @@ class LogTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return {
-                    "success": False,
-                    "error": f"Could not connect to Docker on host {host_id}"
-                }
-
-            loop = asyncio.get_event_loop()
+                return self._build_error_response(host_id, "get_container_logs", f"Could not connect to Docker on host {host_id}", container_id)
 
             # Get container and retrieve logs using Docker SDK
-            container = await loop.run_in_executor(
-                None, lambda: client.containers.get(container_id)
-            )
+            container = await asyncio.to_thread(client.containers.get, container_id)
 
             # Build kwargs for logs method
             logs_kwargs = {
@@ -66,7 +81,7 @@ class LogTools:
                 logs_kwargs["since"] = since
 
             # Get logs using Docker SDK
-            logs_bytes = await loop.run_in_executor(None, lambda: container.logs(**logs_kwargs))
+            logs_bytes = await asyncio.to_thread(container.logs, **logs_kwargs)
 
             # Parse logs (logs_bytes is bytes, need to decode)
             logs_str = logs_bytes.decode("utf-8", errors="replace")
@@ -77,7 +92,7 @@ class LogTools:
                 container_id=container_id,
                 host_id=host_id,
                 logs=logs_data,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 truncated=len(logs_data) >= lines,
             )
 
@@ -88,11 +103,14 @@ class LogTools:
                 lines_returned=len(logs_data),
             )
 
-            return logs.model_dump()
+            return create_success_response(
+                data=logs.model_dump(),
+                context={"host_id": host_id, "operation": "get_container_logs", "container_id": container_id}
+            )
 
         except docker.errors.NotFound:
             logger.error("Container not found for logs", host_id=host_id, container_id=container_id)
-            return {"error": f"Container {container_id} not found"}
+            return self._build_error_response(host_id, "get_container_logs", f"Container {container_id} not found", container_id)
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error getting container logs",
@@ -100,7 +118,7 @@ class LogTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {"error": f"Failed to get logs: {str(e)}"}
+            return self._build_error_response(host_id, "get_container_logs", f"Failed to get logs: {str(e)}", container_id)
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container logs",
@@ -108,12 +126,7 @@ class LogTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {
-                "error": str(e),
-                "container_id": container_id,
-                "host_id": host_id,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "get_container_logs", str(e), container_id)
 
     async def stream_container_logs_setup(
         self,
@@ -156,7 +169,7 @@ class LogTools:
 
             # In a real implementation, this would register the stream
             # with FastMCP's streaming system and return an endpoint URL
-            stream_id = f"{host_id}_{container_id}_{datetime.now().timestamp()}"
+            stream_id = f"{host_id}_{container_id}_{datetime.now(timezone.utc).timestamp()}"
 
             logger.info(
                 "Log stream setup created",
@@ -165,19 +178,20 @@ class LogTools:
                 stream_id=stream_id,
             )
 
-            return {
-                "success": True,
-                "stream_id": stream_id,
-                "stream_endpoint": f"/streams/logs/{stream_id}",
-                "config": stream_config.model_dump(),
-                "message": f"Log stream setup for container {container_id} on host {host_id}",
-                "instructions": {
-                    "connect": "Connect to the streaming endpoint to receive real-time logs",
-                    "format": "Server-sent events (SSE)",
-                    "reconnect": "Client should handle reconnection on connection loss",
+            return create_success_response(
+                data={
+                    "stream_id": stream_id,
+                    "stream_endpoint": f"/streams/logs/{stream_id}",
+                    "config": stream_config.model_dump(),
+                    "message": f"Log stream setup for container {container_id} on host {host_id}",
+                    "instructions": {
+                        "connect": "Connect to the streaming endpoint to receive real-time logs",
+                        "format": "Server-sent events (SSE)",
+                        "reconnect": "Client should handle reconnection on connection loss",
+                    },
                 },
-                "timestamp": datetime.now().isoformat(),
-            }
+                context={"host_id": host_id, "operation": "stream_container_logs_setup", "container_id": container_id}
+            )
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
@@ -186,13 +200,7 @@ class LogTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return {
-                "success": False,
-                "error": str(e),
-                "container_id": container_id,
-                "host_id": host_id,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "stream_container_logs_setup", str(e), container_id)
 
     async def get_service_logs(
         self,
@@ -240,13 +248,15 @@ class LogTools:
                 lines_returned=len(logs_data),
             )
 
-            return {
-                "service_name": service_name,
-                "host_id": host_id,
-                "logs": logs_data,
-                "timestamp": datetime.now().isoformat(),
-                "truncated": len(logs_data) >= lines,
-            }
+            return create_success_response(
+                data={
+                    "service_name": service_name,
+                    "host_id": host_id,
+                    "logs": logs_data,
+                    "truncated": len(logs_data) >= lines,
+                },
+                context={"host_id": host_id, "operation": "get_service_logs", "service_name": service_name}
+            )
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
@@ -255,12 +265,7 @@ class LogTools:
                 service_name=service_name,
                 error=str(e),
             )
-            return {
-                "error": str(e),
-                "service_name": service_name,
-                "host_id": host_id,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._build_error_response(host_id, "get_service_logs", str(e), service_name=service_name)
 
     async def _validate_container_exists(self, host_id: str, container_id: str) -> None:
         """Validate that a container exists and is accessible."""

@@ -138,6 +138,7 @@ class StackRiskAssessment:
 
         try:
             import yaml
+
             compose_data = yaml.safe_load(compose_content)
             services = compose_data.get("services", {})
 

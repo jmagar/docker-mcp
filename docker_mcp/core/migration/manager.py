@@ -90,11 +90,13 @@ class MigrationManager:
             f"docker ps --filter 'label={DOCKER_COMPOSE_PROJECT}={shlex.quote(stack_name)}' --format '{{{{.Names}}}}'"
         ]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                check_cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            check_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
 
         if result.returncode != 0:
@@ -122,11 +124,13 @@ class MigrationManager:
             # Force stop each container
             for container in running_containers:
                 stop_cmd = ssh_cmd + [f"docker kill {shlex.quote(container)}"]
-                await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda cmd=stop_cmd: subprocess.run(  # nosec B603
-                        cmd, check=False, capture_output=True, text=True
-                    ),
+                await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    stop_cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
                 )
 
             # Wait for containers to stop and processes to fully terminate
@@ -158,11 +162,13 @@ class MigrationManager:
         mkdir_cmd = f"mkdir -p {shlex.quote(stack_dir)}"
         full_cmd = ssh_cmd + [mkdir_cmd]
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=full_cmd: subprocess.run(  # nosec B603
-                cmd, check=False, capture_output=True, text=True
-            ),
+        result = await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            full_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
 
         if result.returncode != 0:
@@ -219,7 +225,11 @@ class MigrationManager:
                 return result
             else:
                 # Handle non-dict return values
-                return {"success": False, "error": f"Invalid ZFS transfer result: {result}", "transfer_type": "zfs"}
+                return {
+                    "success": False,
+                    "error": f"Invalid ZFS transfer result: {result}",
+                    "transfer_type": "zfs",
+                }
         else:
             # Rsync transfer - direct directory synchronization (no archiving)
             if dry_run:
@@ -253,11 +263,9 @@ class MigrationManager:
 
                 except Exception as e:
                     overall_success = False
-                    transfer_results.append({
-                        "success": False,
-                        "error": str(e),
-                        "source_path": source_path
-                    })
+                    transfer_results.append(
+                        {"success": False, "error": str(e), "source_path": source_path}
+                    )
 
             final_result = {
                 "success": overall_success,
@@ -270,7 +278,9 @@ class MigrationManager:
             if not overall_success:
                 final_result["message"] = "Some rsync transfers failed"
             else:
-                final_result["message"] = f"Successfully transferred {final_result['paths_transferred']} paths via rsync"
+                final_result["message"] = (
+                    f"Successfully transferred {final_result['paths_transferred']} paths via rsync"
+                )
 
             return final_result
 

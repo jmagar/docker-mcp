@@ -5,7 +5,13 @@ information using the docker:// URI scheme.
 """
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
+    from docker_mcp.services.container import ContainerService
+    from docker_mcp.services.host import HostService
+    from docker_mcp.services.stack_service import StackService
 
 import docker
 import structlog
@@ -22,13 +28,14 @@ class DockerInfoResource(FunctionResource):
     version details, and configuration.
     """
 
-    def __init__(self, context_manager, host_service):
+    def __init__(self, context_manager: "DockerContextManager", host_service: "HostService"):
         """Initialize the Docker info resource.
 
         Args:
             context_manager: DockerContextManager for Docker command execution
             host_service: HostService for host operations
         """
+
         # Create the function with dependencies captured in closure
         async def _get_docker_info(host_id: str, **kwargs) -> dict[str, Any]:
             """Get Docker host information.
@@ -45,24 +52,27 @@ class DockerInfoResource(FunctionResource):
 
                 # Get Docker client and retrieve info/version using Docker SDK
                 client = await context_manager.get_client(host_id)
-                loop = asyncio.get_event_loop()
+                if client is None:
+                    logger.warning("No Docker client available", host_id=host_id)
+                    return {
+                        "success": False,
+                        "error": "Docker client unavailable for host",
+                        "host_id": host_id,
+                        "resource_uri": f"docker://{host_id}/info",
+                        "resource_type": "docker_info",
+                    }
 
                 # Get Docker system info and version using SDK
-                docker_info = await loop.run_in_executor(None, client.info)
-                docker_version = await loop.run_in_executor(None, client.version)
+                docker_info = await asyncio.to_thread(client.info)
+                docker_version = await asyncio.to_thread(client.version)
 
                 # Get host configuration from our host service
-                host_config = {}
                 try:
-                    hosts_data = await host_service.list_docker_hosts()
-                    if hosts_data.get("success") and "hosts" in hosts_data:
-                        for host in hosts_data["hosts"]:
-                            if host.get("host_id") == host_id:
-                                host_config = host
-                                break
+                    host = host_service.get_host_config(host_id)
+                    host_config = host.model_dump() if host else {"error": "Host not found"}
                 except Exception as e:
                     logger.debug("Failed to get host config", host_id=host_id, error=str(e))
-                    host_config = {"error": "Failed to get host configuration"}
+                    host_config = {"error": f"Failed to get host config: {str(e)}"}
 
                 result = {
                     "success": True,
@@ -100,16 +110,14 @@ class DockerInfoResource(FunctionResource):
                     "resource_type": "docker_info",
                 }
 
-        from pydantic import AnyUrl
-
         super().__init__(
             fn=_get_docker_info,
-            uri=AnyUrl("docker://{host_id}/info"),
+            uri="docker://{host_id}/info",
             name="Docker Host Information",
             title="Docker host system information and configuration",
             description="Provides comprehensive Docker host information including version, system info, and configuration details",
             mime_type="application/json",
-            tags=["docker", "system", "info"],
+            tags=("docker", "system", "info"),
         )
 
 
@@ -123,12 +131,13 @@ class DockerContainersResource(FunctionResource):
     - offset: Pagination offset (default: 0)
     """
 
-    def __init__(self, container_service):
+    def __init__(self, container_service: "ContainerService"):
         """Initialize the Docker containers resource.
 
         Args:
             container_service: ContainerService for container operations
         """
+
         # Create the function with dependency captured in closure
         async def _get_containers(host_id: str, **kwargs) -> dict[str, Any]:
             """Get Docker containers for a host.
@@ -165,6 +174,10 @@ class DockerContainersResource(FunctionResource):
                 else:
                     containers_data = result
 
+                # Ensure we have a dict to work with
+                if containers_data is None:
+                    containers_data = {}
+
                 # Add resource metadata
                 containers_data["resource_uri"] = f"docker://{host_id}/containers"
                 containers_data["resource_type"] = "containers"
@@ -193,16 +206,14 @@ class DockerContainersResource(FunctionResource):
                     "resource_type": "containers",
                 }
 
-        from pydantic import AnyUrl
-
         super().__init__(
             fn=_get_containers,
-            uri=AnyUrl("docker://{host_id}/containers"),
+            uri="docker://{host_id}/containers",
             name="Docker Container Listings",
             title="List of Docker containers on a host",
             description="Provides comprehensive container information including status, networks, volumes, and compose project details",
             mime_type="application/json",
-            tags=["docker", "containers"],
+            tags=("docker", "containers"),
         )
 
 
@@ -213,12 +224,13 @@ class DockerComposeResource(FunctionResource):
     Provides information about Docker Compose stacks and projects on a host.
     """
 
-    def __init__(self, stack_service):
+    def __init__(self, stack_service: "StackService"):
         """Initialize the Docker Compose resource.
 
         Args:
             stack_service: StackService for stack operations
         """
+
         # Create the function with dependency captured in closure
         async def _get_compose_info(host_id: str, **kwargs) -> dict[str, Any]:
             """Get Docker Compose information for a host.
@@ -241,6 +253,10 @@ class DockerComposeResource(FunctionResource):
                     compose_data = result.structured_content
                 else:
                     compose_data = result
+
+                # Ensure we have a dict to work with
+                if compose_data is None:
+                    compose_data = {}
 
                 # Enhance with additional compose-specific information
                 if compose_data.get("success"):
@@ -291,14 +307,12 @@ class DockerComposeResource(FunctionResource):
                     "resource_type": "compose",
                 }
 
-        from pydantic import AnyUrl
-
         super().__init__(
             fn=_get_compose_info,
-            uri=AnyUrl("docker://{host_id}/compose"),
+            uri="docker://{host_id}/compose",
             name="Docker Compose Information",
             title="Docker Compose stacks and projects",
             description="Provides information about Docker Compose stacks, projects, and their configurations on a host",
             mime_type="application/json",
-            tags=["docker", "compose", "stacks"],
+            tags=("docker", "compose", "stacks"),
         )

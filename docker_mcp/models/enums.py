@@ -1,6 +1,12 @@
 """Enum definitions for Docker MCP tools."""
 
 from enum import Enum
+from typing import Literal
+
+# Type aliases
+ProtocolLiteral = Literal["tcp", "udp", "sctp"]
+CleanupType = Literal["check", "safe", "moderate", "aggressive"]
+ScheduleFrequency = Literal["daily", "weekly", "monthly", "custom"]
 
 
 class HostAction(Enum):
@@ -25,7 +31,6 @@ class ContainerAction(Enum):
     START = "start"
     STOP = "stop"
     RESTART = "restart"
-    BUILD = "build"
     LOGS = "logs"
     REMOVE = "remove"  # Added for test cleanup
 
@@ -43,10 +48,7 @@ class ComposeAction(Enum):
     BUILD = "build"
     LOGS = "logs"
     MIGRATE = "migrate"
+    PULL = "pull"
 
 
-class Protocol(Enum):
-    """Network protocols for port operations."""
-
-    TCP = "TCP"
-    UDP = "UDP"
+# Removed unused Protocol enum; protocol strings are handled directly where needed.

@@ -1,23 +1,20 @@
 """Migration verification utilities for Docker stack transfers."""
 
 import asyncio
+import datetime
+import hashlib
 import json
 import shlex
 import subprocess
-import time
-from typing import Any
+from subprocess import CompletedProcess
+from typing import Any, Dict
 
 import structlog
-
-from ..exceptions import DockerMCPError
 
 logger = structlog.get_logger()
 
 
-class VerificationError(DockerMCPError):
-    """Verification operation failed."""
-
-    pass
+# Removed unused VerificationError; verifier reports issues via structured results.
 
 
 class MigrationVerifier:
@@ -25,17 +22,22 @@ class MigrationVerifier:
 
     def __init__(self):
         self.logger = logger.bind(component="migration_verifier")
+        self._checksum_algorithm_cache: Dict[str, hashlib._Hash] = {}
 
-    async def _run_remote(self, cmd: list[str], description: str = "", timeout: int = 60):
+    async def _run_remote(
+        self, cmd: list[str], description: str = "", timeout: int = 60
+    ) -> CompletedProcess[str]:
         """Run a remote SSH/Docker command with timeout and consistent annotation."""
         self.logger.debug("exec_remote", description=description, cmd=cmd)
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False, timeout=timeout
-            ),
+        return await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
         )
+
 
     async def create_source_inventory(
         self,
@@ -57,7 +59,7 @@ class MigrationVerifier:
             "total_size": 0,
             "paths": {},
             "critical_files": {},
-            "timestamp": time.time(),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         for path in volume_paths:
@@ -94,16 +96,12 @@ class MigrationVerifier:
             )
 
             # Find and checksum critical files (databases, configs)
+            # Use MD5 consistently for maximum compatibility across hosts
             critical_cmd = ssh_cmd + [
                 f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
                 f"-exec md5sum {{}} + 2>/dev/null"
             ]
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=critical_cmd: subprocess.run(  # nosec B603
-                    cmd, capture_output=True, text=True, check=False
-                ),
-            )
+            result = await self._run_remote(critical_cmd, "critical_files", timeout=300)
 
             critical_files: dict[str, str] = {}
             if result.returncode == 0 and result.stdout.strip():
@@ -112,8 +110,12 @@ class MigrationVerifier:
                         parts = line.strip().split(None, 1)
                         if len(parts) == 2:
                             checksum, filepath = parts
-                            # Store relative path
-                            rel_path = filepath.replace(f"{path}/", "")
+                            # Store relative path (handle path normalization properly)
+                            path_normalized = path.rstrip("/")
+                            if filepath.startswith(path_normalized + "/"):
+                                rel_path = filepath[len(path_normalized) + 1 :]
+                            else:
+                                rel_path = filepath
                             critical_files[rel_path] = checksum
 
             path_inventory["critical_files"] = critical_files
@@ -172,32 +174,19 @@ class MigrationVerifier:
         # Get target inventory using same methods as source
         # File count
         file_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f 2>/dev/null | wc -l"]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=file_count_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
-        )
+        result = await self._run_remote(file_count_cmd, "file_count", timeout=300)
         target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["files_found"] = target_files
 
         # Directory count
         dir_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type d 2>/dev/null | wc -l"]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=dir_count_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
-        )
+        result = await self._run_remote(dir_count_cmd, "dir_count", timeout=300)
         target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["dirs_found"] = target_dirs
 
         # Total size
         size_cmd = ssh_cmd + [f"du -sb {shlex.quote(target_path)} 2>/dev/null | cut -f1"]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=size_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
-        )
+        result = await self._run_remote(size_cmd, "size_check", timeout=300)
         target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
         verification["data_transfer"]["size_found"] = target_size
 
@@ -205,12 +194,7 @@ class MigrationVerifier:
         file_list_cmd = ssh_cmd + [
             f"find {shlex.quote(target_path)} -type f -printf '%P\\n' 2>/dev/null | sort"
         ]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=file_list_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
-        )
+        result = await self._run_remote(file_list_cmd, "file_listing", timeout=300)
         target_file_list = (
             result.stdout.strip().split("\n")
             if result.returncode == 0 and result.stdout.strip()
@@ -242,21 +226,10 @@ class MigrationVerifier:
         for rel_path, source_checksum in source_inventory["critical_files"].items():
             target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
             qfile = shlex.quote(target_file_path)
-            # Try SHA256 first, fallback to MD5
-            checksum_cmd = ssh_cmd + [
-                f"if command -v sha256sum >/dev/null 2>&1; then "
-                f"  sha256sum {qfile} 2>/dev/null | cut -d' ' -f1; "
-                f"else "
-                f"  md5sum {qfile} 2>/dev/null | cut -d' ' -f1; "
-                f"fi"
-            ]
+            # Use MD5 consistently for maximum compatibility across hosts
+            checksum_cmd = ssh_cmd + [f"md5sum {qfile} 2>/dev/null | cut -d' ' -f1"]
 
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda cmd=checksum_cmd: subprocess.run(  # nosec B603
-                    cmd, capture_output=True, text=True, check=False
-                ),
-            )
+            result = await self._run_remote(checksum_cmd, "checksum", timeout=300)
 
             if result.returncode == 0 and result.stdout.strip():
                 target_checksum = result.stdout.strip()
@@ -307,10 +280,11 @@ class MigrationVerifier:
 
         verification["issues"] = issues
         verification["data_transfer"]["success"] = len(issues) == 0
+        verification["success"] = len(issues) == 0  # Top-level success flag
 
         self.logger.info(
             "Migration completeness verification",
-            success=verification["data_transfer"]["success"],
+            success=verification["success"],
             files_match=f"{verification['data_transfer']['file_match_percentage']:.1f}%",
             size_match=f"{verification['data_transfer']['size_match_percentage']:.1f}%",
             critical_files_ok=len(critical_files_verified) - len(failed_critical),
@@ -324,15 +298,11 @@ class MigrationVerifier:
     ) -> dict[str, Any] | None:
         """Run docker inspect and return parsed container info."""
         # First, find the actual container name by project label (Docker Compose containers are named like stack-service-N)
+        filter_arg = f"label=com.docker.compose.project={shlex.quote(stack_name)}"
         find_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+            f"docker ps --filter {filter_arg} --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=find_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
-        )
+        find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
             return None
@@ -340,15 +310,8 @@ class MigrationVerifier:
         container_name = find_result.stdout.strip()
 
         # Now inspect the actual container
-        inspect_cmd = ssh_cmd + [
-            f"docker inspect {shlex.quote(container_name)} 2>/dev/null"
-        ]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=inspect_cmd: subprocess.run(  # nosec B603
-                cmd, capture_output=True, text=True, check=False
-            ),
-        )
+        inspect_cmd = ssh_cmd + [f"docker inspect {shlex.quote(container_name)} 2>/dev/null"]
+        result = await self._run_remote(inspect_cmd, "inspect_container", timeout=60)
 
         if result.returncode != 0:
             return None
@@ -373,13 +336,11 @@ class MigrationVerifier:
     async def _check_in_container_access(self, ssh_cmd: list[str], stack_name: str) -> bool:
         """Check if data is accessible inside the container."""
         # Find the actual container name first
+        filter_arg = f"label=com.docker.compose.project={shlex.quote(stack_name)}"
         find_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+            f"docker ps --filter {filter_arg} --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
-        )
+        find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
             return False
@@ -389,35 +350,27 @@ class MigrationVerifier:
         test_cmd = ssh_cmd + [
             f"docker exec {shlex.quote(container_name)} ls /usr/share/nginx/html 2>/dev/null || docker exec {shlex.quote(container_name)} ls / 2>/dev/null"
         ]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=test_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
-        )
+        result = await self._run_remote(test_cmd, "test_access", timeout=60)
         return result.returncode == 0
 
     async def _collect_startup_errors(self, ssh_cmd: list[str], stack_name: str) -> list[str]:
         """Collect startup errors from container logs."""
         # Find the actual container name first
+        filter_arg = f"label=com.docker.compose.project={shlex.quote(stack_name)}"
         find_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+            f"docker ps --filter {filter_arg} --format '{{{{.Names}}}}' | head -1"
         ]
-        find_result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=find_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
-        )
+        find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
-            return [f"Error response from daemon: No such container: {stack_name}"]  # This was the error we saw
+            return [f"No container found for stack '{stack_name}'"]
 
         container_name = find_result.stdout.strip()
 
         logs_cmd = ssh_cmd + [
             f"docker logs {shlex.quote(container_name)} --tail 50 2>&1 | grep -i error || true"
         ]
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda cmd=logs_cmd: subprocess.run(cmd, capture_output=True, text=True, check=False),  # nosec B603
-        )
+        result = await self._run_remote(logs_cmd, "collect_logs", timeout=60)
 
         if result.stdout.strip():
             error_lines = [
@@ -492,7 +445,9 @@ class MigrationVerifier:
             "issues": [],
         }
 
-    def _verify_container_state(self, verification: dict[str, Any], container_info: dict[str, Any]) -> None:
+    def _verify_container_state(
+        self, verification: dict[str, Any], container_info: dict[str, Any]
+    ) -> None:
         """Verify container running state and health status."""
         state = container_info.get("State", {})
         verification["container_integration"]["container_running"] = state.get("Running", False)
@@ -507,7 +462,7 @@ class MigrationVerifier:
         verification: dict[str, Any],
         container_info: dict[str, Any],
         expected_volumes: list[str],
-        expected_appdata_path: str
+        expected_appdata_path: str,
     ) -> None:
         """Verify container mount configuration matches expectations."""
         actual_mounts = self._collect_mounts(container_info)
@@ -562,9 +517,7 @@ class MigrationVerifier:
             issues.append("Data not accessible inside container")
 
         if integration["startup_errors"]:
-            issues.append(
-                f"Container has {len(integration['startup_errors'])} startup errors"
-            )
+            issues.append(f"Container has {len(integration['startup_errors'])} startup errors")
 
         health_status = integration["health_status"]
         if health_status and health_status not in ["healthy", "none"]:

@@ -4,7 +4,11 @@ Container Management Service
 Business logic for Docker container operations with formatted output.
 """
 
-from typing import Any
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from docker_mcp.core.docker_context import DockerContextManager
 
 import structlog
 from fastmcp.tools.tool import ToolResult
@@ -12,7 +16,6 @@ from mcp.types import TextContent
 
 from ..constants import CONTAINER_ID, HOST_ID
 from ..core.config_loader import DockerMCPConfig
-from ..core.docker_context import DockerContextManager
 from ..tools.containers import ContainerTools
 from ..utils import validate_host
 from .logs import LogsService
@@ -24,7 +27,7 @@ class ContainerService:
     def __init__(
         self,
         config: DockerMCPConfig,
-        context_manager: DockerContextManager,
+        context_manager: "DockerContextManager",
         logs_service: LogsService | None = None,
     ):
         self.config = config
@@ -33,7 +36,33 @@ class ContainerService:
         self.logs_service = logs_service or LogsService(config, context_manager)
         self.logger = structlog.get_logger()
 
-
+    def _build_error_response(
+        self,
+        host_id: str,
+        container_id: str | None,
+        action: str | None,
+        error: Exception,
+        message: str,
+    ) -> dict[str, Any]:
+        """Build a standardized error response."""
+        self.logger.error(
+            "container service error",
+            host_id=host_id,
+            container_id=container_id,
+            action=action,
+            error=str(error),
+            error_type=type(error).__name__,
+        )
+        return {
+            "success": False,
+            "message": message,
+            "host_id": host_id,
+            "container_id": container_id,
+            "action": action,
+            "error": str(error),
+            "error_type": type(error).__name__,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
     def _validate_container_safety(self, container_id: str) -> tuple[bool, str]:
         """Validate container is safe for testing operations."""
@@ -105,7 +134,7 @@ class ContainerService:
                 f"Showing {pagination['returned']} of {pagination['total']} containers",
                 "",
                 f"{'':1} {'Container':<25} {'Ports':<20} {'Project':<15}",
-                f"{'':1} {'-'*25:<25} {'-'*20:<20} {'-'*15:<15}",
+                f"{'':1} {'-' * 25:<25} {'-' * 20:<20} {'-' * 15:<15}",
             ]
 
             for container in containers:
@@ -148,7 +177,7 @@ class ContainerService:
                     host_ports.append(host_port)
             ports_display = ",".join(host_ports)
             if len(ports) > 3:
-                ports_display += f"+{len(ports)-3}"
+                ports_display += f" +{len(ports) - 3} more"
         else:
             ports_display = "-"
 
@@ -170,9 +199,7 @@ class ContainerService:
                 )
 
             # Use container tools to get container info
-            container_info = await self.container_tools.get_container_info(
-                host_id, container_id
-            )
+            container_info = await self.container_tools.get_container_info(host_id, container_id)
 
             if "error" in container_info:
                 return ToolResult(
@@ -498,26 +525,34 @@ class ContainerService:
         conflicts_found = []
 
         for mapping in port_mappings:
-            container_key = mapping['container_name']
+            container_key = mapping.get("container_name", "unknown")
             if container_key not in by_container:
                 by_container[container_key] = {
-                    'ports': [],
-                    'compose_project': mapping.get('compose_project', ''),
-                    'container_id': mapping['container_id']
+                    "ports": [],
+                    "compose_project": mapping.get("compose_project", ""),
+                    "container_id": mapping.get("container_id", ""),
                 }
 
-            # Format: host_port→container_port/protocol
-            port_str = f"{mapping['host_port']}→{mapping['container_port']}/{mapping['protocol'].lower()}"
-            if mapping['is_conflict']:
-                port_str = f"⚠️{port_str}"
-                conflicts_found.append(f"{mapping['host_port']}/{mapping['protocol']}")
+            # Format: host_port→container_port/protocol using safe defaults
+            host_port = mapping.get("host_port", "")
+            container_port = mapping.get("container_port", "")
+            protocol = mapping.get("protocol", "")
+            port_str = f"{host_port}→{container_port}/{protocol}"
 
-            by_container[container_key]['ports'].append(port_str)
+            if mapping.get("is_conflict", False):
+                port_str = f"⚠️{port_str}"
+                conflicts_found.append(f"{host_port}/{protocol}")
+
+            by_container[container_key]["ports"].append(port_str)
 
         # Display grouped by container
         for container_name, container_data in sorted(by_container.items()):
-            ports_str = ', '.join(container_data['ports'])
-            project_info = f" [{container_data['compose_project']}]" if container_data['compose_project'] else ""
+            ports_str = ", ".join(container_data["ports"])
+            project_info = (
+                f" [{container_data['compose_project']}]"
+                if container_data["compose_project"]
+                else ""
+            )
             lines.append(f"  {container_name}{project_info}: {ports_str}")
 
         # Add conflicts summary if any
@@ -614,10 +649,11 @@ class ContainerService:
                 ContainerAction.START,
                 ContainerAction.STOP,
                 ContainerAction.RESTART,
-                ContainerAction.BUILD,
                 ContainerAction.REMOVE,
             ]:
-                return await self._handle_management_actions(action, host_id, container_id, force, timeout)
+                return await self._handle_management_actions(
+                    action, host_id, container_id, force, timeout
+                )
             elif action == ContainerAction.LOGS:
                 return await self._handle_logs_action(host_id, container_id, lines, follow)
             elif action == "pull":
@@ -629,10 +665,16 @@ class ContainerService:
             self.logger.error("container service action error", action=action, error=str(e))
             return {"success": False, "error": f"Service action failed: {str(e)}", "action": action}
 
-    async def _handle_list_action(self, host_id: str, all_containers: bool, limit: int, offset: int) -> dict[str, Any]:
+    async def _handle_list_action(
+        self, host_id: str, all_containers: bool, limit: int, offset: int
+    ) -> dict[str, Any]:
         """Handle list container action."""
         if not host_id:
-            return {"success": False, "error": "host_id is required for list action"}
+            return {
+                "success": False,
+                "error": "host_id is required for list action",
+                "action": "list",
+            }
 
         # Validate pagination parameters
         if limit < 1 or limit > 1000:
@@ -646,19 +688,39 @@ class ContainerService:
     async def _handle_info_action(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Handle container info action."""
         if not host_id:
-            return {"success": False, "error": "host_id is required for info action"}
+            return {
+                "success": False,
+                "error": "host_id is required for info action",
+                "action": "info",
+            }
         if not container_id:
-            return {"success": False, "error": "container_id is required for info action"}
+            return {
+                "success": False,
+                "error": "container_id is required for info action",
+                "action": "info",
+                "host_id": host_id,
+            }
 
         info_result = await self.get_container_info(host_id, container_id)
         return self._extract_structured_content(info_result)
 
-    async def _handle_management_actions(self, action, host_id: str, container_id: str, force: bool, timeout: int) -> dict[str, Any]:
+    async def _handle_management_actions(
+        self, action, host_id: str, container_id: str, force: bool, timeout: int
+    ) -> dict[str, Any]:
         """Handle container management actions (start, stop, restart, etc.)."""
         if not host_id:
-            return {"success": False, "error": f"host_id is required for {action} action"}
+            return {
+                "success": False,
+                "error": f"host_id is required for {action} action",
+                "action": str(action),
+            }
         if not container_id:
-            return {"success": False, "error": f"container_id is required for {action} action"}
+            return {
+                "success": False,
+                "error": f"container_id is required for {action} action",
+                "action": str(action),
+                "host_id": host_id,
+            }
 
         # Validate timeout parameter
         if timeout < 1 or timeout > 300:
@@ -667,15 +729,26 @@ class ContainerService:
         result = await self.manage_container(host_id, container_id, action.value, force, timeout)
         return self._extract_structured_content(result)
 
-    async def _handle_logs_action(self, host_id: str, container_id: str, lines: int, follow: bool) -> dict[str, Any]:
+    async def _handle_logs_action(
+        self, host_id: str, container_id: str, lines: int, follow: bool
+    ) -> dict[str, Any]:
         """Handle container logs action."""
         if not host_id:
-            return {"success": False, "error": "host_id is required for logs action"}
+            return {
+                "success": False,
+                "error": "host_id is required for logs action",
+                "action": "logs",
+            }
         if not container_id:
-            return {"success": False, "error": "container_id is required for logs action"}
+            return {
+                "success": False,
+                "error": "container_id is required for logs action",
+                "action": "logs",
+                "host_id": host_id,
+            }
 
         # Validate lines parameter
-        if lines < 1 or lines > 1000:
+        if lines < 1 or lines > 10000:
             return {"success": False, "error": "lines must be between 1 and 10000"}
 
         try:
@@ -725,7 +798,10 @@ class ContainerService:
         if not host_id:
             return {"success": False, "error": "host_id is required for pull action"}
         if not container_id:
-            return {"success": False, "error": "container_id is required for pull action (image name)"}
+            return {
+                "success": False,
+                "error": "container_id is required for pull action (image name)",
+            }
 
         # For pull, container_id is actually the image name
         result = await self.pull_image(host_id, container_id)
@@ -750,4 +826,8 @@ class ContainerService:
 
     def _extract_structured_content(self, result) -> dict[str, Any]:
         """Extract structured content from ToolResult."""
-        return result.structured_content if hasattr(result, 'structured_content') and result.structured_content is not None else {"success": False, "error": "Invalid result format"}
+        return (
+            result.structured_content
+            if hasattr(result, "structured_content") and result.structured_content is not None
+            else {"success": False, "error": "Invalid result format"}
+        )

@@ -32,7 +32,7 @@ ssh_cmd = build_ssh_command(host_config)
 
 # Execute remote command
 full_cmd = ssh_cmd + ["docker", "ps", "-a"]
-result = subprocess.run(full_cmd, capture_output=True, text=True)
+result = subprocess.run(full_cmd, capture_output=True, text=True)  # nosec B603
 ```
 
 **Features:**

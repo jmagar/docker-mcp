@@ -1,8 +1,10 @@
 """Safety guards and validation for destructive operations."""
 
 import asyncio
+import shlex
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,9 @@ import structlog
 from .exceptions import DockerMCPError
 
 logger = structlog.get_logger()
+
+# Timeout for remote deletion operations
+DELETE_TIMEOUT_SECONDS = 30
 
 
 class SafetyError(DockerMCPError):
@@ -67,39 +72,57 @@ class MigrationSafety:
             # Resolve path to handle symlinks and relative paths
             resolved_path = str(Path(file_path).resolve())
 
-            # Check for forbidden paths
-            for forbidden in self.FORBIDDEN_PATHS:
-                if resolved_path == forbidden or resolved_path.startswith(forbidden + "/"):
-                    return False, f"Path '{resolved_path}' is in forbidden directory '{forbidden}'"
-
-            # Check for parent directory traversal attempts
-            if ".." in file_path:
+            # Check for parent directory traversal attempts first
+            if any(part == ".." for part in Path(file_path).parts):
                 return False, f"Path '{file_path}' contains parent directory traversal"
 
+            # SECURITY: Check for forbidden paths BEFORE safe paths to prevent bypassing
+            if forbidden_path := self._get_forbidden_path(resolved_path):
+                return False, f"Path '{resolved_path}' is in forbidden directory '{forbidden_path}'"
+
             # Check if path is in safe deletion areas
-            is_in_safe_area = False
-            for safe_path in self.SAFE_DELETE_PATHS:
-                if resolved_path.startswith(safe_path + "/"):
-                    is_in_safe_area = True
-                    break
+            if self._is_in_safe_area(resolved_path):
+                return True, f"Path in safe area: {resolved_path}"
 
-            # For files outside safe areas, require more validation
-            if not is_in_safe_area:
-                # Allow specific file extensions in any directory
-                if file_path.endswith((".tar.gz", ".tar", ".zip", ".tmp", ".temp", ".migration")):
-                    return True, f"File type allowed: {file_path}"
-
-                # Allow specific filenames
-                filename = Path(file_path).name
-                if filename in ("docker-compose.yml", "docker-compose.yaml"):
-                    return True, f"Docker compose file allowed: {file_path}"
-
-                return False, f"Path '{resolved_path}' is not in safe deletion area"
-
-            return True, f"Path validated: {resolved_path}"
+            # Validate files outside safe areas
+            return self._validate_file_outside_safe_area(file_path, resolved_path)
 
         except Exception as e:
             return False, f"Path validation error: {str(e)}"
+
+    def _is_in_safe_area(self, resolved_path: str) -> bool:
+        """Check if path is in a safe deletion area."""
+        res_path = Path(resolved_path)
+        for safe_path in self.SAFE_DELETE_PATHS:
+            safe_base = Path(safe_path).resolve()
+            if res_path.is_relative_to(safe_base) and res_path != safe_base:
+                return True
+        return False
+
+    def _get_forbidden_path(self, resolved_path: str) -> str | None:
+        """Get forbidden path if resolved path is forbidden, None otherwise."""
+        res_path = Path(resolved_path)
+        for forbidden in self.FORBIDDEN_PATHS:
+            forb_base = Path(forbidden).resolve()
+            if res_path == forb_base or res_path.is_relative_to(forb_base):
+                return str(forb_base)
+        return None
+
+    def _validate_file_outside_safe_area(
+        self, file_path: str, resolved_path: str
+    ) -> tuple[bool, str]:
+        """Validate files outside safe areas."""
+        # Use resolved path to prevent bypass via symlinks
+        resolved_name = Path(resolved_path).name
+        if resolved_name.endswith((".tar.gz", ".tar", ".zip", ".tmp", ".temp", ".migration")):
+            return True, f"File type allowed: {resolved_name}"
+
+        # Allow specific filenames
+        filename = resolved_name
+        if filename in ("docker-compose.yml", "docker-compose.yaml"):
+            return True, f"Docker compose file allowed: {resolved_name}"
+
+        return False, f"Path '{resolved_path}' is not in safe deletion area"
 
     def add_to_deletion_manifest(self, file_path: str, operation: str, reason: str) -> None:
         """Add a deletion operation to the manifest for audit trail.
@@ -113,7 +136,7 @@ class MigrationSafety:
             "path": file_path,
             "operation": operation,
             "reason": reason,
-            "timestamp": asyncio.get_event_loop().time(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "validated": False,
         }
 
@@ -133,8 +156,9 @@ class MigrationSafety:
         )
 
     def get_deletion_manifest(self) -> list[dict[str, Any]]:
-        """Get the current deletion manifest."""
-        return self.deletion_manifest.copy()
+        """Get a copy of the current deletion manifest to prevent external mutation."""
+        import copy
+        return copy.deepcopy(self.deletion_manifest)
 
     def clear_deletion_manifest(self) -> None:
         """Clear the deletion manifest."""
@@ -165,28 +189,33 @@ class MigrationSafety:
             )
             raise SafetyError(error_msg)
 
-        # Proceed with deletion
-        delete_cmd = ssh_cmd + [f"rm -f {file_path}"]
+        # Proceed with deletion with proper argument separation and path safety
+        delete_cmd = ssh_cmd + ["rm", "-f", "--", shlex.quote(file_path)]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(  # nosec B603
-                    delete_cmd, check=False, capture_output=True, text=True
-                ),
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                delete_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=DELETE_TIMEOUT_SECONDS,
             )
-
-            if result.returncode == 0:
-                self.logger.info("File deleted safely", path=file_path, reason=reason)
-                return True, f"File deleted: {file_path}"
-            else:
-                error_msg = f"Deletion failed: {result.stderr}"
-                self.logger.error("File deletion failed", path=file_path, error=result.stderr)
-                return False, error_msg
-
+        except subprocess.TimeoutExpired:
+            error_msg = f"Deletion timeout after {DELETE_TIMEOUT_SECONDS}s"
+            self.logger.error("File deletion timeout", path=file_path, timeout=DELETE_TIMEOUT_SECONDS)
+            return False, error_msg
         except Exception as e:
             error_msg = f"Deletion error: {str(e)}"
             self.logger.error("File deletion exception", path=file_path, error=str(e))
+            return False, error_msg
+
+        if result.returncode == 0:
+            self.logger.info("File deleted safely", path=file_path, reason=reason)
+            return True, f"File deleted: {file_path}"
+        else:
+            error_msg = f"Deletion failed: {result.stderr}"
+            self.logger.error("File deletion failed", path=file_path, error=result.stderr)
             return False, error_msg
 
     def validate_zfs_snapshot_deletion(self, snapshot_name: str) -> tuple[bool, str]:
@@ -247,7 +276,7 @@ class MigrationSafety:
             "safety_rate": validated_deletions / total_deletions * 100
             if total_deletions > 0
             else 100,
-            "manifest": self.deletion_manifest,
+            "manifest": self.deletion_manifest.copy(),
             "safe_paths": self.SAFE_DELETE_PATHS,
             "forbidden_paths": self.FORBIDDEN_PATHS,
         }

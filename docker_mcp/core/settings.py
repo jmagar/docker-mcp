@@ -5,55 +5,41 @@ with environment variable support for operational tuning.
 """
 
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class DockerTimeoutSettings(BaseSettings):
     """Docker operation timeout configuration."""
 
     docker_client_timeout: int = Field(
-        30,
-        alias="DOCKER_CLIENT_TIMEOUT",
-        description="Docker SDK client timeout in seconds"
+        30, alias="DOCKER_CLIENT_TIMEOUT", description="Docker SDK client timeout in seconds"
     )
 
     docker_cli_timeout: int = Field(
-        60,
-        alias="DOCKER_CLI_TIMEOUT",
-        description="Docker CLI command timeout in seconds"
+        60, alias="DOCKER_CLI_TIMEOUT", description="Docker CLI command timeout in seconds"
     )
 
     subprocess_timeout: int = Field(
-        120,
-        alias="SUBPROCESS_TIMEOUT",
-        description="General subprocess timeout in seconds"
+        120, alias="SUBPROCESS_TIMEOUT", description="General subprocess timeout in seconds"
     )
 
     archive_timeout: int = Field(
-        300,
-        alias="ARCHIVE_TIMEOUT",
-        description="Archive operations timeout in seconds"
+        300, alias="ARCHIVE_TIMEOUT", description="Archive operations timeout in seconds"
     )
 
     rsync_timeout: int = Field(
-        600,
-        alias="RSYNC_TIMEOUT",
-        description="Rsync transfer timeout in seconds"
+        600, alias="RSYNC_TIMEOUT", description="Rsync transfer timeout in seconds"
     )
 
     backup_timeout: int = Field(
-        300,
-        alias="BACKUP_TIMEOUT",
-        description="Backup operations timeout in seconds"
+        300, alias="BACKUP_TIMEOUT", description="Backup operations timeout in seconds"
     )
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
-# Global settings instance
-timeout_settings = DockerTimeoutSettings()  # type: ignore[call-arg]
+# Global settings instance (allow .env/env to override defaults)
+timeout_settings = DockerTimeoutSettings()
 
 # Timeout constants for easy import
 DOCKER_CLIENT_TIMEOUT: int = timeout_settings.docker_client_timeout

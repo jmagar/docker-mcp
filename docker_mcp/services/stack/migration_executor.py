@@ -9,6 +9,7 @@ import asyncio
 import shlex
 import subprocess
 import tempfile
+from typing import cast
 
 import structlog
 
@@ -53,10 +54,12 @@ class StackMigrationExecutor:
 
             # Read compose file
             read_cmd = ssh_cmd_source + [f"cat {shlex.quote(compose_file_path)}"]
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(read_cmd, capture_output=True, text=True, check=False),  # nosec B603
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                read_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
 
             if result.returncode != 0:
@@ -120,7 +123,11 @@ class StackMigrationExecutor:
             )
 
             if not is_valid:
-                return False, archive_path, {"error": "Archive integrity verification failed"}
+                return (
+                    False,
+                    archive_path,
+                    {"success": False, "error": "Archive integrity verification failed"},
+                )
 
             # Get archive metadata
             metadata = {
@@ -133,7 +140,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to create data archive", error=str(e))
-            return False, "", {"error": str(e)}
+            return False, "", {"success": False, "error": str(e)}
 
     async def transfer_data(
         self,
@@ -161,6 +168,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "transfer_type": "simulated",
                 "estimated_time": "5-10 minutes",
@@ -181,7 +189,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to transfer data", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def extract_archive(
         self, target_host: DockerHost, archive_path: str, target_path: str, dry_run: bool = False
@@ -202,6 +210,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "extraction_path": target_path,
                 "files_extracted": "simulated",
@@ -216,15 +225,16 @@ class StackMigrationExecutor:
 
             if success:
                 return True, {
+                    "success": True,
                     "extraction_successful": True,
                     "extraction_path": target_path,
                 }
             else:
-                return False, {"error": "Archive extraction failed"}
+                return False, {"success": False, "error": "Archive extraction failed"}
 
         except Exception as e:
             self.logger.error("Failed to extract archive", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def deploy_stack_on_target(
         self,
@@ -248,6 +258,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "deployment_simulated": True,
                 "stack_would_start": start_stack,
@@ -283,10 +294,12 @@ class StackMigrationExecutor:
                         "start_error": start_result.get("error"),
                     }
 
+                # Track container readiness status
+                container_ready = False
+
                 # Wait for containers to fully start after deployment
                 try:
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(2)  # Initial delay for deployment to settle
+                    await asyncio.sleep(2)  # Initial delay for deployment to settle
 
                     # Poll for container readiness
                     for attempt in range(10):  # Up to 10 seconds
@@ -294,41 +307,67 @@ class StackMigrationExecutor:
                         target_host = self.config.hosts[host_id]
                         ssh_cmd = build_ssh_command(target_host)
                         check_cmd = ssh_cmd + [
-                            f"docker ps --filter 'label=com.docker.compose.project={stack_name}' --format '{{{{.Names}}}}' | grep -q . && echo 'RUNNING' || echo 'NOT_READY'"
+                            "sh",
+                            "-c",
+                            (
+                                "docker ps --filter "
+                                f"'label=com.docker.compose.project={shlex.quote(stack_name)}' "
+                                "--format '{{{{.Names}}}}' | grep -q . && "
+                                "echo 'RUNNING' || echo 'NOT_READY'"
+                            ),
                         ]
 
-                        import subprocess
-                        from typing import Any, cast
+                        # typing.cast import at module level (line 10)
 
-                        def run_check_cmd() -> Any:  # Use Any to avoid mypy confusion
-                            return subprocess.run(check_cmd, capture_output=True, text=True, check=False)  # nosec B603
+                        result = cast(
+                            subprocess.CompletedProcess[str],
+                            await asyncio.to_thread(
+                                subprocess.run,  # nosec B603
+                                check_cmd,
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                                timeout=10,
+                            ),
+                        )
 
-                        result = cast(subprocess.CompletedProcess[str], await _asyncio.get_event_loop().run_in_executor(
-                            None,
-                            run_check_cmd,
-                        ))
-
-                        if result.returncode == 0 and "RUNNING" in result.stdout:
-                            self.logger.info("Container ready for verification", stack_name=stack_name, attempt=attempt+1)
+                        # Safely check if result has the expected stdout attribute and contains "RUNNING"
+                        if (result.returncode == 0 and
+                            hasattr(result, "stdout") and
+                            isinstance(result.stdout, str) and
+                            "RUNNING" in result.stdout):
+                            container_ready = True
+                            self.logger.info(
+                                "Container ready for verification",
+                                stack_name=stack_name,
+                                host_id=host_id,
+                                attempt=attempt + 1,
+                            )
                             break
 
-                        await _asyncio.sleep(1)
+                        await asyncio.sleep(1)
                     else:
-                        self.logger.warning("Container may not be fully ready for verification", stack_name=stack_name)
+                        self.logger.warning(
+                            "Container may not be fully ready for verification",
+                            stack_name=stack_name,
+                            host_id=host_id,
+                        )
 
                 except Exception as e:
                     self.logger.warning("Container readiness check failed", error=str(e))
                     # Continue anyway - verification will handle missing containers
 
             return True, {
+                "success": True,
                 "deploy_success": True,
                 "start_success": start_stack,
                 "stack_deployed": True,
+                "container_ready": container_ready,
             }
 
         except Exception as e:
             self.logger.error("Failed to deploy stack on target", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def verify_deployment(
         self,
@@ -352,6 +391,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "verification_simulated": True,
                 "data_integrity": "would_be_verified",
@@ -375,11 +415,18 @@ class StackMigrationExecutor:
                 )
 
             # Extract the actual success from nested structure
-            container_success: bool = bool(container_verification.get("container_integration", {}).get("success", False))
-            data_success: bool = bool(data_verification.get("success", False))
+            container_success: bool = bool(
+                container_verification.get("container_integration", {}).get("success", False)
+            )
+            # Handle both top-level and nested success fields
+            data_success: bool = bool(
+                data_verification.get("success")
+                or data_verification.get("data_transfer", {}).get("success", False)
+            )
             overall_success: bool = container_success and data_success
 
             return overall_success, {
+                "success": overall_success,
                 "container_integration": container_verification,
                 "data_verification": data_verification,
                 "overall_verification": overall_success,
@@ -387,7 +434,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to verify deployment", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def cleanup_source(
         self,
@@ -411,6 +458,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "cleanup_simulated": True,
                 "would_remove_compose": True,
@@ -431,10 +479,11 @@ class StackMigrationExecutor:
 
             # Remove compose file (safe operation)
             remove_cmd = ssh_cmd_source + [f"rm -f {shlex.quote(compose_path)}"]
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(remove_cmd, check=False),  # nosec B603
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                remove_cmd,
+                check=False,
+                timeout=10,
             )
 
             cleanup_results = {
@@ -467,7 +516,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to cleanup source", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def create_backup(
         self, target_host: DockerHost, target_path: str, stack_name: str, dry_run: bool = False
@@ -485,6 +534,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "backup_simulated": True,
                 "backup_path": f"simulated_backup_{stack_name}",
@@ -502,7 +552,7 @@ class StackMigrationExecutor:
 
         except Exception as e:
             self.logger.error("Failed to create backup", error=str(e))
-            return False, {"error": str(e)}
+            return False, {"success": False, "error": str(e)}
 
     async def restore_from_backup(
         self, target_host: DockerHost, backup_info: dict, dry_run: bool = False
