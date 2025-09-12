@@ -219,6 +219,8 @@ class DockerContextManager:
             "version",
             "rm",  # Added for test cleanup
             "kill",  # Added for force stop operations
+            "pause",  # Added for container pause operations
+            "unpause",  # Added for container unpause operations
         }
 
         parts = command.strip().split()

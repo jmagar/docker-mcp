@@ -48,6 +48,7 @@ class ComposeAction(Enum):
     BUILD = "build"
     LOGS = "logs"
     MIGRATE = "migrate"
+    PULL = "pull"
 
 
 # Removed unused Protocol enum; protocol strings are handled directly where needed.

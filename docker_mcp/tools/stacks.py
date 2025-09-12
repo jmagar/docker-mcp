@@ -384,12 +384,13 @@ class StackTools:
 
         ssh_cmd.append(remote_cmd)
 
-        # Debug logging
+        # Debug logging (redact potential secrets from remote command)
         logger.debug(
             "Executing SSH command",
             host_id=host_id,
-            ssh_command=" ".join(ssh_cmd),
-            remote_command=remote_cmd,
+            ssh_host=host_config.hostname,
+            compose_action=" ".join(compose_cmd),  # Safe to log
+            # Note: remote_command may contain env vars with secrets - not logged
         )
 
         try:

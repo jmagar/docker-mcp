@@ -1,11 +1,13 @@
 """Migration verification utilities for Docker stack transfers."""
 
 import asyncio
+import datetime
+import hashlib
 import json
 import shlex
 import subprocess
-import time
-from typing import Any
+from subprocess import CompletedProcess
+from typing import Any, Dict
 
 import structlog
 
@@ -20,9 +22,11 @@ class MigrationVerifier:
 
     def __init__(self):
         self.logger = logger.bind(component="migration_verifier")
-        self._checksum_algorithm_cache = {}
+        self._checksum_algorithm_cache: Dict[str, hashlib._Hash] = {}
 
-    async def _run_remote(self, cmd: list[str], description: str = "", timeout: int = 60):
+    async def _run_remote(
+        self, cmd: list[str], description: str = "", timeout: int = 60
+    ) -> CompletedProcess[str]:
         """Run a remote SSH/Docker command with timeout and consistent annotation."""
         self.logger.debug("exec_remote", description=description, cmd=cmd)
         return await asyncio.to_thread(
@@ -34,52 +38,6 @@ class MigrationVerifier:
             timeout=timeout,
         )
 
-    async def _detect_common_checksum_algorithm(self, source_host, target_host):
-        """Detect the best common checksum algorithm for both hosts."""
-        cache_key = f"{source_host.hostname}_{target_host.hostname}"
-        if cache_key in self._checksum_algorithm_cache:
-            return self._checksum_algorithm_cache[cache_key]
-
-        # Test both hosts for available algorithms
-        algorithms = ["sha256sum", "md5sum"]
-        common_algorithm = None
-
-        for algorithm in algorithms:
-            source_cmd = [
-                "ssh",
-                f"{source_host.user}@{source_host.hostname}",
-                f"command -v {algorithm} >/dev/null 2>&1 && echo 'available' || echo 'unavailable'",
-            ]
-            target_cmd = [
-                "ssh",
-                f"{target_host.user}@{target_host.hostname}",
-                f"command -v {algorithm} >/dev/null 2>&1 && echo 'available' || echo 'unavailable'",
-            ]
-
-            source_result = await self._run_remote(
-                source_cmd, f"check_{algorithm}_source", timeout=30
-            )
-            target_result = await self._run_remote(
-                target_cmd, f"check_{algorithm}_target", timeout=30
-            )
-
-            if (
-                source_result.returncode == 0
-                and "available" in source_result.stdout
-                and target_result.returncode == 0
-                and "available" in target_result.stdout
-            ):
-                common_algorithm = algorithm
-                break
-
-        # Default to md5sum if nothing else works (most universal)
-        if not common_algorithm:
-            common_algorithm = "md5sum"
-            self.logger.warning("No common checksum algorithm found, defaulting to md5sum")
-
-        self._checksum_algorithm_cache[cache_key] = common_algorithm
-        self.logger.info("Selected checksum algorithm", algorithm=common_algorithm)
-        return common_algorithm
 
     async def create_source_inventory(
         self,
@@ -101,7 +59,7 @@ class MigrationVerifier:
             "total_size": 0,
             "paths": {},
             "critical_files": {},
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.gmtime()),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         for path in volume_paths:
@@ -340,8 +298,9 @@ class MigrationVerifier:
     ) -> dict[str, Any] | None:
         """Run docker inspect and return parsed container info."""
         # First, find the actual container name by project label (Docker Compose containers are named like stack-service-N)
+        filter_arg = f"label=com.docker.compose.project={shlex.quote(stack_name)}"
         find_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+            f"docker ps --filter {filter_arg} --format '{{{{.Names}}}}' | head -1"
         ]
         find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
@@ -377,8 +336,9 @@ class MigrationVerifier:
     async def _check_in_container_access(self, ssh_cmd: list[str], stack_name: str) -> bool:
         """Check if data is accessible inside the container."""
         # Find the actual container name first
+        filter_arg = f"label=com.docker.compose.project={shlex.quote(stack_name)}"
         find_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+            f"docker ps --filter {filter_arg} --format '{{{{.Names}}}}' | head -1"
         ]
         find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
@@ -396,15 +356,14 @@ class MigrationVerifier:
     async def _collect_startup_errors(self, ssh_cmd: list[str], stack_name: str) -> list[str]:
         """Collect startup errors from container logs."""
         # Find the actual container name first
+        filter_arg = f"label=com.docker.compose.project={shlex.quote(stack_name)}"
         find_cmd = ssh_cmd + [
-            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | head -1"
+            f"docker ps --filter {filter_arg} --format '{{{{.Names}}}}' | head -1"
         ]
         find_result = await self._run_remote(find_cmd, "find_container", timeout=60)
 
         if find_result.returncode != 0 or not find_result.stdout.strip():
-            return [
-                f"Error response from daemon: No such container: {stack_name}"
-            ]  # This was the error we saw
+            return [f"No container found for stack '{stack_name}'"]
 
         container_name = find_result.stdout.strip()
 

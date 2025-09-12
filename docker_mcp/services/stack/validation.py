@@ -6,6 +6,7 @@ Handles compose syntax validation, resource checks, conflict detection, etc.
 """
 
 import asyncio
+import re
 import shlex
 import subprocess
 from typing import Any
@@ -42,6 +43,11 @@ class StackValidation:
             "services_found": 0,
             "issues": [],
         }
+
+        # Validate stack name early (format, length, reserved names)
+        if not self._validate_stack_name(stack_name, issues, details):
+            details["issues"] = issues
+            return False, issues, details
 
         try:
             # Basic YAML syntax validation
@@ -85,7 +91,7 @@ class StackValidation:
             return None
 
     def _validate_compose_structure(
-        self, compose_data: Any, issues: list[str], details: dict
+        self, compose_data: Any, issues: list[str], details: dict[str, Any]
     ) -> bool:
         """Validate basic compose file structure."""
         if not isinstance(compose_data, dict):
@@ -160,23 +166,13 @@ class StackValidation:
 
         for port_spec in ports:
             if isinstance(port_spec, str):
-                if ":" in port_spec:
-                    # Handle Docker Compose port formats: "host:container", "ip:host:container", "ip:host:container/proto"
-                    parts = port_spec.split("/")[0].split(":")  # Remove protocol suffix first
-                    try:
-                        if len(parts) == 2:
-                            int(parts[0])  # host port
-                            int(parts[1])  # container port
-                        elif len(parts) == 3:
-                            # ip:host:container format - validate host and container ports
-                            int(parts[1])  # host port
-                            int(parts[2])  # container port
-                        else:
-                            raise ValueError("Invalid port format")
-                    except (ValueError, IndexError):
-                        service_issues.append(
-                            f"Service '{service_name}': Invalid port specification '{port_spec}'"
-                        )
+                # Allow container-only form like "80" (no host port); validate others via shared parser
+                if ":" not in port_spec:
+                    continue
+                if self._parse_port_string(port_spec) is None:
+                    service_issues.append(
+                        f"Service '{service_name}': Invalid port specification '{port_spec}'"
+                    )
             elif isinstance(port_spec, dict):
                 if "target" not in port_spec:
                     service_issues.append(
@@ -218,14 +214,23 @@ class StackValidation:
             df_cmd = ssh_cmd + [
                 f"df -B1 {shlex.quote(appdata_path)} | tail -1 | awk '{{print $2,$3,$4}}'"
             ]
-            result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                df_cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    df_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                return False, f"Disk space check timed out after 30s on {host.hostname}", {
+                    "host": host.hostname,
+                    "path_checked": appdata_path,
+                    "operation": "check_disk_space",
+                    "timed_out": True,
+                    "timeout_seconds": 30,
+                }
 
             if result.returncode == 0 and result.stdout.strip():
                 total, used, available = map(int, result.stdout.strip().split())
@@ -280,14 +285,36 @@ class StackValidation:
                 check_cmd = ssh_cmd + [
                     f"which {shlex.quote(tool)} >/dev/null 2>&1 && echo 'AVAILABLE' || echo 'MISSING'"
                 ]
-                result = await asyncio.to_thread(
-                    subprocess.run,  # nosec B603
-                    check_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=30,
-                )
+                try:
+                    result = await asyncio.to_thread(
+                        subprocess.run,  # nosec B603
+                        check_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=30,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.logger.error(
+                        "Tool availability check timed out",
+                        hostname=host.hostname,
+                        tool=tool,
+                        timeout_seconds=30
+                    )
+                    # Create fallback result indicating timeout (treat as missing)
+                    result = subprocess.CompletedProcess(
+                        args=check_cmd,
+                        returncode=1,
+                        stdout="MISSING",
+                        stderr="Tool check command timed out after 30 seconds"
+                    )
+                except asyncio.CancelledError:
+                    self.logger.warning(
+                        "Tool availability check cancelled",
+                        hostname=host.hostname,
+                        tool=tool
+                    )
+                    raise
 
                 is_available = result.returncode == 0 and "AVAILABLE" in result.stdout
                 tool_status[tool] = {
@@ -367,14 +394,18 @@ class StackValidation:
             return None
 
     def _parse_port_string(self, port_spec: str) -> int | None:
-        """Parse string format ports with robust handling of complex formats.
+        """Parse string format ports and extract the published host port.
 
-        Handles formats like:
-        - 'port'
-        - 'host_port:container_port'
-        - 'ip:host_port:container_port'
-        - 'ip:host_port:container_port/proto'
-        - IPv6 formats like '[::1]:host_port:container_port'
+        Returns the host port (int) for published ports, or None for container-only ports.
+
+        Extracts host port from formats:
+        - 'host_port:container_port' -> host_port
+        - 'ip:host_port:container_port' -> host_port
+        - 'ip:host_port:container_port/proto' -> host_port
+        - '[::1]:host_port:container_port' -> host_port (IPv6)
+
+        Returns None for container-only formats:
+        - 'port' or 'container_port' -> None (no host mapping)
         """
         try:
             # Remove protocol suffix if present (e.g., /tcp, /udp)
@@ -393,8 +424,8 @@ class StackValidation:
             parts = port_spec.split(":")
 
             if len(parts) == 1:
-                # Simple format: just 'port'
-                return int(parts[0])
+                # Simple format: just 'port' (container-only port, no host mapping)
+                return None
             elif len(parts) == 2:
                 # Format: 'host_port:container_port'
                 return int(parts[0])
@@ -459,14 +490,29 @@ class StackValidation:
                 check_cmd = ssh_cmd + [
                     f"(netstat -tuln 2>/dev/null | grep ':{port} ' || ss -tuln 2>/dev/null | grep ':{port} ') && echo 'IN_USE' || echo 'AVAILABLE'"
                 ]
-                result = await asyncio.to_thread(
-                    subprocess.run,  # nosec B603
-                    check_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=30,
-                )
+                try:
+                    result = await asyncio.to_thread(
+                        subprocess.run,  # nosec B603
+                        check_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=30,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.logger.error(
+                        "Port availability check timed out",
+                        hostname=host.hostname,
+                        port=port,
+                        timeout_seconds=30
+                    )
+                    # Create fallback result indicating timeout
+                    result = subprocess.CompletedProcess(
+                        args=check_cmd,
+                        returncode=1,
+                        stdout="",
+                        stderr="Port check command timed out after 30 seconds"
+                    )
 
                 is_in_use = result.returncode == 0 and "IN_USE" in result.stdout
                 port_details[port] = {
@@ -579,14 +625,29 @@ class StackValidation:
                 check_cmd = ssh_cmd + [
                     f"docker network ls --filter name=^{shlex.quote(network_name)}$ --format '{{{{.Name}}}}' | grep -x {shlex.quote(network_name)} && echo 'CONFLICT' || echo 'AVAILABLE'"
                 ]
-                result = await asyncio.to_thread(
-                    subprocess.run,  # nosec B603
-                    check_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=30,
-                )
+                try:
+                    result = await asyncio.to_thread(
+                        subprocess.run,  # nosec B603
+                        check_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=30,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.logger.error(
+                        "Network conflict check timed out",
+                        hostname=host.hostname,
+                        network_name=network_name,
+                        timeout_seconds=30
+                    )
+                    # Create fallback result indicating timeout
+                    result = subprocess.CompletedProcess(
+                        args=check_cmd,
+                        returncode=1,
+                        stdout="",
+                        stderr="Command timed out after 30 seconds"
+                    )
 
                 has_conflict = result.returncode == 0 and "CONFLICT" in result.stdout
                 name_details[f"network_{network_name}"] = {
@@ -617,3 +678,25 @@ class StackValidation:
         }
 
         return no_conflicts, conflicting_names, details
+
+    def _validate_stack_name(self, stack_name: str, issues: list[str], details: dict) -> bool:
+        """Validate stack name format, length, and reserved names."""
+        reserved = {"docker", "compose", "system", "network", "volume"}
+        errs: list[str] = []
+
+        if len(stack_name) > 63:
+            errs.append("Stack name exceeds 63 characters.")
+
+        if not re.fullmatch(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$", stack_name or ""):
+            errs.append("Stack name must match ^[a-zA-Z0-9][a-zA-Z0-9_-]*$.")
+
+        if stack_name.lower() in reserved:
+            errs.append(f"Stack name '{stack_name}' is reserved.")
+
+        issues.extend(errs)
+        details.setdefault("validation_checks", {})["stack_name"] = {
+            "passed": len(errs) == 0,
+            "errors": errs or None,
+        }
+
+        return len(errs) == 0

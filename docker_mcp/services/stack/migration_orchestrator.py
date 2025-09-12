@@ -185,7 +185,7 @@ class StackMigrationOrchestrator:
         return source_host, target_host
 
     async def _retrieve_and_validate_compose(
-        self, source_host_id: str, stack_name: str, migration_steps: list[str], migration_data: dict
+        self, source_host_id: str, stack_name: str, migration_steps: list[str], migration_data: dict[str, Any]
     ) -> ToolResult | tuple[str, str]:
         """Retrieve and validate compose file."""
         migration_steps.append("📋 Retrieving compose configuration...")
@@ -203,9 +203,8 @@ class StackMigrationOrchestrator:
         if not is_valid:
             return self._create_error_result(f"Compose validation failed: {issues}", migration_data)
 
-        migration_steps.append(
-            f"✅ Compose file validated ({validation_details['services_found']} services)"
-        )
+        services_found = validation_details.get("services_found", "unknown")
+        migration_steps.append(f"✅ Compose file validated ({services_found} services)")
         migration_data["compose_validation"] = validation_details
         return compose_content, compose_path
 
@@ -216,7 +215,7 @@ class StackMigrationOrchestrator:
         compose_content: str,
         stack_name: str,
         migration_steps: list[str],
-        migration_data: dict,
+        migration_data: dict[str, Any],
         dry_run: bool,
     ) -> ToolResult | tuple[list[str], int]:
         """Run pre-flight checks including disk space and tool availability."""
@@ -301,7 +300,7 @@ class StackMigrationOrchestrator:
         estimated_data_size: int,
         compose_content: str,
         migration_steps: list[str],
-        migration_data: dict,
+        migration_data: dict[str, Any],
     ) -> dict[str, Any]:
         """Assess migration risks."""
         migration_steps.append("🎯 Assessing migration risks...")
@@ -365,6 +364,7 @@ class StackMigrationOrchestrator:
             target_host,
             start_target,
             migration_steps,
+            migration_data,
         )
         if isinstance(deploy_results, ToolResult):
             return deploy_results
@@ -412,7 +412,7 @@ class StackMigrationOrchestrator:
                 migration_steps.append("⚠️  Failed to stop source stack")
 
     def _prepare_path_mappings(
-        self, target_host, stack_name: str, expected_mounts: list[str]
+        self, target_host: DockerHost, stack_name: str, expected_mounts: list[str]
     ) -> tuple[dict[str, str], list[str]]:
         """Prepare path mappings and source paths for transfer."""
         source_paths = []
@@ -440,7 +440,7 @@ class StackMigrationOrchestrator:
         source_paths: list[str],
         stack_name: str,
         migration_steps: list[str],
-        migration_data: dict,
+        migration_data: dict[str, Any],
     ) -> ToolResult | dict[str, Any]:
         """Transfer data between hosts."""
         transfer_success, transfer_results = await self.executor.transfer_data(
@@ -468,6 +468,7 @@ class StackMigrationOrchestrator:
         target_host: DockerHost,
         start_target: bool,
         migration_steps: list[str],
+        migration_data: dict[str, Any],
     ) -> ToolResult | dict[str, Any]:
         """Deploy stack on target host."""
         target_appdata_path = target_host.appdata_path or "/opt/docker-appdata"
@@ -479,7 +480,7 @@ class StackMigrationOrchestrator:
             target_host_id, stack_name, updated_compose, start_target, False
         )
         if not deploy_success:
-            return self._create_error_result("Stack deployment failed", {})
+            return self._create_error_result("Stack deployment failed", migration_data)
 
         migration_steps.append("🎯 Stack deployed on target")
         return deploy_results
@@ -494,7 +495,7 @@ class StackMigrationOrchestrator:
         source_host_id: str,
         compose_path: str,
         migration_steps: list[str],
-        migration_data: dict,
+        migration_data: dict[str, Any],
     ) -> dict[str, Any]:
         """Verify deployment and cleanup source if requested."""
         # Prepare target expected mounts
@@ -533,7 +534,7 @@ class StackMigrationOrchestrator:
         risks: dict[str, Any],
         estimated_data_size: int,
         migration_steps: list[str],
-        migration_data: dict,
+        migration_data: dict[str, Any],
     ) -> None:
         """Handle dry run summary."""
         migration_steps.extend(
@@ -553,7 +554,7 @@ class StackMigrationOrchestrator:
         target_host_id: str,
         dry_run: bool,
         migration_steps: list[str],
-        migration_data: dict,
+        migration_data: dict[str, Any],
     ) -> ToolResult:
         """Create final migration result."""
         final_message = "\n".join(
@@ -565,6 +566,7 @@ class StackMigrationOrchestrator:
             ]
         )
 
+        migration_data.setdefault("success", True)
         return ToolResult(
             content=[TextContent(type="text", text=final_message)],
             structured_content=migration_data,

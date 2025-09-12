@@ -9,6 +9,7 @@ import asyncio
 import shlex
 import subprocess
 import tempfile
+from typing import cast
 
 import structlog
 
@@ -167,6 +168,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "transfer_type": "simulated",
                 "estimated_time": "5-10 minutes",
@@ -208,6 +210,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "extraction_path": target_path,
                 "files_extracted": "simulated",
@@ -222,6 +225,7 @@ class StackMigrationExecutor:
 
             if success:
                 return True, {
+                    "success": True,
                     "extraction_successful": True,
                     "extraction_path": target_path,
                 }
@@ -254,6 +258,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "deployment_simulated": True,
                 "stack_would_start": start_stack,
@@ -289,11 +294,12 @@ class StackMigrationExecutor:
                         "start_error": start_result.get("error"),
                     }
 
+                # Track container readiness status
+                container_ready = False
+
                 # Wait for containers to fully start after deployment
                 try:
-                    import asyncio as _asyncio
-
-                    await _asyncio.sleep(2)  # Initial delay for deployment to settle
+                    await asyncio.sleep(2)  # Initial delay for deployment to settle
 
                     # Poll for container readiness
                     for attempt in range(10):  # Up to 10 seconds
@@ -303,35 +309,48 @@ class StackMigrationExecutor:
                         check_cmd = ssh_cmd + [
                             "sh",
                             "-c",
-                            f"docker ps --filter 'label=com.docker.compose.project={shlex.quote(stack_name)}' --format '{{{{.Names}}}}' | grep -q . && echo 'RUNNING' || echo 'NOT_READY'",
+                            (
+                                "docker ps --filter "
+                                f"'label=com.docker.compose.project={shlex.quote(stack_name)}' "
+                                "--format '{{{{.Names}}}}' | grep -q . && "
+                                "echo 'RUNNING' || echo 'NOT_READY'"
+                            ),
                         ]
 
-                        from typing import cast
+                        # typing.cast import at module level (line 10)
 
                         result = cast(
                             subprocess.CompletedProcess[str],
-                            await _asyncio.to_thread(
+                            await asyncio.to_thread(
                                 subprocess.run,  # nosec B603
                                 check_cmd,
                                 capture_output=True,
                                 text=True,
                                 check=False,
+                                timeout=10,
                             ),
                         )
 
-                        if result.returncode == 0 and "RUNNING" in result.stdout:
+                        # Safely check if result has the expected stdout attribute and contains "RUNNING"
+                        if (result.returncode == 0 and
+                            hasattr(result, "stdout") and
+                            isinstance(result.stdout, str) and
+                            "RUNNING" in result.stdout):
+                            container_ready = True
                             self.logger.info(
                                 "Container ready for verification",
                                 stack_name=stack_name,
+                                host_id=host_id,
                                 attempt=attempt + 1,
                             )
                             break
 
-                        await _asyncio.sleep(1)
+                        await asyncio.sleep(1)
                     else:
                         self.logger.warning(
                             "Container may not be fully ready for verification",
                             stack_name=stack_name,
+                            host_id=host_id,
                         )
 
                 except Exception as e:
@@ -339,10 +358,11 @@ class StackMigrationExecutor:
                     # Continue anyway - verification will handle missing containers
 
             return True, {
+                "success": True,
                 "deploy_success": True,
                 "start_success": start_stack,
                 "stack_deployed": True,
-                "container_ready": "RUNNING" in result.stdout if "result" in locals() else False,
+                "container_ready": container_ready,
             }
 
         except Exception as e:
@@ -371,6 +391,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "verification_simulated": True,
                 "data_integrity": "would_be_verified",
@@ -397,7 +418,11 @@ class StackMigrationExecutor:
             container_success: bool = bool(
                 container_verification.get("container_integration", {}).get("success", False)
             )
-            data_success: bool = bool(data_verification.get("success", False))
+            # Handle both top-level and nested success fields
+            data_success: bool = bool(
+                data_verification.get("success")
+                or data_verification.get("data_transfer", {}).get("success", False)
+            )
             overall_success: bool = container_success and data_success
 
             return overall_success, {
@@ -433,6 +458,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "cleanup_simulated": True,
                 "would_remove_compose": True,
@@ -457,6 +483,7 @@ class StackMigrationExecutor:
                 subprocess.run,  # nosec B603
                 remove_cmd,
                 check=False,
+                timeout=10,
             )
 
             cleanup_results = {
@@ -507,6 +534,7 @@ class StackMigrationExecutor:
         """
         if dry_run:
             return True, {
+                "success": True,
                 "dry_run": True,
                 "backup_simulated": True,
                 "backup_path": f"simulated_backup_{stack_name}",

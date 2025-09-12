@@ -24,12 +24,14 @@ class LogTools:
         self.context_manager = context_manager
 
     def _build_error_response(
-        self, host_id: str, operation: str, error_message: str, container_id: str | None = None
+        self, host_id: str, operation: str, error_message: str, container_id: str | None = None, **context
     ) -> dict[str, Any]:
         """Build standardized error response with container context."""
-        context = {"host_id": host_id, "operation": operation}
+        base_context = {"host_id": host_id, "operation": operation}
         if container_id:
-            context["container_id"] = container_id
+            base_context["container_id"] = container_id
+        # Merge additional context parameters
+        base_context.update(context)
 
         # Determine error type based on message content
         if "not found" in error_message.lower():
@@ -40,7 +42,7 @@ class LogTools:
         elif "could not connect" in error_message.lower():
             return DockerMCPErrorResponse.docker_context_error(host_id, operation, error_message)
         else:
-            return DockerMCPErrorResponse.generic_error(error_message, context)
+            return DockerMCPErrorResponse.generic_error(error_message, base_context)
 
     async def get_container_logs(
         self,
@@ -263,9 +265,7 @@ class LogTools:
                 service_name=service_name,
                 error=str(e),
             )
-            error_response = self._build_error_response(host_id, "get_service_logs", str(e))
-            error_response.update({"service_name": service_name})
-            return error_response
+            return self._build_error_response(host_id, "get_service_logs", str(e), service_name=service_name)
 
     async def _validate_container_exists(self, host_id: str, container_id: str) -> None:
         """Validate that a container exists and is accessible."""

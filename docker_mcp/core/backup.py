@@ -3,7 +3,6 @@
 import asyncio
 import shlex
 import subprocess
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +15,10 @@ from .exceptions import DockerMCPError
 from .safety import MigrationSafety
 
 logger = structlog.get_logger()
+
+# Timeout constants for backup operations
+BACKUP_TIMEOUT_SECONDS = 300  # 5 minutes for backup operations
+CHECK_TIMEOUT_SECONDS = 30   # 30 seconds for status checks
 
 
 class BackupError(DockerMCPError):
@@ -52,20 +55,30 @@ class BackupManager:
         """
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_filename = f"backup_{stack_name}_{timestamp}.tar.gz"
-        temp_dir = tempfile.mkdtemp(prefix="docker_mcp_backup_")
-        backup_path = f"{temp_dir}/{backup_filename}"
+        remote_tmp_dir = "/tmp/docker_mcp_backups"  # noqa: S108 - Remote temp dir, not local
+        backup_path = f"{remote_tmp_dir}/{backup_filename}"
 
         ssh_cmd = build_ssh_command(host)
 
         # Check if source path exists
         check_cmd = ssh_cmd + [f"test -d {shlex.quote(source_path)} && echo 'EXISTS' || echo 'NOT_FOUND'"]
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            check_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                check_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Source path check timed out",
+                host_id=host.hostname,
+                source_path=source_path,
+                timeout_seconds=CHECK_TIMEOUT_SECONDS
+            )
+            raise BackupError(f"Source path check timed out after {CHECK_TIMEOUT_SECONDS} seconds") from None
 
         if "NOT_FOUND" in result.stdout:
             self.logger.info("Source path does not exist, no backup needed", path=source_path)
@@ -78,9 +91,14 @@ class BackupManager:
 
         # Create backup using tar
         backup_cmd = ssh_cmd + [
-            f"cd {Path(source_path).parent} && "
-            f"tar czf {backup_path} {Path(source_path).name} 2>/dev/null && "
-            f"echo 'BACKUP_SUCCESS' || echo 'BACKUP_FAILED'"
+            "sh",
+            "-c",
+            (
+                f"mkdir -p {shlex.quote(remote_tmp_dir)} && "
+                f"cd {shlex.quote(str(Path(source_path).parent))} && "
+                f"tar czf {shlex.quote(backup_path)} {shlex.quote(Path(source_path).name)} "
+                "2>/dev/null && echo 'BACKUP_SUCCESS' || echo 'BACKUP_FAILED'"
+            ),
         ]
 
         self.logger.info(
@@ -91,28 +109,61 @@ class BackupManager:
             reason=backup_reason,
         )
 
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            backup_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                backup_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=BACKUP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Backup operation timed out",
+                host_id=host.hostname,
+                source_path=source_path,
+                backup_path=backup_path,
+                timeout_seconds=BACKUP_TIMEOUT_SECONDS
+            )
+            # Try to clean up partial backup
+            cleanup_cmd = ssh_cmd + ["rm", "-f", shlex.quote(backup_path)]
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    cleanup_cmd,
+                    capture_output=True,
+                    check=False,
+                    timeout=CHECK_TIMEOUT_SECONDS,
+                )
+            except Exception as cleanup_err:
+                logger.warning("Failed to cleanup partial backup", error=str(cleanup_err))
+            raise BackupError(f"Backup operation timed out after {BACKUP_TIMEOUT_SECONDS} seconds") from None
 
         if "BACKUP_FAILED" in result.stdout or result.returncode != 0:
             raise BackupError(f"Failed to create backup: {result.stderr}")
 
         # Get backup size
         size_cmd = ssh_cmd + [f"stat -c%s {shlex.quote(backup_path)} 2>/dev/null || echo '0'"]
-        size_result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            size_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        backup_size = int(size_result.stdout.strip()) if size_result.stdout.strip().isdigit() else 0
+        try:
+            size_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                size_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Backup size check timed out",
+                host_id=host.hostname,
+                backup_path=backup_path,
+                timeout_seconds=CHECK_TIMEOUT_SECONDS
+            )
+            backup_size = 0  # Default to 0 if we can't check size
+        else:
+            backup_size = int(size_result.stdout.strip()) if size_result.stdout.strip().isdigit() else 0
 
         # Create backup record
         backup_info = {
@@ -165,7 +216,7 @@ class BackupManager:
         ssh_cmd = build_ssh_command(host)
 
         # Create ZFS snapshot
-        snap_cmd = ssh_cmd + [f"zfs snapshot {full_snapshot}"]
+        snap_cmd = ssh_cmd + ["zfs", "snapshot", shlex.quote(full_snapshot)]
 
         self.logger.info(
             "Creating ZFS backup snapshot",
@@ -175,30 +226,51 @@ class BackupManager:
             reason=backup_reason,
         )
 
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            snap_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                snap_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "ZFS snapshot creation timed out",
+                host_id=host.hostname,
+                dataset=dataset,
+                snapshot=full_snapshot,
+                timeout_seconds=CHECK_TIMEOUT_SECONDS
+            )
+            raise BackupError(f"ZFS snapshot creation timed out after {CHECK_TIMEOUT_SECONDS} seconds") from None
 
         if result.returncode != 0:
             raise BackupError(f"Failed to create ZFS backup snapshot: {result.stderr}")
 
         # Get snapshot size
-        size_cmd = ssh_cmd + [f"zfs list -H -o used {full_snapshot} 2>/dev/null || echo '0'"]
-        size_result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            size_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        # Parse ZFS size format (e.g., "1.2G", "512M", "4K")
-        size_str = size_result.stdout.strip()
-        backup_size = self._parse_zfs_size(size_str)
+        size_cmd = ssh_cmd + ["sh", "-c", f"zfs list -H -o used {shlex.quote(full_snapshot)} 2>/dev/null || echo '0'"]
+        try:
+            size_result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                size_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "ZFS snapshot size check timed out",
+                host_id=host.hostname,
+                snapshot=full_snapshot,
+                timeout_seconds=CHECK_TIMEOUT_SECONDS
+            )
+            backup_size = 0  # Default to 0 if we can't check size
+        else:
+            # Parse ZFS size format (e.g., "1.2G", "512M", "4K")
+            size_str = size_result.stdout.strip()
+            backup_size = self._parse_zfs_size(size_str)
 
         # Create backup record
         backup_info = {
@@ -251,10 +323,14 @@ class BackupManager:
 
         # Remove current directory and restore from backup
         restore_cmd = ssh_cmd + [
-            f"rm -rf {source_path} && "
-            f"cd {Path(source_path).parent} && "
-            f"tar xzf {backup_path} && "
-            f"echo 'RESTORE_SUCCESS' || echo 'RESTORE_FAILED'"
+            "sh",
+            "-c",
+            (
+                f"rm -rf {shlex.quote(source_path)} && "
+                f"cd {shlex.quote(str(Path(source_path).parent))} && "
+                f"tar xzf {shlex.quote(backup_path)} && "
+                f"echo 'RESTORE_SUCCESS' || echo 'RESTORE_FAILED'"
+            ),
         ]
 
         self.logger.info(
@@ -264,13 +340,24 @@ class BackupManager:
             host=host.hostname,
         )
 
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            restore_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                restore_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=BACKUP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "Backup restore operation timed out",
+                host_id=host.hostname,
+                backup_path=backup_path,
+                source_path=source_path,
+                timeout_seconds=BACKUP_TIMEOUT_SECONDS
+            )
+            raise BackupError(f"Backup restore operation timed out after {BACKUP_TIMEOUT_SECONDS} seconds") from None
 
         if "RESTORE_FAILED" in result.stdout or result.returncode != 0:
             return False, f"Failed to restore backup: {result.stderr}"
@@ -298,7 +385,7 @@ class BackupManager:
         ssh_cmd = build_ssh_command(host)
 
         # Rollback to snapshot
-        rollback_cmd = ssh_cmd + [f"zfs rollback {snapshot_name}"]
+        rollback_cmd = ssh_cmd + ["zfs", "rollback", shlex.quote(snapshot_name)]
 
         self.logger.info(
             "Rolling back ZFS dataset to backup snapshot",
@@ -307,13 +394,24 @@ class BackupManager:
             host=host.hostname,
         )
 
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            rollback_cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                rollback_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "ZFS rollback operation timed out",
+                host_id=host.hostname,
+                snapshot=snapshot_name,
+                dataset=dataset,
+                timeout_seconds=CHECK_TIMEOUT_SECONDS
+            )
+            return False, f"ZFS rollback operation timed out after {CHECK_TIMEOUT_SECONDS} seconds"
 
         if result.returncode != 0:
             return False, f"Failed to rollback ZFS dataset: {result.stderr}"

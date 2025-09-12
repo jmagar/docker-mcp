@@ -6,13 +6,17 @@ Business logic for Docker cleanup and disk usage operations.
 
 import asyncio
 import re
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
 
 from ..core.config_loader import DockerHost, DockerMCPConfig
 from ..utils import build_ssh_command, format_size, validate_host
+
+# Constants
+TOP_CANDIDATES = 10
 
 
 class CleanupService:
@@ -256,7 +260,8 @@ class CleanupService:
         moderate_result["cleanup_type"] = "aggressive"
         moderate_result["mode"] = "aggressive"
         moderate_result["message"] = (
-            "⚠️  AGGRESSIVE cleanup completed - removed unused containers, networks, build cache, images, and volumes"
+            "⚠️  AGGRESSIVE cleanup completed - removed unused containers, networks, "
+            "build cache, images, and volumes"
         )
 
         return moderate_result
@@ -544,7 +549,9 @@ class CleanupService:
             elif section == "containers":
                 self._parse_containers_list_line(parts, result)
         except (ValueError, IndexError) as e:
-            self.logger.debug("Skipping malformed docker df line", line=line, error=str(e))
+            self.logger.debug(
+                "Skipping malformed docker df line", section=section, line=line, error=str(e)
+            )
             pass
 
     def _parse_images_list_line(self, parts: list[str], images: list[dict[str, Any]]) -> None:
@@ -628,10 +635,10 @@ class CleanupService:
             result["container_stats"]["total_size_bytes"]
         )
 
-        # Sort cleanup candidates by size and limit to top 10
+        # Sort cleanup candidates by size and limit to top candidates
         result["cleanup_candidates"] = sorted(
             result["cleanup_candidates"], key=lambda x: x.get("size_bytes", 0), reverse=True
-        )[:10]
+        )[:TOP_CANDIDATES]
 
     def _analyze_cleanup_potential(self, df_output: str) -> dict[str, str]:
         """Analyze potential cleanup from docker system df output."""
@@ -683,29 +690,34 @@ class CleanupService:
         unit = match.group(2) or "B"
 
         # Convert to bytes - handle both SI (1000-based) and IEC (1024-based) units
-        # IEC binary prefixes (KiB, MiB, GiB) use 1024 multipliers
-        # SI decimal prefixes (kB, MB, GB) typically use 1000 multipliers
-        # Docker often uses inconsistent formats, so we support both
-        if unit.endswith('IB') or unit in ['KB', 'MB', 'GB', 'TB']:  # Default to IEC for Docker compatibility
-            # Binary/IEC units (base-1024)
+        # IEC binary prefixes (KiB, MiB, GiB, TiB, PiB) use 1024 multipliers
+        # SI decimal prefixes (KB, MB, GB, TB, PB) use 1000 multipliers
+        unit_upper = unit.upper()
+
+        if unit.endswith('IB') or unit_upper in ['KIB', 'MIB', 'GIB', 'TIB', 'PIB']:
+            # Binary/IEC units (base-1024) - only explicit IEC suffixes
             multipliers = {
-                "B": 1, "KB": 1024, "KIB": 1024,
-                "MB": 1024**2, "MIB": 1024**2,
-                "GB": 1024**3, "GIB": 1024**3,
-                "TB": 1024**4, "TIB": 1024**4,
-                "PB": 1024**5, "PIB": 1024**5
+                "KIB": 1024, "MIB": 1024**2, "GIB": 1024**3,
+                "TIB": 1024**4, "PIB": 1024**5, "B": 1
             }
         else:
-            # Decimal/SI units (base-1000) for things like 'kB' (lowercase k)
+            # Decimal/SI units (base-1000) - KB/MB/GB/TB and variants use 1000-based
             multipliers = {
-                "B": 1, "KB": 1000, "kB": 1000,
-                "MB": 1000**2, "mB": 1000**2,
-                "GB": 1000**3, "gB": 1000**3,
-                "TB": 1000**4, "tB": 1000**4,
-                "PB": 1000**5, "pB": 1000**5
+                "B": 1,
+                "KB": 1000, "kB": 1000, "Kb": 1000, "kb": 1000,
+                "MB": 1000**2, "mB": 1000**2, "Mb": 1000**2, "mb": 1000**2,
+                "GB": 1000**3, "gB": 1000**3, "Gb": 1000**3, "gb": 1000**3,
+                "TB": 1000**4, "tB": 1000**4, "Tb": 1000**4, "tb": 1000**4,
+                "PB": 1000**5, "pB": 1000**5, "Pb": 1000**5, "pb": 1000**5
             }
 
-        return int(value * multipliers.get(unit, 1))
+        # Use case-insensitive lookup for IEC units, exact match for decimal variants
+        if unit.endswith('IB') or unit_upper in ['KIB', 'MIB', 'GIB', 'TIB', 'PIB']:
+            multiplier = multipliers.get(unit_upper, 1)
+        else:
+            multiplier = multipliers.get(unit, 1)
+
+        return int(value * multiplier)
 
     def _generate_cleanup_recommendations(self, summary: dict, detailed: dict) -> list[str]:
         """Generate actionable cleanup recommendations based on disk usage."""
@@ -1008,11 +1020,8 @@ class CleanupService:
         if not is_valid:
             return {"success": False, "error": error_msg}
 
-        # Generate schedule ID with timestamp to avoid collisions
-        import time
-
-        timestamp = int(time.time())
-        schedule_id = f"{host_id}_{cleanup_type}_{schedule_frequency}_{timestamp}"
+        # Generate schedule ID including time to avoid collisions
+        schedule_id = f"{host_id}_{cleanup_type}_{schedule_frequency}_{schedule_time}"
 
         # Check if schedule already exists
         if schedule_id in self.config.cleanup_schedules:
@@ -1035,7 +1044,7 @@ class CleanupService:
             frequency=cast(Literal["daily", "weekly", "monthly", "custom"], schedule_frequency),
             time=schedule_time,
             enabled=True,
-            created_at=datetime.now(datetime.timezone.utc),
+            created_at=datetime.now(timezone.utc),
         )
 
         # Add to configuration

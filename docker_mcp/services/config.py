@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
+    from docker_mcp.core.ssh_config_parser import SSHConfigEntry
 
 import structlog
 from fastmcp.tools.tool import ToolResult
@@ -119,19 +120,74 @@ class ConfigService:
             )
 
     async def _perform_discovery(self, hosts_to_check: list[str]) -> list[dict[str, Any]]:
-        """Perform compose path discovery for specified hosts."""
+        """Perform compose path discovery for specified hosts with concurrency."""
+        enabled_hosts = [
+            host_id for host_id in hosts_to_check 
+            if self.config.hosts[host_id].enabled
+        ]
+        
+        if not enabled_hosts:
+            return []
+        
+        self.logger.info(
+            "Starting compose discovery", 
+            total_hosts=len(enabled_hosts),
+            hosts=enabled_hosts
+        )
+        
+        # Run discovery operations concurrently
+        async def discover_single_host(host_id: str) -> dict[str, Any]:
+            self.logger.info("Discovering compose locations", host_id=host_id)
+            return await self.compose_manager.discover_compose_locations(host_id)
+        
+        # Run discovery operations concurrently with error handling
+        tasks = []
         discovery_results = []
-
-        for current_host_id in hosts_to_check:
-            if not self.config.hosts[current_host_id].enabled:
-                continue
-
-            self.logger.info("Discovering compose locations", host_id=current_host_id)
-            discovery_result = await self.compose_manager.discover_compose_locations(
-                current_host_id
+        
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tasks = [
+                    tg.create_task(discover_single_host(host_id))
+                    for host_id in enabled_hosts
+                ]
+        except* Exception as eg:
+            # Handle partial failures - collect successful results
+            self.logger.warning(
+                "Some discovery operations failed",
+                total_hosts=len(enabled_hosts),
+                error_count=len(eg.exceptions)
             )
-            discovery_results.append(discovery_result)
-
+        
+        # Collect results from completed tasks
+        failed_count = 0
+        for i, task in enumerate(tasks):
+            host_id = enabled_hosts[i]
+            try:
+                if task.done() and not task.cancelled():
+                    result = await task
+                    discovery_results.append(result)
+                else:
+                    failed_count += 1
+                    self.logger.error(
+                        "Discovery task not completed",
+                        host_id=host_id
+                    )
+            except Exception as e:
+                failed_count += 1
+                self.logger.error(
+                    "Discovery failed for host",
+                    host_id=host_id,
+                    error=str(e)
+                )
+        
+        if failed_count > 0:
+            self.logger.warning(
+                "Discovery completed with some failures",
+                successful=len(discovery_results),
+                failed=failed_count,
+                total=len(enabled_hosts)
+            )
+        
         return discovery_results
 
     def _format_discovery_results(
@@ -276,7 +332,7 @@ class ConfigService:
             ssh_parser = SSHConfigParser(ssh_config_path)
 
             # Validate SSH config file
-            is_valid, status_message = ssh_parser.validate_config_file()
+            is_valid, status_message = await asyncio.to_thread(ssh_parser.validate_config_file)
             if not is_valid:
                 return ToolResult(
                     content=[
@@ -286,7 +342,7 @@ class ConfigService:
                 )
 
             # Get importable hosts
-            importable_hosts = ssh_parser.get_importable_hosts()
+            importable_hosts = await asyncio.to_thread(ssh_parser.get_importable_hosts)
             if not importable_hosts:
                 return ToolResult(
                     content=[
@@ -351,7 +407,7 @@ class ConfigService:
                 structured_content={"success": False, "error": str(e)},
             )
 
-    def _show_host_selection(self, importable_hosts: list) -> ToolResult:
+    def _show_host_selection(self, importable_hosts: list["SSHConfigEntry"]) -> ToolResult:
         """Show available hosts for selection."""
         summary_lines = [
             "SSH Config Import - Host Selection",
@@ -410,7 +466,9 @@ class ConfigService:
             },
         )
 
-    def _fuzzy_match_host(self, query: str, importable_hosts: list) -> tuple[Any, float] | None:
+    def _fuzzy_match_host(
+        self, query: str, importable_hosts: list["SSHConfigEntry"]
+    ) -> tuple[Any, float] | None:
         """Find best matching host using fuzzy string matching.
 
         Args:
@@ -455,8 +513,8 @@ class ConfigService:
         return (best_match, best_score) if best_match else None
 
     def _parse_host_selection(
-        self, selected_hosts: str, importable_hosts: list
-    ) -> list | ToolResult:
+        self, selected_hosts: str, importable_hosts: list["SSHConfigEntry"]
+    ) -> list["SSHConfigEntry"] | ToolResult:
         """Parse host selection string and return hosts to import.
 
         Supports multiple formats:
@@ -494,8 +552,8 @@ class ConfigService:
         )
 
     def _process_selection_items(
-        self, selection_items: list[str], importable_hosts: list
-    ) -> tuple[list, list[str]]:
+        self, selection_items: list[str], importable_hosts: list["SSHConfigEntry"]
+    ) -> tuple[list["SSHConfigEntry"], list[str]]:
         """Process each selection item and return hosts and errors."""
         hosts_to_import = []
         errors = []
@@ -510,8 +568,8 @@ class ConfigService:
         return hosts_to_import, errors
 
     def _process_single_selection_item(
-        self, item: str, importable_hosts: list
-    ) -> tuple[Any, str | None]:
+        self, item: str, importable_hosts: list["SSHConfigEntry"]
+    ) -> tuple["SSHConfigEntry | None", str | None]:
         """Process a single selection item and return host and optional error."""
         # Try to parse as numeric index first
         try:
@@ -541,7 +599,9 @@ class ConfigService:
         else:
             return None, f"No match found for '{item}'"
 
-    def _create_selection_error(self, errors: list[str], importable_hosts: list) -> ToolResult:
+    def _create_selection_error(
+        self, errors: list[str], importable_hosts: list["SSHConfigEntry"]
+    ) -> ToolResult:
         """Create error result for selection errors."""
         error_msg = "Selection errors: " + "; ".join(errors)
         available_names = [host.name for host in importable_hosts]
@@ -559,7 +619,7 @@ class ConfigService:
             },
         )
 
-    def _remove_duplicate_hosts(self, hosts_to_import: list) -> list:
+    def _remove_duplicate_hosts(self, hosts_to_import: list["SSHConfigEntry"]) -> list["SSHConfigEntry"]:
         """Remove duplicate hosts while preserving order."""
         unique_hosts = []
         seen_names = set()
@@ -667,7 +727,7 @@ class ConfigService:
 
         summary_lines.extend(
             [
-                "Configuration saved to hosts.yml and hot-reloaded.",
+                "Configuration saved to hosts.yml.",
                 "You can now use these hosts with deploy_stack and other tools.",
             ]
         )

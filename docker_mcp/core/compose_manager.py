@@ -11,6 +11,7 @@ import docker
 import structlog
 
 from ..constants import DOCKER_COMPOSE_CONFIG_FILES, DOCKER_COMPOSE_PROJECT
+from ..utils import build_ssh_command
 from .config_loader import DockerMCPConfig
 from .docker_context import DockerContextManager
 
@@ -384,32 +385,11 @@ class ComposeManager:
             temp_local_path = temp_file.name
 
         try:
-            # Build SSH command to create directory and copy file
-            ssh_host = f"{host_config.user}@{host_config.hostname}"
-            ssh_cmd_base = ["ssh"]
-
-            # Add port if not default
-            if host_config.port != 22:
-                ssh_cmd_base.extend(["-p", str(host_config.port)])
-
-            # Add identity file if specified
-            if host_config.identity_file:
-                ssh_cmd_base.extend(["-i", host_config.identity_file])
-
-            # Add common SSH options for automation
-            ssh_cmd_base.extend(
-                [
-                    "-o",
-                    "StrictHostKeyChecking=no",
-                    "-o",
-                    "UserKnownHostsFile=/dev/null",
-                    "-o",
-                    "LogLevel=ERROR",
-                ]
-            )
+            # Build SSH command using the helper for directory creation
+            ssh_cmd_base = build_ssh_command(host_config)
 
             # First, create the directory on remote host
-            mkdir_cmd = ssh_cmd_base + [ssh_host, f"mkdir -p {shlex.quote(stack_dir)}"]
+            mkdir_cmd = ssh_cmd_base + [f"mkdir -p {shlex.quote(stack_dir)}"]
 
             logger.debug("Creating remote directory", host_id=host_id, stack_dir=stack_dir)
 
@@ -449,6 +429,7 @@ class ComposeManager:
             )
 
             # Add source and destination
+            ssh_host = f"{host_config.user}@{host_config.hostname}"
             scp_cmd.extend([temp_local_path, f"{ssh_host}:{compose_file_path}"])
 
             logger.debug(
@@ -511,32 +492,9 @@ class ComposeManager:
             if not host_config:
                 return False
 
-            # Build SSH command to check if file exists
-            ssh_host = f"{host_config.user}@{host_config.hostname}"
-            ssh_cmd = ["ssh"]
-
-            # Add port if not default
-            if host_config.port != 22:
-                ssh_cmd.extend(["-p", str(host_config.port)])
-
-            # Add identity file if specified
-            if host_config.identity_file:
-                ssh_cmd.extend(["-i", host_config.identity_file])
-
-            # Add common SSH options for automation
-            ssh_cmd.extend(
-                [
-                    "-o",
-                    "StrictHostKeyChecking=no",
-                    "-o",
-                    "UserKnownHostsFile=/dev/null",
-                    "-o",
-                    "LogLevel=ERROR",
-                ]
-            )
-
-            # Add the test command
-            ssh_cmd.extend([ssh_host, f"test -f {shlex.quote(file_path)}"])
+            # Build SSH command using the helper and append test command
+            ssh_cmd = build_ssh_command(host_config)
+            ssh_cmd.append(f"test -f {shlex.quote(file_path)}")
 
             # Execute the command
             result = await asyncio.to_thread(
@@ -628,32 +586,9 @@ class ComposeManager:
 
             compose_file_path = await self.get_compose_file_path(host_id, stack_name)
 
-            # Build SSH command to check if file exists
-            ssh_host = f"{host_config.user}@{host_config.hostname}"
-            ssh_cmd = ["ssh"]
-
-            # Add port if not default
-            if host_config.port != 22:
-                ssh_cmd.extend(["-p", str(host_config.port)])
-
-            # Add identity file if specified
-            if host_config.identity_file:
-                ssh_cmd.extend(["-i", host_config.identity_file])
-
-            # Add common SSH options for automation
-            ssh_cmd.extend(
-                [
-                    "-o",
-                    "StrictHostKeyChecking=no",
-                    "-o",
-                    "UserKnownHostsFile=/dev/null",
-                    "-o",
-                    "LogLevel=ERROR",
-                ]
-            )
-
-            # Add the test command
-            ssh_cmd.extend([ssh_host, f"test -f {shlex.quote(compose_file_path)}"])
+            # Build SSH command using the helper and append test command
+            ssh_cmd = build_ssh_command(host_config)
+            ssh_cmd.append(f"test -f {shlex.quote(compose_file_path)}")
 
             # Execute the command
             result = await asyncio.to_thread(

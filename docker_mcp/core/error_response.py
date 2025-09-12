@@ -6,6 +6,7 @@ Problem Details for HTTP APIs standard, adapted for MCP tool responses.
 
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 from pydantic import BaseModel, Field
 
@@ -166,6 +167,7 @@ class DockerMCPErrorResponse:
             problem_type="host-not-found",
             detail=f"The specified host '{host_id}' is not configured. Check your hosts.yml configuration.",
             instance=f"/hosts/{host_id}",
+            status=404,
             context=context,
         )
 
@@ -177,6 +179,7 @@ class DockerMCPErrorResponse:
             problem_type="docker-context-error",
             detail=f"Failed to {operation} Docker context for host '{host_id}': {cause}",
             instance=f"/hosts/{host_id}/docker-context",
+            status=502,
             context={"host_id": host_id, "operation": operation, "cause": cause},
         )
 
@@ -189,7 +192,8 @@ class DockerMCPErrorResponse:
             error_message=f"Docker command failed with exit code {exit_code}",
             problem_type="docker-command-error",
             detail=f"Command '{command}' failed on host '{host_id}': {stderr}",
-            instance=f"/hosts/{host_id}/docker-commands/{command}",
+            instance=f"/hosts/{host_id}/docker-commands/{quote(command, safe='')}",
+            status=502,
             context={
                 "host_id": host_id,
                 "command": command,
@@ -206,6 +210,7 @@ class DockerMCPErrorResponse:
             problem_type="container-not-found",
             detail="The specified container does not exist or is not accessible.",
             instance=f"/hosts/{host_id}/containers/{container_id}",
+            status=404,
             context={"host_id": host_id, "container_id": container_id},
         )
 
@@ -217,6 +222,7 @@ class DockerMCPErrorResponse:
             problem_type="stack-not-found",
             detail="The specified Docker Compose stack does not exist.",
             instance=f"/hosts/{host_id}/stacks/{stack_name}",
+            status=404,
             context={"host_id": host_id, "stack_name": stack_name},
         )
 
@@ -228,6 +234,7 @@ class DockerMCPErrorResponse:
             problem_type="validation-error",
             detail=f"The value '{value}' for field '{field}' is invalid: {reason}",
             instance=f"/validation/{field}",
+            status=400,
             context={"field": field, "value": str(value), "reason": reason},
         )
 
@@ -241,6 +248,7 @@ class DockerMCPErrorResponse:
             problem_type="migration-error",
             detail=f"Stack '{stack_name}' migration from '{source_host}' to '{target_host}' failed",
             instance=f"/migrations/{source_host}/{target_host}/{stack_name}",
+            status=500,
             context={
                 "source_host": source_host,
                 "target_host": target_host,

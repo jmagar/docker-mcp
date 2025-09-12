@@ -152,7 +152,7 @@ def is_docker_host_config(obj: Any) -> TypeGuard[DockerHost]:
     return (
         hasattr(obj, 'hostname') and isinstance(obj.hostname, str) and
         hasattr(obj, 'user') and isinstance(obj.user, str) and
-        hasattr(obj, 'ssh_port') and isinstance(obj.ssh_port, int)
+        hasattr(obj, 'port') and isinstance(obj.port, int)
     )
 
 # Validation with Result pattern (modern error handling)

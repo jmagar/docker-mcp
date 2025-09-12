@@ -1,5 +1,6 @@
 """Configuration management for Docker MCP server."""
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -82,14 +83,14 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
 
     # Load user config if exists
     user_config_path = Path.home() / ".config" / "docker-mcp" / "hosts.yml"
-    _load_config_file(config, user_config_path)
+    asyncio.run(_load_config_file(config, user_config_path))
 
     # Load project config (from env var or default)
     from ..server import get_config_dir  # Import at use to avoid circular imports
 
     default_config_file = os.getenv("DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml"))
     project_config_path = Path(config_path or default_config_file)
-    _load_config_file(config, project_config_path)
+    asyncio.run(_load_config_file(config, project_config_path))
 
     # Set the actual config file path on the config object
     config.config_file = str(project_config_path)
@@ -100,12 +101,12 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
     return config
 
 
-def _load_config_file(config: DockerMCPConfig, config_path: Path) -> None:
+async def _load_config_file(config: DockerMCPConfig, config_path: Path) -> None:
     """Load and apply configuration from a YAML file."""
     if not config_path.exists():
         return
 
-    yaml_config = _load_yaml_config(config_path)
+    yaml_config = await _load_yaml_config(config_path)
     _apply_host_config(config, yaml_config)
     _apply_server_config(config, yaml_config)
     _apply_cleanup_schedules(config, yaml_config)
@@ -146,11 +147,10 @@ def _apply_env_overrides(config: DockerMCPConfig) -> None:
         config.server.log_level = os.getenv("LOG_LEVEL", config.server.log_level)
 
 
-def _load_yaml_config(config_path: Path) -> dict[str, Any]:
+async def _load_yaml_config(config_path: Path) -> dict[str, Any]:
     """Load YAML configuration file."""
     try:
-        with open(config_path) as f:
-            content = f.read()
+        content = await asyncio.to_thread(config_path.read_text)
 
         # Securely expand only allowed environment variables
         content = _expand_yaml_config(content)
@@ -180,9 +180,16 @@ def _expand_yaml_config(content: str) -> str:
             logger.warning(f"Environment variable ${{{var_name}}} not in allowlist, skipping expansion")
             return match.group(0)  # Return original unexpanded
 
+    def replace_if_allowed(match):
+        """Helper to conditionally replace $VAR pattern based on allowlist."""
+        if match.group(1) in allowed_env_vars:
+            return replace_var(match)
+        else:
+            return match.group(0)  # Return original unexpanded
+
     # Replace ${VAR} and $VAR patterns with allowlist check
     content = re.sub(r'\$\{([^}]+)\}', replace_var, content)
-    content = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', lambda m: replace_var(m) if m.group(1) in allowed_env_vars else m.group(0), content)
+    content = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', replace_if_allowed, content)
 
     return content
 
@@ -311,6 +318,12 @@ def _write_yaml_value(f, key: str, value: Any) -> None:
         f.write(f"    {key}: {value}\n")
     elif isinstance(value, list):
         f.write(f"    {key}: {yaml.dump(value, default_flow_style=True).strip()}\n")
+    elif isinstance(value, dict):
+        dumped = yaml.safe_dump(value, default_flow_style=False, sort_keys=False, indent=2).rstrip()
+        indented = "".join(f"      {line}" for line in dumped.splitlines(True))
+        f.write(f"    {key}:\n{indented}\n")
+    elif value is None:
+        f.write(f"    {key}: null\n")
 
 
 def _merge_config(base: dict[str, Any], update: dict[str, Any]) -> None:

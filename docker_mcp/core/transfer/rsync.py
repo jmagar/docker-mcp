@@ -10,6 +10,7 @@ import structlog
 
 from ..config_loader import DockerHost
 from ..exceptions import DockerMCPError
+from ..settings import RSYNC_TIMEOUT
 from .base import BaseTransfer
 
 logger = structlog.get_logger()
@@ -130,14 +131,18 @@ class RsyncTransfer(BaseTransfer):
             dry_run=dry_run,
         )
 
-        # Execute rsync
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            rsync_cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        # Execute rsync with timeout
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                rsync_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=RSYNC_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RsyncError(f"Rsync timed out after {RSYNC_TIMEOUT}s") from e
 
         if result.returncode != 0:
             # Bounded output to prevent excessive error messages

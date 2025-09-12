@@ -10,7 +10,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
@@ -71,14 +71,12 @@ try:
         ComposeAction,
         ContainerAction,
         HostAction,
-        ProtocolLiteral,
     )
 except ImportError:
     from docker_mcp.models.enums import (
         ComposeAction,
         ContainerAction,
         HostAction,
-        ProtocolLiteral,
     )
 
 
@@ -93,19 +91,17 @@ def get_data_dir() -> Path:
     5. User home fallback (~/.docker-mcp/data)
     6. System temp fallback (/tmp/docker-mcp)
     """
-    # Environment variable candidates in priority order
-    env_candidates = [
-        os.getenv("FASTMCP_DATA_DIR"),
-        os.getenv("DOCKER_MCP_DATA_DIR"),
-        os.getenv("XDG_DATA_HOME") and Path(os.getenv("XDG_DATA_HOME") or "") / "docker-mcp"
-        if os.getenv("XDG_DATA_HOME")
-        else None,
+    # Environment variable candidates in priority order (normalized to Path)
+    env_candidates: list[Path | None] = [
+        (Path(p) if (p := os.getenv("FASTMCP_DATA_DIR")) else None),
+        (Path(p) if (p := os.getenv("DOCKER_MCP_DATA_DIR")) else None),
+        (Path(os.getenv("XDG_DATA_HOME")) / "docker-mcp") if os.getenv("XDG_DATA_HOME") else None,
     ]
 
     # Check explicit environment overrides
     for candidate in env_candidates:
         if candidate:
-            candidate_path = Path(candidate)
+            candidate_path = candidate
             # Validate the path can be created and is writable
             try:
                 candidate_path.mkdir(parents=True, exist_ok=True)
@@ -278,6 +274,51 @@ def _is_readable_config_dir(candidate_path: Path) -> bool:
 class DockerMCPServer:
     """FastMCP server for Docker management via Docker contexts."""
 
+    def _parse_env_float(self, var_name: str, default: float) -> float:
+        """Safely parse environment variable as float with default fallback."""
+        try:
+            value = os.getenv(var_name)
+            if value is None:
+                return default
+            return float(value)
+        except ValueError:
+            self.logger.warning(
+                f"Invalid {var_name}; using default",
+                value=os.getenv(var_name),
+                default=default
+            )
+            return default
+
+    def _parse_env_int(self, var_name: str, default: int) -> int:
+        """Safely parse environment variable as int with default fallback."""
+        try:
+            value = os.getenv(var_name)
+            if value is None:
+                return default
+            return int(value)
+        except ValueError:
+            self.logger.warning(
+                f"Invalid {var_name}; using default",
+                value=os.getenv(var_name),
+                default=default
+            )
+            return default
+
+    def _parse_env_bool(self, var_name: str, default: bool) -> bool:
+        """Safely parse environment variable as bool with default fallback."""
+        try:
+            value = os.getenv(var_name)
+            if value is None:
+                return default
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        except (ValueError, AttributeError):
+            self.logger.warning(
+                f"Invalid {var_name}; using default",
+                value=os.getenv(var_name),
+                default=default
+            )
+            return default
+
     def __init__(self, config: DockerMCPConfig, config_path: str | None = None):
         self.config = config
         self._config_path: str = (
@@ -311,7 +352,7 @@ class DockerMCPServer:
         self.hot_reload_manager.setup_hot_reload(self._config_path, self)
 
         # FastMCP app will be created later to prevent auto-start
-        self.app = None
+        self.app: FastMCP | None = None
 
         self.logger.info(
             "Docker MCP Server initialized",
@@ -337,11 +378,18 @@ class DockerMCPServer:
         # Configure middleware stack
         self._configure_middleware()
 
+        # Parse environment values safely at runtime
+        rate_limit_val = self._parse_env_float("RATE_LIMIT_PER_SECOND", 50.0)
+        threshold_val = self._parse_env_float("SLOW_REQUEST_THRESHOLD_MS", 5000.0)
+
+        rate_limit_display = f"{rate_limit_val} req/sec"
+        threshold_display = f"{threshold_val}ms threshold"
+
         self.logger.info(
             "FastMCP middleware initialized",
             error_handling=True,
-            rate_limiting=f"{float(os.getenv('RATE_LIMIT_PER_SECOND', '50.0'))} req/sec",
-            timing_monitoring=f"{float(os.getenv('SLOW_REQUEST_THRESHOLD_MS', '5000.0'))}ms threshold",
+            rate_limiting=rate_limit_display,
+            timing_monitoring=threshold_display,
             logging="dual output (console + files)",
         )
 
@@ -449,8 +497,9 @@ class DockerMCPServer:
                             loop.close()
                 return result
 
-            # Attach wrapper unconditionally to provide stable API to tests
-            self.app.list_tools = _list_tools_sync
+            # Attach wrapper only if list_tools is absent
+            if not hasattr(self.app, "list_tools"):
+                self.app.list_tools = _list_tools_sync  # type: ignore[assignment]
         except Exception as e:
             # Log the exception but continue
             self.logger.debug("Failed to set up test compatibility wrapper", error=str(e))
@@ -466,27 +515,30 @@ class DockerMCPServer:
             )
         )
 
-        # Rate limiting to protect against abuse
-        rate_limit = float(os.getenv("RATE_LIMIT_PER_SECOND", "50.0"))
+        # Rate limiting to protect against abuse (robust parsing)
+        rate_limit = self._parse_env_float("RATE_LIMIT_PER_SECOND", 50.0)
+        burst_capacity = int(rate_limit * 2)
         self.app.add_middleware(
             RateLimitingMiddleware(
                 max_requests_per_second=rate_limit,
-                burst_capacity=int(rate_limit * 2),
+                burst_capacity=burst_capacity,
                 enable_global_limit=True,
             )
         )
 
-        # Timing middleware to monitor performance
-        slow_threshold = float(os.getenv("SLOW_REQUEST_THRESHOLD_MS", "5000.0"))
+        # Timing middleware to monitor performance (robust parsing)
+        slow_threshold = self._parse_env_float("SLOW_REQUEST_THRESHOLD_MS", 5000.0)
         self.app.add_middleware(
             TimingMiddleware(slow_request_threshold_ms=slow_threshold, track_statistics=True)
         )
 
         # Logging middleware last to log everything (including middleware processing)
+        include_payloads = self._parse_env_bool("LOG_INCLUDE_PAYLOADS", True)
+        max_payload_length = self._parse_env_int("LOG_MAX_PAYLOAD_LENGTH", 1000)
         self.app.add_middleware(
             LoggingMiddleware(
-                include_payloads=os.getenv("LOG_INCLUDE_PAYLOADS", "true").lower() == "true",
-                max_payload_length=int(os.getenv("LOG_MAX_PAYLOAD_LENGTH", "1000")),
+                include_payloads=include_payloads,
+                max_payload_length=max_payload_length,
             )
         )
 
@@ -825,7 +877,7 @@ class DockerMCPServer:
                 appdata_path=appdata_path if appdata_path else None,
                 enabled=enabled,
                 zfs_capable=zfs_capable,
-                zfs_dataset=zfs_dataset,
+                zfs_dataset=zfs_dataset if zfs_dataset else None,
                 port=port,
                 cleanup_type=cleanup_type,
                 frequency=frequency,
@@ -925,16 +977,7 @@ class DockerMCPServer:
 
         # Delegate to service layer for business logic
         return await self.container_service.handle_action(
-            action,
-            host_id=params.host_id,
-            container_id=params.container_id,
-            all_containers=params.all_containers,
-            limit=params.limit,
-            offset=params.offset,
-            follow=params.follow,
-            lines=params.lines,
-            force=params.force,
-            timeout=params.timeout,
+            action, **params.model_dump(exclude={"action"})
         )
 
     async def docker_compose(
@@ -1202,10 +1245,7 @@ class DockerMCPServer:
             return result.structured_content or {"success": True, "data": fallback_msg}
         return result
 
-    def _normalize_protocol(self, proto: str) -> ProtocolLiteral:
-        """Normalize protocol string to valid ProtocolLiteral."""
-        p = proto.lower()
-        return cast(ProtocolLiteral, p if p in ("tcp", "udp", "sctp") else "tcp")
+    # Removed unused _normalize_protocol helper; reintroduce with tests when needed.
 
     def update_configuration(self, new_config: DockerMCPConfig) -> None:
         """Update server configuration and reinitialize components."""

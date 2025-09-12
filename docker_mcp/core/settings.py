@@ -38,15 +38,8 @@ class DockerTimeoutSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
-# Global settings instance
-timeout_settings = DockerTimeoutSettings(
-    DOCKER_CLIENT_TIMEOUT=30,
-    DOCKER_CLI_TIMEOUT=60,
-    SUBPROCESS_TIMEOUT=120,
-    ARCHIVE_TIMEOUT=300,
-    RSYNC_TIMEOUT=600,
-    BACKUP_TIMEOUT=300,
-)
+# Global settings instance (allow .env/env to override defaults)
+timeout_settings = DockerTimeoutSettings()
 
 # Timeout constants for easy import
 DOCKER_CLIENT_TIMEOUT: int = timeout_settings.docker_client_timeout

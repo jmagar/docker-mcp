@@ -33,6 +33,7 @@ class HostService:
         self.config = config
         self.context_manager = context_manager
         self.logger = structlog.get_logger()
+        self._config_lock = asyncio.Lock()
 
     async def add_docker_host(
         self,
@@ -501,7 +502,8 @@ class HostService:
         try:
             config_file_path = getattr(self.config, "config_file", None)
             fresh_config = await asyncio.to_thread(load_config, config_file_path)
-            self.config = fresh_config
+            async with self._config_lock:
+                self.config = fresh_config
             self.logger.info(
                 "Reloaded configuration from disk before discovery",
                 host_id=host_id,
@@ -899,12 +901,12 @@ class HostService:
         except asyncio.TimeoutError:
             error_msg = "Discovery timed out after 30 seconds"
             self.logger.error(f"Discovery timed out for host {host_id}")
-            return {"success": False, "error": error_msg, "host_id": host_id}, False
+            return {"success": False, "error": error_msg, HOST_ID: host_id}, False
 
         except Exception as e:
             error_msg = str(e)
             self.logger.error(f"Discovery failed for host {host_id}: {error_msg}")
-            return {"success": False, "error": error_msg, "host_id": host_id}, False
+            return {"success": False, "error": error_msg, HOST_ID: host_id}, False
 
     def _calculate_discovery_statistics(self, discoveries: dict[str, Any]) -> dict[str, int]:
         """Calculate summary statistics from discovery results."""
@@ -1450,10 +1452,24 @@ class HostService:
         )
 
         if hasattr(result, "structured_content"):
-            import_result = result.structured_content or {
-                "success": True,
-                "data": str(result.content),
-            }
+            if result.structured_content:
+                import_result = result.structured_content
+            else:
+                # Missing or falsy structured_content is an error condition
+                self.logger.error(
+                    "import_ssh_config returned invalid/missing structured_content",
+                    ssh_config_path=ssh_config_path,
+                    selected_hosts=selected_hosts,
+                    result_type=type(result).__name__,
+                    has_content=hasattr(result, "content"),
+                    content_preview=str(result.content)[:200] if hasattr(result, "content") else None
+                )
+                import_result = {
+                    "success": False,
+                    "error": "import_ssh_config returned invalid/missing structured_content",
+                    "detail": f"Expected structured data but received: {type(result.structured_content).__name__}",
+                    "operation": "import_ssh_config"
+                }
         else:
             import_result = result
 
@@ -1461,13 +1477,13 @@ class HostService:
         if import_result.get("success") and import_result.get("imported_hosts"):
             discovered_hosts = []
             for host_info in import_result["imported_hosts"]:
-                host_id = host_info["host_id"]
+                host_id = host_info[HOST_ID]
                 try:
                     test_result = await self.test_connection(host_id)
                     discovery_result = await self.discover_host_capabilities(host_id)
                     discovered_hosts.append(
                         {
-                            "host_id": host_id,
+                            HOST_ID: host_id,
                             "connection_test": test_result.get("success", False),
                             "discovery": discovery_result.get("success", False),
                             "recommendations": discovery_result.get("recommendations", []),
@@ -1479,7 +1495,7 @@ class HostService:
                     )
                     discovered_hosts.append(
                         {
-                            "host_id": host_id,
+                            HOST_ID: host_id,
                             "connection_test": False,
                             "discovery": False,
                             "error": str(e),
@@ -1551,7 +1567,7 @@ class HostService:
             discovery_count += len(result["appdata_discovery"]["paths"])
 
         result["discovery_summary"] = {
-            "host_id": host_id,
+            HOST_ID: host_id,
             "paths_discovered": discovery_count,
             "zfs_capable": result.get("zfs_discovery", {}).get("capable", False),
             "recommendations_count": len(result.get("recommendations", [])),

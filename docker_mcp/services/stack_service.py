@@ -6,7 +6,7 @@ Provides a clean interface while maintaining backward compatibility.
 """
 
 import re
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
@@ -48,6 +48,14 @@ class StackService:
         if host_id not in self.config.hosts:
             return False, f"Host '{host_id}' not found"
         return True, ""
+
+    def _unwrap(self, result: ToolResult) -> dict[str, Any]:
+        """Unwrap ToolResult for consistent structured content access."""
+        return (
+            result.structured_content
+            if hasattr(result, "structured_content") and result.structured_content is not None
+            else {"success": False, "error": "Invalid result format"}
+        )
 
     # Core Operations - Delegate to StackOperations
 
@@ -227,12 +235,18 @@ class StackService:
         volume_utils = StackVolumeUtils()
         return volume_utils.normalize_volume_entry(volume, target_appdata, stack_name)
 
-    async def handle_action(self, action: Union["ComposeAction", str], **params) -> dict[str, Any]:
+    async def handle_action(self, action: "ComposeAction" | str, **params) -> dict[str, Any]:
         """Unified action handler for all stack operations.
 
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
         try:
+            # Normalize strings to enum when possible
+            if isinstance(action, str):
+                try:
+                    action = ComposeAction(action.lower().strip())
+                except ValueError:
+                    pass
             # Route to appropriate handler
             if action == ComposeAction.LIST:
                 return await self._handle_list_action(**params)
@@ -253,7 +267,6 @@ class StackService:
                 ComposeAction.DOWN,
                 ComposeAction.RESTART,
                 ComposeAction.BUILD,
-                ComposeAction.PULL,
             ]:
                 return await self._handle_lifecycle_action(action, **params)
             else:
@@ -285,11 +298,7 @@ class StackService:
             return {"success": False, "error": "host_id is required for list action"}
 
         result = await self.list_stacks(host_id)
-        return (
-            result.structured_content
-            if hasattr(result, "structured_content") and result.structured_content is not None
-            else {"success": False, "error": "Invalid result format"}
-        )
+        return self._unwrap(result)
 
     async def _handle_view_action(self, **params) -> dict[str, Any]:
         """Handle VIEW action."""
@@ -302,11 +311,7 @@ class StackService:
             return {"success": False, "error": "stack_name is required for view action"}
 
         result = await self.get_stack_compose_file(host_id, stack_name)
-        return (
-            result.structured_content
-            if hasattr(result, "structured_content") and result.structured_content is not None
-            else {"success": False, "error": "Invalid result format"}
-        )
+        return self._unwrap(result)
 
     async def _handle_deploy_action(self, **params) -> dict[str, Any]:
         """Handle DEPLOY action."""
@@ -349,11 +354,7 @@ class StackService:
         result = await self.deploy_stack(
             host_id, stack_name, compose_content, environment, pull_images, recreate
         )
-        return (
-            result.structured_content
-            if hasattr(result, "structured_content") and result.structured_content is not None
-            else {"success": False, "error": "Invalid result format"}
-        )
+        return self._unwrap(result)
 
     async def _handle_manage_action(self, action: ComposeAction | str, **params) -> dict[str, Any]:
         """Handle string-based manage actions."""
@@ -370,11 +371,7 @@ class StackService:
             return {"success": False, "error": f"stack_name is required for {action_str} action"}
 
         result = await self.manage_stack(host_id, stack_name, action_str, options)
-        return (
-            result.structured_content
-            if hasattr(result, "structured_content") and result.structured_content is not None
-            else {"success": False, "error": "Invalid result format"}
-        )
+        return self._unwrap(result)
 
     async def _handle_logs_action(self, **params) -> dict[str, Any]:
         """Handle LOGS action."""
@@ -397,8 +394,8 @@ class StackService:
             logs_options = {"tail": str(lines), "follow": follow}
             result = await self.manage_stack(host_id, stack_name, "logs", logs_options)
 
-            if hasattr(result, "structured_content") and result.structured_content:
-                logs_data = result.structured_content
+            logs_data = self._unwrap(result)
+            if logs_data.get("success", False):
                 if "output" in logs_data:
                     logs_lines = logs_data["output"].split("\n") if logs_data["output"] else []
                     return {
@@ -464,12 +461,14 @@ class StackService:
             dry_run=dry_run,
         )
 
-        if hasattr(result, "structured_content") and result.structured_content:
-            migration_result = result.structured_content.copy()
+        migration_result = self._unwrap(result)
+        if migration_result.get("success", False):
+            # Create a copy to avoid modifying the original
+            migration_result = migration_result.copy()
             if "overall_success" in migration_result:
                 migration_result["success"] = migration_result["overall_success"]
             return migration_result
-        return {"success": True, "data": "Migration completed"}
+        return migration_result
 
     async def _handle_lifecycle_action(self, action, **params) -> dict[str, Any]:
         """Handle ComposeAction enum lifecycle actions."""
@@ -485,9 +484,4 @@ class StackService:
         result = await self.manage_stack(
             host_id=host_id, stack_name=stack_name, action=action.value, options=options
         )
-        if hasattr(result, "structured_content"):
-            return result.structured_content or {
-                "success": True,
-                "data": f"Stack {action.value} completed",
-            }
-        return {"success": False, "error": "Invalid result format"}
+        return self._unwrap(result)

@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 import docker
 import structlog
 from fastmcp.resources.resource import FunctionResource
-from pydantic import AnyUrl
 
 logger = structlog.get_logger()
 
@@ -54,24 +53,26 @@ class DockerInfoResource(FunctionResource):
                 # Get Docker client and retrieve info/version using Docker SDK
                 client = await context_manager.get_client(host_id)
                 if client is None:
-                    raise docker.errors.APIError(f"Failed to get Docker client for host {host_id}")
+                    logger.warning("No Docker client available", host_id=host_id)
+                    return {
+                        "success": False,
+                        "error": "Docker client unavailable for host",
+                        "host_id": host_id,
+                        "resource_uri": f"docker://{host_id}/info",
+                        "resource_type": "docker_info",
+                    }
 
                 # Get Docker system info and version using SDK
                 docker_info = await asyncio.to_thread(client.info)
                 docker_version = await asyncio.to_thread(client.version)
 
                 # Get host configuration from our host service
-                host_config = {}
                 try:
-                    hosts_data = await host_service.list_docker_hosts()
-                    if hosts_data.get("success") and "hosts" in hosts_data:
-                        for host in hosts_data["hosts"]:
-                            if host.get("host_id") == host_id:
-                                host_config = host
-                                break
+                    host = host_service.get_host_config(host_id)
+                    host_config = host.model_dump() if host else {"error": "Host not found"}
                 except Exception as e:
                     logger.debug("Failed to get host config", host_id=host_id, error=str(e))
-                    host_config = {"error": "Failed to get host configuration"}
+                    host_config = {"error": f"Failed to get host config: {str(e)}"}
 
                 result = {
                     "success": True,
@@ -111,12 +112,12 @@ class DockerInfoResource(FunctionResource):
 
         super().__init__(
             fn=_get_docker_info,
-            uri=AnyUrl("docker://{host_id}/info"),
+            uri="docker://{host_id}/info",
             name="Docker Host Information",
             title="Docker host system information and configuration",
             description="Provides comprehensive Docker host information including version, system info, and configuration details",
             mime_type="application/json",
-            tags={"docker", "system", "info"},
+            tags=("docker", "system", "info"),
         )
 
 
@@ -207,12 +208,12 @@ class DockerContainersResource(FunctionResource):
 
         super().__init__(
             fn=_get_containers,
-            uri=AnyUrl("docker://{host_id}/containers"),
+            uri="docker://{host_id}/containers",
             name="Docker Container Listings",
             title="List of Docker containers on a host",
             description="Provides comprehensive container information including status, networks, volumes, and compose project details",
             mime_type="application/json",
-            tags={"docker", "containers"},
+            tags=("docker", "containers"),
         )
 
 
@@ -308,10 +309,10 @@ class DockerComposeResource(FunctionResource):
 
         super().__init__(
             fn=_get_compose_info,
-            uri=AnyUrl("docker://{host_id}/compose"),
+            uri="docker://{host_id}/compose",
             name="Docker Compose Information",
             title="Docker Compose stacks and projects",
             description="Provides information about Docker Compose stacks, projects, and their configurations on a host",
             mime_type="application/json",
-            tags={"docker", "compose", "stacks"},
+            tags=("docker", "compose", "stacks"),
         )

@@ -16,7 +16,6 @@ from mcp.types import TextContent
 
 from ..constants import CONTAINER_ID, HOST_ID
 from ..core.config_loader import DockerMCPConfig
-from ..core.docker_context import DockerContextManager
 from ..tools.containers import ContainerTools
 from ..utils import validate_host
 from .logs import LogsService
@@ -46,6 +45,14 @@ class ContainerService:
         message: str,
     ) -> dict[str, Any]:
         """Build a standardized error response."""
+        self.logger.error(
+            "container service error",
+            host_id=host_id,
+            container_id=container_id,
+            action=action,
+            error=str(error),
+            error_type=type(error).__name__,
+        )
         return {
             "success": False,
             "message": message,
@@ -170,7 +177,7 @@ class ContainerService:
                     host_ports.append(host_port)
             ports_display = ",".join(host_ports)
             if len(ports) > 3:
-                ports_display += f"+{len(ports) - 3}"
+                ports_display += f" +{len(ports) - 3} more"
         else:
             ports_display = "-"
 
@@ -518,19 +525,23 @@ class ContainerService:
         conflicts_found = []
 
         for mapping in port_mappings:
-            container_key = mapping["container_name"]
+            container_key = mapping.get("container_name", "unknown")
             if container_key not in by_container:
                 by_container[container_key] = {
                     "ports": [],
                     "compose_project": mapping.get("compose_project", ""),
-                    "container_id": mapping["container_id"],
+                    "container_id": mapping.get("container_id", ""),
                 }
 
-            # Format: host_port→container_port/protocol
-            port_str = f"{mapping['host_port']}→{mapping['container_port']}/{mapping['protocol']}"
-            if mapping["is_conflict"]:
+            # Format: host_port→container_port/protocol using safe defaults
+            host_port = mapping.get("host_port", "")
+            container_port = mapping.get("container_port", "")
+            protocol = mapping.get("protocol", "")
+            port_str = f"{host_port}→{container_port}/{protocol}"
+
+            if mapping.get("is_conflict", False):
                 port_str = f"⚠️{port_str}"
-                conflicts_found.append(f"{mapping['host_port']}/{mapping['protocol']}")
+                conflicts_found.append(f"{host_port}/{protocol}")
 
             by_container[container_key]["ports"].append(port_str)
 

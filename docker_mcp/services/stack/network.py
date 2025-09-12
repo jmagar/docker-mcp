@@ -8,12 +8,31 @@ Handles SSH connectivity, network speed testing, and transfer time calculations.
 import asyncio
 import subprocess
 import time
-from typing import Any
+from typing import Any, Dict
 
 import structlog
+from pydantic import BaseModel, Field
 
 from ...core.config_loader import DockerHost
 from ...utils import build_ssh_command, format_size
+
+
+class NetworkTestDetails(BaseModel):
+    """Network connectivity test results with detailed information."""
+    
+    overall_connectivity: bool = Field(description="Whether overall connectivity is successful")
+    tests: Dict[str, Any] = Field(default_factory=dict, description="Individual test results")
+    error: str | None = Field(default=None, description="Error message if test failed")
+
+
+class TransferEstimates(BaseModel):
+    """Transfer time estimates based on data size and network speed."""
+    
+    data_size_bytes: int = Field(description="Size of data to transfer in bytes")
+    data_size_human: str = Field(description="Human-readable data size")
+    compressed_size_bytes: int = Field(description="Expected compressed size in bytes")
+    compressed_size_human: str = Field(description="Human-readable compressed size")
+    estimates: Dict[str, Any] = Field(default_factory=dict, description="Transfer time estimates")
 
 
 class StackNetwork:
@@ -47,6 +66,7 @@ class StackNetwork:
             # Test source host SSH
             source_ssh_cmd = build_ssh_command(source_host) + ["echo 'SSH_OK'"]
             try:
+                start_rt = time.perf_counter()
                 result = await asyncio.to_thread(
                     subprocess.run,  # nosec B603
                     source_ssh_cmd,
@@ -55,9 +75,10 @@ class StackNetwork:
                     check=False,
                     timeout=10,
                 )
+                resp_secs = time.perf_counter() - start_rt
                 ssh_tests["source_ssh"] = {
                     "success": result.returncode == 0 and "SSH_OK" in result.stdout,
-                    "response_time": "< 10s",
+                    "response_time": f"{resp_secs:.2f}s",
                     "error": result.stderr if result.stderr else None,
                 }
             except Exception as e:
@@ -66,6 +87,7 @@ class StackNetwork:
             # Test target host SSH
             target_ssh_cmd = build_ssh_command(target_host) + ["echo 'SSH_OK'"]
             try:
+                start_rt = time.perf_counter()
                 result = await asyncio.to_thread(
                     subprocess.run,  # nosec B603
                     target_ssh_cmd,
@@ -74,9 +96,10 @@ class StackNetwork:
                     check=False,
                     timeout=10,
                 )
+                resp_secs = time.perf_counter() - start_rt
                 ssh_tests["target_ssh"] = {
                     "success": result.returncode == 0 and "SSH_OK" in result.stdout,
-                    "response_time": "< 10s",
+                    "response_time": f"{resp_secs:.2f}s",
                     "error": result.stderr if result.stderr else None,
                 }
             except Exception as e:
@@ -103,16 +126,15 @@ class StackNetwork:
 
                     if result.returncode == 0 and "FILE_CREATED" in result.stdout:
                         # Transfer the file using rsync
-                        start_time = time.time()
+                        start_time = time.perf_counter()
 
-                        rsync_test_cmd = source_ssh_cmd[:-1] + [
-                            f"rsync -z /tmp/speed_test {target_host.user}@{target_host.hostname}:/tmp/speed_test_recv"  # noqa: S108
-                            + (
-                                f" -e 'ssh -i {target_host.identity_file}'"
-                                if target_host.identity_file
-                                else ""
-                            )
-                        ]
+                        import shlex
+                        ssh_e = ["ssh"]
+                        if target_host.identity_file:
+                            ssh_e += ["-i", target_host.identity_file]
+                        remote = f"{target_host.user}@{target_host.hostname}:/tmp/speed_test_recv"
+                        remote_cmd = shlex.join(["rsync", "/tmp/speed_test", remote, "-e", shlex.join(ssh_e)])
+                        rsync_test_cmd = source_ssh_cmd[:-1] + [remote_cmd]
 
                         result = await asyncio.to_thread(
                             subprocess.run,  # nosec B603
@@ -123,7 +145,7 @@ class StackNetwork:
                             timeout=30,
                         )
 
-                        transfer_time = time.time() - start_time
+                        transfer_time = time.perf_counter() - start_time
 
                         if result.returncode == 0:
                             # Calculate rough network speed (1MB in transfer_time seconds)
@@ -147,11 +169,13 @@ class StackNetwork:
                                     subprocess.run,  # nosec B603
                                     cleanup_source,
                                     check=False,
+                                    timeout=10,
                                 ),
                                 asyncio.to_thread(
                                     subprocess.run,  # nosec B603
                                     cleanup_target,
                                     check=False,
+                                    timeout=10,
                                 ),
                             )
                         else:
@@ -351,12 +375,15 @@ class StackNetwork:
                 return result
 
             # Transfer file and measure time
-            start_time = time.time()
+            start_time = time.perf_counter()
 
-            transfer_cmd = source_ssh_cmd + [
-                f"rsync -z /tmp/bandwidth_test {target_host.user}@{target_host.hostname}:/tmp/bandwidth_test_recv"  # noqa: S108
-                + (f" -e 'ssh -i {target_host.identity_file}'" if target_host.identity_file else "")
-            ]
+            import shlex
+            ssh_e = ["ssh"]
+            if target_host.identity_file:
+                ssh_e += ["-i", target_host.identity_file]
+            remote = f"{target_host.user}@{target_host.hostname}:/tmp/bandwidth_test_recv"
+            remote_cmd = shlex.join(["rsync", "/tmp/bandwidth_test", remote, "-e", shlex.join(ssh_e)])
+            transfer_cmd = source_ssh_cmd + [remote_cmd]
 
             transfer_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
@@ -367,7 +394,7 @@ class StackNetwork:
                 timeout=60,
             )
 
-            transfer_time = time.time() - start_time
+            transfer_time = time.perf_counter() - start_time
 
             if transfer_result.returncode == 0:
                 # Calculate bandwidth (MB/s to Mbps)

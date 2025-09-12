@@ -3,7 +3,7 @@
 import asyncio
 import shlex
 import subprocess
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -11,6 +11,7 @@ import structlog
 from ..config_loader import DockerHost
 from ..exceptions import DockerMCPError
 from ..safety import MigrationSafety
+from ..settings import BACKUP_TIMEOUT
 from .base import BaseTransfer
 
 logger = structlog.get_logger()
@@ -156,7 +157,9 @@ class ZFSTransfer(BaseTransfer):
 
             # Fallback: try to find dataset by mountpoint
             mount_cmd = ssh_cmd + [
-                f"zfs list -H -o name,mountpoint | grep {shlex.quote(path)} | head -1 | cut -f1"
+                "sh",
+                "-c",
+                f"zfs list -H -o name,mountpoint | awk -v p={shlex.quote(path)} '$2==p {{print $1; exit}}'"
             ]
             result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
@@ -333,11 +336,9 @@ class ZFSTransfer(BaseTransfer):
 
             # Try to destroy any partially created dataset first
             cleanup_dataset_cmd = ssh_cmd + [
-                "sh",
-                "-c",
-                f"zfs destroy -r {shlex.quote(dataset_name)} 2>/dev/null || true",
+                "zfs", "destroy", "-r", dataset_name,
             ]
-            await asyncio.to_thread(
+            cleanup_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
                 cleanup_dataset_cmd,
                 capture_output=True,
@@ -345,10 +346,16 @@ class ZFSTransfer(BaseTransfer):
                 check=False,
                 timeout=60,
             )
+            if cleanup_result.returncode != 0:
+                self.logger.warning(
+                    "Rollback: failed to destroy partial dataset",
+                    dataset=dataset_name,
+                    error=cleanup_result.stderr.strip(),
+                )
 
             # Restore original directory
             rollback_cmd = ssh_cmd + ["mv", temp_path, dir_path]
-            await asyncio.to_thread(
+            rollback_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
                 rollback_cmd,
                 capture_output=True,
@@ -356,6 +363,16 @@ class ZFSTransfer(BaseTransfer):
                 check=False,
                 timeout=60,
             )
+            if rollback_result.returncode != 0:
+                self.logger.error(
+                    "Rollback: failed to restore original directory",
+                    temp_path=temp_path,
+                    dir_path=dir_path,
+                    returncode=rollback_result.returncode,
+                    stderr=rollback_result.stderr.strip(),
+                    stdout=rollback_result.stdout.strip(),
+                    command=" ".join(rollback_cmd),
+                )
             raise
 
     async def create_snapshot(
@@ -497,7 +514,7 @@ class ZFSTransfer(BaseTransfer):
                 )
 
         # Create snapshot with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%SZ")
         snapshot_name = f"migrate_{timestamp}"
 
         try:
@@ -505,7 +522,10 @@ class ZFSTransfer(BaseTransfer):
             full_snapshot = await self.create_snapshot(source_host, source_dataset, snapshot_name)
 
             # Perform ZFS send/receive
-            await self._send_receive(source_host, target_host, full_snapshot, target_dataset)
+            timeout_seconds = int(kwargs.get("timeout", BACKUP_TIMEOUT))
+            await self._send_receive(
+                source_host, target_host, full_snapshot, target_dataset, timeout_seconds=timeout_seconds, **kwargs
+            )
 
             # Cleanup snapshot on source
             await self.cleanup_snapshot(source_host, full_snapshot)
@@ -536,6 +556,8 @@ class ZFSTransfer(BaseTransfer):
         target_host: DockerHost,
         full_snapshot: str,
         target_dataset: str,
+        timeout_seconds: int | None = None,
+        **kwargs,
     ) -> None:
         """Perform ZFS send/receive operation.
 
@@ -580,17 +602,21 @@ class ZFSTransfer(BaseTransfer):
             target_dataset=target_dataset,
             source_host=source_host.hostname,
             target_host=target_host.hostname,
+            timeout_seconds=timeout_seconds,
         )
 
         # Execute the combined command with timeout
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            ["/bin/bash", "-c", full_cmd],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3600,  # 1 hour timeout for large transfers
-        )
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,  # nosec B603
+                ["/bin/bash", "-c", full_cmd],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise ZFSError(f"ZFS send/receive timed out after {timeout_seconds}s: {e}") from e
 
         if result.returncode != 0:
             raise ZFSError(f"ZFS send/receive failed: {result.stderr}")
@@ -719,14 +745,14 @@ class ZFSTransfer(BaseTransfer):
 
         self.logger.info("ZFS transfer verification completed successfully")
 
-    def _parse_zfs_properties(self, zfs_output: str) -> dict[str, Any]:
+    def _parse_zfs_properties(self, zfs_output: str) -> dict[str, int | str]:
         """Parse ZFS properties output into a dictionary.
 
         Args:
             zfs_output: Output from zfs get command
 
         Returns:
-            Dictionary of property names to values (bytes as int, ratios as str)
+            Dictionary of property names to values (bytes as int, ratios/others as str)
         """
         properties: dict[str, Any] = {}
 
