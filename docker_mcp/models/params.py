@@ -1,13 +1,19 @@
 """Parameter models for FastMCP tool validation."""
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, computed_field, field_validator
+from pydantic import Field, StringConstraints, computed_field, field_validator
 
 from .container import MCPModel
 
 # Import Enum types
 from .enums import ComposeAction, ContainerAction, HostAction
+
+# Type aliases for string constraints
+TimeStr = Annotated[str, StringConstraints(pattern=r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$")]
+DNSName = Annotated[
+    str, StringConstraints(max_length=63, pattern=r"^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+]
 
 
 def _validate_enum_action(value: Any, enum_class: type) -> Any:
@@ -42,12 +48,10 @@ class DockerHostsParams(MCPModel):
     ssh_port: int = Field(default=22, ge=1, le=65535, description="SSH port number")
     ssh_key_path: str | None = Field(default=None, description="Path to SSH private key file")
     description: str = Field(default="", description="Host description")
-    tags: list[str] | None = Field(default_factory=list, description="Host tags")
+    tags: list[str] = Field(default_factory=list, description="Host tags")
     compose_path: str | None = Field(default=None, description="Docker Compose file path")
     appdata_path: str | None = Field(default=None, description="Application data storage path")
     enabled: bool = Field(default=True, description="Whether host is enabled")
-    zfs_capable: bool = Field(default=False, description="Whether host has ZFS available")
-    zfs_dataset: str = Field(default="", description="ZFS dataset path for appdata")
     ssh_config_path: str | None = Field(default=None, description="Path to SSH config file")
     selected_hosts: str | None = Field(
         default=None, description="Comma-separated list of hosts to select"
@@ -58,11 +62,7 @@ class DockerHostsParams(MCPModel):
     frequency: Literal["daily", "weekly", "monthly", "custom"] | None = Field(
         default=None, description="Cleanup schedule frequency"
     )
-    time: str | None = Field(
-        default=None,
-        pattern=r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$",
-        description="Cleanup schedule time in HH:MM format (24-hour)",
-    )
+    time: TimeStr | None = Field(default=None, description="Cleanup schedule time in HH:MM (24h)")
 
     # Port check parameter (only for ports check sub-action)
     port: int = Field(
@@ -114,16 +114,12 @@ class DockerComposeParams(MCPModel):
 
     action: ComposeAction = Field(..., description="Action to perform")
     host_id: str = Field(default="", description="Host identifier")
-    stack_name: str = Field(
+    stack_name: DNSName = Field(
         default="",
-        max_length=63,
-        pattern=r"^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
         description="Stack name (DNS-compliant: lowercase letters, numbers, hyphens; no underscores)",
     )
     compose_content: str = Field(default="", description="Docker Compose file content")
-    environment: dict[str, str] | None = Field(
-        default_factory=dict, description="Environment variables"
-    )
+    environment: dict[str, str] = Field(default_factory=dict, description="Environment variables")
     pull_images: bool = Field(default=True, description="Pull images before deploying")
     recreate: bool = Field(default=False, description="Recreate containers")
     follow: bool = Field(default=False, description="Follow log output")

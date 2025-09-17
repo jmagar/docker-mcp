@@ -63,8 +63,12 @@ class StackInfo(MCPModel):
     host_id: str
     services: list[str] = Field(default_factory=list)
     status: str
-    created: datetime | None = Field(default=None, description="Creation timestamp in ISO 8601 format")
-    updated: datetime | None = Field(default=None, description="Last update timestamp in ISO 8601 format")
+    created: datetime | None = Field(
+        default=None, description="Creation timestamp in ISO 8601 format"
+    )
+    updated: datetime | None = Field(
+        default=None, description="Last update timestamp in ISO 8601 format"
+    )
     compose_file: str | None = None
 
 
@@ -115,7 +119,26 @@ class PortMapping(MCPModel):
     is_conflict: bool = False
     conflict_with: list[str] = Field(default_factory=list)
 
-    @field_validator('host_port', 'container_port', mode='before')
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def normalize_protocol(cls, v: str) -> str:
+        """Normalize protocol casing to lowercase and validate."""
+        if not isinstance(v, str):
+            raise ValueError(f"Protocol must be a string, got {type(v)}")
+
+        normalized = v.strip().lower()
+
+        if not normalized:
+            raise ValueError("Protocol cannot be empty")
+
+        # Validate against allowed protocols
+        valid_protocols = {"tcp", "udp", "sctp"}
+        if normalized not in valid_protocols:
+            raise ValueError(f"Invalid protocol '{v}'. Must be one of: {', '.join(sorted(valid_protocols))}")
+
+        return normalized
+
+    @field_validator("host_port", "container_port", mode="before")
     @classmethod
     def parse_port_numbers(cls, v: str | int) -> int:
         """Parse and validate port numbers from strings or integers."""
@@ -150,6 +173,25 @@ class PortConflict(MCPModel):
     host_ip: str
     affected_containers: list[str]
     container_details: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def normalize_protocol(cls, v: str) -> str:
+        """Normalize protocol casing to lowercase and validate."""
+        if not isinstance(v, str):
+            raise ValueError(f"Protocol must be a string, got {type(v)}")
+
+        normalized = v.strip().lower()
+
+        if not normalized:
+            raise ValueError("Protocol cannot be empty")
+
+        # Validate against allowed protocols
+        valid_protocols = {"tcp", "udp", "sctp"}
+        if normalized not in valid_protocols:
+            raise ValueError(f"Invalid protocol '{v}'. Must be one of: {', '.join(sorted(valid_protocols))}")
+
+        return normalized
 
 
 class PortListResponse(MCPModel):

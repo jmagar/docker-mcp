@@ -39,7 +39,7 @@ class DockerTimeoutSettings(BaseSettings):
 
 
 # Global settings instance (allow .env/env to override defaults)
-timeout_settings = DockerTimeoutSettings()
+timeout_settings = DockerTimeoutSettings()  # type: ignore[call-arg]
 
 # Timeout constants for easy import
 DOCKER_CLIENT_TIMEOUT: int = timeout_settings.docker_client_timeout

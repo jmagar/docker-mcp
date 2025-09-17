@@ -122,72 +122,46 @@ class ConfigService:
     async def _perform_discovery(self, hosts_to_check: list[str]) -> list[dict[str, Any]]:
         """Perform compose path discovery for specified hosts with concurrency."""
         enabled_hosts = [
-            host_id for host_id in hosts_to_check 
-            if self.config.hosts[host_id].enabled
+            host_id for host_id in hosts_to_check if self.config.hosts[host_id].enabled
         ]
-        
+
         if not enabled_hosts:
             return []
-        
+
         self.logger.info(
-            "Starting compose discovery", 
-            total_hosts=len(enabled_hosts),
-            hosts=enabled_hosts
+            "Starting compose discovery", total_hosts=len(enabled_hosts), hosts=enabled_hosts
         )
-        
+
         # Run discovery operations concurrently
         async def discover_single_host(host_id: str) -> dict[str, Any]:
             self.logger.info("Discovering compose locations", host_id=host_id)
             return await self.compose_manager.discover_compose_locations(host_id)
-        
-        # Run discovery operations concurrently with error handling
-        tasks = []
-        discovery_results = []
-        
-        try:
-            async with asyncio.TaskGroup() as tg:
-                tasks = [
-                    tg.create_task(discover_single_host(host_id))
-                    for host_id in enabled_hosts
-                ]
-        except* Exception as eg:
-            # Handle partial failures - collect successful results
-            self.logger.warning(
-                "Some discovery operations failed",
-                total_hosts=len(enabled_hosts),
-                error_count=len(eg.exceptions)
-            )
-        
-        # Collect results from completed tasks
+
+        # Run discovery operations concurrently with error handling (Python 3.10 compatible)
+        tasks = [asyncio.create_task(discover_single_host(host_id)) for host_id in enabled_hosts]
+
+        # Use asyncio.gather with return_exceptions for Python 3.10 compatibility
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results and handle exceptions
+        discovery_results: list[dict[str, Any]] = []
         failed_count = 0
-        for i, task in enumerate(tasks):
+        for i, result in enumerate(results):
             host_id = enabled_hosts[i]
-            try:
-                if task.done() and not task.cancelled():
-                    result = await task
-                    discovery_results.append(result)
-                else:
-                    failed_count += 1
-                    self.logger.error(
-                        "Discovery task not completed",
-                        host_id=host_id
-                    )
-            except Exception as e:
+            if isinstance(result, Exception):
                 failed_count += 1
-                self.logger.error(
-                    "Discovery failed for host",
-                    host_id=host_id,
-                    error=str(e)
-                )
-        
+                self.logger.error("Discovery failed for host", host_id=host_id, error=str(result))
+            elif isinstance(result, dict):
+                discovery_results.append(result)
+
         if failed_count > 0:
             self.logger.warning(
                 "Discovery completed with some failures",
                 successful=len(discovery_results),
                 failed=failed_count,
-                total=len(enabled_hosts)
+                total=len(enabled_hosts),
             )
-        
+
         return discovery_results
 
     def _format_discovery_results(
@@ -382,7 +356,7 @@ class ConfigService:
                 await asyncio.to_thread(save_config, self.config, config_file_to_use)
 
             # Build result summary
-            summary_lines = self._format_import_results(imported_hosts, compose_path_configs)
+            summary_lines = self._format_import_results(imported_hosts, compose_path_configs, config_file_to_use)
 
             self.logger.info(
                 "SSH config import completed",
@@ -417,6 +391,7 @@ class ConfigService:
             "",
         ]
 
+        # Display hosts with 1-based indexing for user-friendly selection
         for i, entry in enumerate(importable_hosts, 1):
             hostname = entry.hostname or entry.name
             user = entry.user or "root"
@@ -468,7 +443,7 @@ class ConfigService:
 
     def _fuzzy_match_host(
         self, query: str, importable_hosts: list["SSHConfigEntry"]
-    ) -> tuple[Any, float] | None:
+    ) -> tuple["SSHConfigEntry", float] | None:
         """Find best matching host using fuzzy string matching.
 
         Args:
@@ -571,10 +546,11 @@ class ConfigService:
         self, item: str, importable_hosts: list["SSHConfigEntry"]
     ) -> tuple["SSHConfigEntry | None", str | None]:
         """Process a single selection item and return host and optional error."""
-        # Try to parse as numeric index first
+        # Try to parse as numeric index first (user provides 1-based, convert to 0-based array access)
         try:
             idx = int(item)
             if 1 <= idx <= len(importable_hosts):
+                # Convert from 1-based user input to 0-based array index
                 return importable_hosts[idx - 1], None
             else:
                 return None, f"Index {idx} out of range (1-{len(importable_hosts)})"
@@ -619,7 +595,9 @@ class ConfigService:
             },
         )
 
-    def _remove_duplicate_hosts(self, hosts_to_import: list["SSHConfigEntry"]) -> list["SSHConfigEntry"]:
+    def _remove_duplicate_hosts(
+        self, hosts_to_import: list["SSHConfigEntry"]
+    ) -> list["SSHConfigEntry"]:
         """Remove duplicate hosts while preserving order."""
         unique_hosts = []
         seen_names = set()
@@ -700,6 +678,7 @@ class ConfigService:
         self,
         imported_hosts: list[dict[str, Any]],
         compose_path_configs: list[dict[str, Any]],
+        config_file_path: str | None = None,
     ) -> list[str]:
         """Format import results for display."""
         summary_lines = [
@@ -725,9 +704,11 @@ class ConfigService:
                 summary_lines.append(f"• {config['host_id']}: {config['compose_path']} ({source})")
             summary_lines.append("")
 
+        # Show actual config file path where configuration was saved
+        config_file_message = f"Configuration saved to {config_file_path}." if config_file_path else "Configuration updated in memory."
         summary_lines.extend(
             [
-                "Configuration saved to hosts.yml.",
+                config_file_message,
                 "You can now use these hosts with deploy_stack and other tools.",
             ]
         )

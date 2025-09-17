@@ -4,9 +4,8 @@ This module provides standardized error response formatting following RFC 7807:
 Problem Details for HTTP APIs standard, adapted for MCP tool responses.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
 
 from pydantic import BaseModel, Field
 
@@ -33,68 +32,65 @@ class ErrorDetail(BaseModel):
     detail: str | None = Field(default=None, description="Specific problem details")
     instance: str | None = Field(default=None, description="Problem occurrence URI")
     status: int | None = Field(default=None, description="HTTP-style status code")
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class DockerMCPErrorResponse:
     """Factory for creating standardized Docker MCP error responses."""
 
     # Standard problem types for Docker MCP operations
+    # RFC 7807 compliant absolute type URIs for better interoperability
     PROBLEM_TYPES: dict[str, dict[str, str]] = {
         "host-not-found": {
-            "type": "/problems/host-not-found",
+            "type": "https://docker-mcp.github.io/problems/host-not-found",
             "title": "Host Not Found",
         },
         "docker-context-error": {
-            "type": "/problems/docker-context-error",
+            "type": "https://docker-mcp.github.io/problems/docker-context-error",
             "title": "Docker Context Error",
         },
         "docker-command-error": {
-            "type": "/problems/docker-command-error",
+            "type": "https://docker-mcp.github.io/problems/docker-command-error",
             "title": "Docker Command Failed",
         },
         "container-not-found": {
-            "type": "/problems/container-not-found",
+            "type": "https://docker-mcp.github.io/problems/container-not-found",
             "title": "Container Not Found",
         },
         "stack-not-found": {
-            "type": "/problems/stack-not-found",
+            "type": "https://docker-mcp.github.io/problems/stack-not-found",
             "title": "Stack Not Found",
         },
         "migration-error": {
-            "type": "/problems/migration-error",
+            "type": "https://docker-mcp.github.io/problems/migration-error",
             "title": "Migration Failed",
         },
         "transfer-error": {
-            "type": "/problems/transfer-error",
+            "type": "https://docker-mcp.github.io/problems/transfer-error",
             "title": "Data Transfer Failed",
         },
-        "zfs-error": {
-            "type": "/problems/zfs-error",
-            "title": "ZFS Operation Failed",
-        },
         "backup-error": {
-            "type": "/problems/backup-error",
+            "type": "https://docker-mcp.github.io/problems/backup-error",
             "title": "Backup Operation Failed",
         },
         "validation-error": {
-            "type": "/problems/validation-error",
+            "type": "https://docker-mcp.github.io/problems/validation-error",
             "title": "Input Validation Failed",
         },
         "configuration-error": {
-            "type": "/problems/configuration-error",
+            "type": "https://docker-mcp.github.io/problems/configuration-error",
             "title": "Configuration Error",
         },
         "permission-error": {
-            "type": "/problems/permission-error",
+            "type": "https://docker-mcp.github.io/problems/permission-error",
             "title": "Insufficient Permissions",
         },
         "network-error": {
-            "type": "/problems/network-error",
+            "type": "https://docker-mcp.github.io/problems/network-error",
             "title": "Network Communication Failed",
         },
         "timeout-error": {
-            "type": "/problems/timeout-error",
+            "type": "https://docker-mcp.github.io/problems/timeout-error",
             "title": "Operation Timed Out",
         },
     }
@@ -122,7 +118,9 @@ class DockerMCPErrorResponse:
         Returns:
             RFC 7807 compliant error response dictionary
         """
-        error_detail = ErrorDetail(error=error_message, detail=detail, instance=instance, status=status)
+        error_detail = ErrorDetail(
+            error=error_message, detail=detail, instance=instance, status=status
+        )
 
         # Add standard problem type if provided
         if problem_type and problem_type in cls.PROBLEM_TYPES:
@@ -192,7 +190,7 @@ class DockerMCPErrorResponse:
             error_message=f"Docker command failed with exit code {exit_code}",
             problem_type="docker-command-error",
             detail=f"Command '{command}' failed on host '{host_id}': {stderr}",
-            instance=f"/hosts/{host_id}/docker-commands/{quote(command, safe='')}",
+            instance=f"/hosts/{host_id}/docker-commands/execute",
             status=502,
             context={
                 "host_id": host_id,
@@ -288,7 +286,7 @@ def create_success_response(
     """
     response: dict[str, Any] = {
         "success": True,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
     if data is not None:
@@ -298,7 +296,10 @@ def create_success_response(
         response["message"] = message
 
     if context:
-        response.update(context)
+        reserved = {"success", "timestamp", "data", "message"}
+        safe_ctx = {k: v for k, v in context.items() if k not in reserved}
+        if safe_ctx:
+            response.update(safe_ctx)
 
     return response
 

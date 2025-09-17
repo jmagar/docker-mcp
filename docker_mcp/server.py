@@ -95,7 +95,7 @@ def get_data_dir() -> Path:
     env_candidates: list[Path | None] = [
         (Path(p) if (p := os.getenv("FASTMCP_DATA_DIR")) else None),
         (Path(p) if (p := os.getenv("DOCKER_MCP_DATA_DIR")) else None),
-        (Path(os.getenv("XDG_DATA_HOME")) / "docker-mcp") if os.getenv("XDG_DATA_HOME") else None,
+        (Path(xdg_path) / "docker-mcp") if (xdg_path := os.getenv("XDG_DATA_HOME")) else None,
     ]
 
     # Check explicit environment overrides
@@ -283,9 +283,7 @@ class DockerMCPServer:
             return float(value)
         except ValueError:
             self.logger.warning(
-                f"Invalid {var_name}; using default",
-                value=os.getenv(var_name),
-                default=default
+                f"Invalid {var_name}; using default", value=os.getenv(var_name), default=default
             )
             return default
 
@@ -298,9 +296,7 @@ class DockerMCPServer:
             return int(value)
         except ValueError:
             self.logger.warning(
-                f"Invalid {var_name}; using default",
-                value=os.getenv(var_name),
-                default=default
+                f"Invalid {var_name}; using default", value=os.getenv(var_name), default=default
             )
             return default
 
@@ -313,9 +309,7 @@ class DockerMCPServer:
             return value.strip().lower() in ("1", "true", "yes", "on")
         except (ValueError, AttributeError):
             self.logger.warning(
-                f"Invalid {var_name}; using default",
-                value=os.getenv(var_name),
-                default=default
+                f"Invalid {var_name}; using default", value=os.getenv(var_name), default=default
             )
             return default
 
@@ -395,9 +389,9 @@ class DockerMCPServer:
 
         # Add diagnostic auth-protected tools (if auth enabled)
         try:
-            from fastmcp.server.dependencies import get_access_token  # type: ignore
+            from fastmcp.server.dependencies import get_access_token
 
-            @self.app.tool  # type: ignore[attr-defined]
+            @self.app.tool
             async def whoami() -> dict[str, Any]:
                 """Return identity claims for the authenticated user."""
                 token = get_access_token()
@@ -412,7 +406,7 @@ class DockerMCPServer:
                     "picture": token.claims.get("picture"),
                 }
 
-            @self.app.tool  # type: ignore[attr-defined]
+            @self.app.tool
             async def get_user_info() -> dict[str, Any]:
                 """Return simplified user info for authenticated Google user."""
                 token = get_access_token()
@@ -469,12 +463,14 @@ class DockerMCPServer:
 
     def _setup_test_compatibility(self) -> None:
         """Set up test compatibility wrapper for list_tools."""
+        if self.app is None:
+            return
         try:
             import inspect
 
             app_ref = self.app
 
-            def _list_tools_sync():  # type: ignore[no-redef]
+            def _list_tools_sync():
                 getter = getattr(app_ref, "get_tools", None)
                 if getter is None:
                     # Some FastMCP versions might already have list_tools
@@ -499,13 +495,15 @@ class DockerMCPServer:
 
             # Attach wrapper only if list_tools is absent
             if not hasattr(self.app, "list_tools"):
-                self.app.list_tools = _list_tools_sync  # type: ignore[assignment]
+                self.app.list_tools = _list_tools_sync
         except Exception as e:
             # Log the exception but continue
             self.logger.debug("Failed to set up test compatibility wrapper", error=str(e))
 
     def _configure_middleware(self) -> None:
         """Configure FastMCP middleware stack."""
+        if self.app is None:
+            return
         # Add middleware in logical order (first added = first executed)
         # Error handling first to catch all errors
         self.app.add_middleware(
@@ -588,13 +586,14 @@ class DockerMCPServer:
         """Parse JSON array format scopes."""
         try:
             import json
+
             parsed_scopes = json.loads(scopes_raw)
             return self._validate_parsed_scopes(parsed_scopes)
         except (json.JSONDecodeError, TypeError) as e:
             self.logger.warning(
                 "Failed to parse FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES as JSON",
                 error=str(e),
-                raw_value=scopes_raw[:100] + "..." if len(scopes_raw) > 100 else scopes_raw
+                raw_value=scopes_raw[:100] + "..." if len(scopes_raw) > 100 else scopes_raw,
             )
             return []
 
@@ -613,19 +612,17 @@ class DockerMCPServer:
         """Validate and filter parsed scopes."""
         if not isinstance(parsed_scopes, list):
             self.logger.warning(
-                "Invalid scope format - expected JSON array, got %s",
-                type(parsed_scopes).__name__
+                "Invalid scope format - expected JSON array, got %s", type(parsed_scopes).__name__
             )
             return []
 
         if len(parsed_scopes) > 50:  # Reasonable limit
-            self.logger.warning(
-                "Too many scopes - maximum 50 allowed, got %d",
-                len(parsed_scopes)
-            )
+            self.logger.warning("Too many scopes - maximum 50 allowed, got %d", len(parsed_scopes))
             return []
 
-        if not all(isinstance(s, str) and len(s.strip()) > 0 and len(s) < 500 for s in parsed_scopes):
+        if not all(
+            isinstance(s, str) and len(s.strip()) > 0 and len(s) < 500 for s in parsed_scopes
+        ):
             self.logger.warning(
                 "Invalid scope entries - all entries must be non-empty strings under 500 characters"
             )
@@ -655,20 +652,18 @@ class DockerMCPServer:
             return False
 
         # Known standard OpenID Connect scopes
-        standard_scopes = {
-            "openid", "profile", "email", "address", "phone", "offline_access"
-        }
+        standard_scopes = {"openid", "profile", "email", "address", "phone", "offline_access"}
 
         if scope in standard_scopes:
             return True
 
         # Valid URL pattern for Google API scopes
-        url_pattern = r'^https://www\.googleapis\.com/auth/[a-zA-Z0-9._-]+$'
+        url_pattern = r"^https://www\.googleapis\.com/auth/[a-zA-Z0-9._-]+$"
         if re.match(url_pattern, scope):
             return True
 
         # Simple identifier pattern (letters, numbers, dots, underscores, hyphens)
-        simple_pattern = r'^[a-zA-Z][a-zA-Z0-9._-]*$'
+        simple_pattern = r"^[a-zA-Z][a-zA-Z0-9._-]*$"
         if re.match(simple_pattern, scope):
             return True
 
@@ -731,6 +726,8 @@ class DockerMCPServer:
         Resources provide clean, URI-based access to data without side effects.
         They complement tools by offering cacheable, parametrized data retrieval.
         """
+        if self.app is None:
+            return
         try:
             # Port mapping resource - ports://{host_id}
             port_resource = PortMappingResource(self.container_service, self)
@@ -785,12 +782,6 @@ class DockerMCPServer:
             str, Field(default="", description="Application data storage path")
         ] = "",
         enabled: Annotated[bool, Field(default=True, description="Whether host is enabled")] = True,
-        zfs_capable: Annotated[
-            bool, Field(default=False, description="Whether host has ZFS available")
-        ] = False,
-        zfs_dataset: Annotated[
-            str, Field(default="", description="ZFS dataset path for appdata")
-        ] = "",
         ssh_config_path: Annotated[
             str, Field(default="", description="Path to SSH config file")
         ] = "",
@@ -842,14 +833,14 @@ class DockerMCPServer:
 
         • discover: Discover paths and capabilities on hosts
           - Required: host_id (use 'all' to discover all hosts sequentially)
-          - Discovers: compose_path, appdata_path, ZFS capabilities
+          - Discovers: compose_path, appdata_path
           - Single host: Fast discovery (5-15 seconds)
           - All hosts: Sequential discovery (30-60 seconds total)
-          - Auto-tags: Adds "zfs" tag if ZFS detected
+          - Auto-tags: Adds discovery status tags
 
         • edit: Modify host configuration
           - Required: host_id
-          - Optional: ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, compose_path, appdata_path, enabled, zfs_capable, zfs_dataset
+          - Optional: ssh_host, ssh_user, ssh_port, ssh_key_path, description, tags, compose_path, appdata_path, enabled
 
         • remove: Remove host from configuration
           - Required: host_id
@@ -876,8 +867,6 @@ class DockerMCPServer:
                 compose_path=compose_path if compose_path else None,
                 appdata_path=appdata_path if appdata_path else None,
                 enabled=enabled,
-                zfs_capable=zfs_capable,
-                zfs_dataset=zfs_dataset if zfs_dataset else None,
                 port=port,
                 cleanup_type=cleanup_type,
                 frequency=frequency,
@@ -1298,6 +1287,8 @@ class DockerMCPServer:
             )
 
             # FastMCP.run() is synchronous and manages its own event loop
+            if self.app is None:
+                raise RuntimeError("FastMCP app not initialized")
             self.app.run(
                 transport="http",
                 host=self.config.server.host,
@@ -1311,9 +1302,12 @@ class DockerMCPServer:
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
-    from dotenv import load_dotenv
+    try:
+        from dotenv import load_dotenv
 
-    load_dotenv()
+        load_dotenv()
+    except Exception:  # nosec S110
+        pass
 
     default_host = os.getenv("FASTMCP_HOST", "127.0.0.1")  # nosec B104 - Use 0.0.0.0 for container deployment
     default_port = int(os.getenv("FASTMCP_PORT", "8000"))

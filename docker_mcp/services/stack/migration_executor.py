@@ -9,11 +9,11 @@ import asyncio
 import shlex
 import subprocess
 import tempfile
-from typing import cast
+from typing import Any, cast
 
 import structlog
 
-from ...core.backup import BackupManager
+from ...core.backup import BackupInfo, BackupManager
 from ...core.config_loader import DockerHost, DockerMCPConfig
 from ...core.docker_context import DockerContextManager
 from ...core.migration.manager import MigrationManager
@@ -54,13 +54,18 @@ class StackMigrationExecutor:
 
             # Read compose file
             read_cmd = ssh_cmd_source + [f"cat {shlex.quote(compose_file_path)}"]
-            result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                read_cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    read_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                self.logger.error("Compose read timed out", host_id=host_id, stack_name=stack_name)
+                return False, "", compose_file_path
 
             if result.returncode != 0:
                 return False, "", compose_file_path
@@ -68,7 +73,12 @@ class StackMigrationExecutor:
             return True, result.stdout, compose_file_path
 
         except Exception as e:
-            self.logger.error("Failed to retrieve compose file", error=str(e))
+            self.logger.error(
+                "Failed to retrieve compose file",
+                error=str(e),
+                host_id=host_id,
+                stack_name=stack_name,
+            )
             return False, "", ""
 
     async def create_backup_archive(
@@ -81,7 +91,7 @@ class StackMigrationExecutor:
         """Create archive of volume data for BACKUP purposes only.
 
         WARNING: This method is for backup operations only, not migration!
-        Migrations use direct transfer methods (rsync/ZFS).
+        Migrations use direct transfer methods (rsync).
 
         Args:
             source_host: Source host configuration
@@ -139,7 +149,12 @@ class StackMigrationExecutor:
             return True, archive_path, metadata
 
         except Exception as e:
-            self.logger.error("Failed to create data archive", error=str(e))
+            self.logger.error(
+                "Failed to create data archive",
+                error=str(e),
+                host_id=source_host.hostname,
+                stack_name=stack_name,
+            )
             return False, "", {"success": False, "error": str(e)}
 
     async def transfer_data(
@@ -152,9 +167,7 @@ class StackMigrationExecutor:
     ) -> tuple[bool, dict]:
         """Transfer volume data directly between hosts (no archiving).
 
-        Uses optimal transfer method:
-        - rsync: Direct directory synchronization
-        - ZFS: Native dataset send/receive
+        Uses rsync for direct directory synchronization
 
         Args:
             source_host: Source host configuration
@@ -188,7 +201,12 @@ class StackMigrationExecutor:
             return transfer_result["success"], transfer_result
 
         except Exception as e:
-            self.logger.error("Failed to transfer data", error=str(e))
+            self.logger.error(
+                "Failed to transfer data",
+                error=str(e),
+                host_id=source_host.hostname,
+                stack_name=stack_name,
+            )
             return False, {"success": False, "error": str(e)}
 
     async def extract_archive(
@@ -278,6 +296,7 @@ class StackMigrationExecutor:
             if not result["success"]:
                 return False, result
 
+            container_ready = False
             # Start stack if requested
             if start_stack:
                 start_result = await self.stack_tools.manage_stack(
@@ -293,9 +312,6 @@ class StackMigrationExecutor:
                         "start_success": False,
                         "start_error": start_result.get("error"),
                     }
-
-                # Track container readiness status
-                container_ready = False
 
                 # Wait for containers to fully start after deployment
                 try:
@@ -332,10 +348,12 @@ class StackMigrationExecutor:
                         )
 
                         # Safely check if result has the expected stdout attribute and contains "RUNNING"
-                        if (result.returncode == 0 and
-                            hasattr(result, "stdout") and
-                            isinstance(result.stdout, str) and
-                            "RUNNING" in result.stdout):
+                        if (
+                            result.returncode == 0
+                            and hasattr(result, "stdout")
+                            and isinstance(result.stdout, str)
+                            and "RUNNING" in result.stdout
+                        ):
                             container_ready = True
                             self.logger.info(
                                 "Container ready for verification",
@@ -374,7 +392,7 @@ class StackMigrationExecutor:
         host_id: str,
         stack_name: str,
         expected_mounts: list[str],
-        source_inventory: dict = None,
+        source_inventory: dict[str, Any] | None = None,
         dry_run: bool = False,
     ) -> tuple[bool, dict]:
         """Verify deployment success and data integrity.
@@ -548,7 +566,11 @@ class StackMigrationExecutor:
                 backup_reason="Pre-migration backup",
             )
 
-            return backup_info["success"], backup_info
+            # Convert BackupInfo to dict and determine success
+            backup_dict = backup_info.model_dump()
+            # Consider backup successful if backup_path is not None
+            success = backup_info.backup_path is not None
+            return success, backup_dict
 
         except Exception as e:
             self.logger.error("Failed to create backup", error=str(e))
@@ -571,8 +593,10 @@ class StackMigrationExecutor:
             return True, "Dry run - backup restore would be performed"
 
         try:
+            # Convert dict back to BackupInfo object
+            backup_obj = BackupInfo.model_validate(backup_info)
             success, message = await self.backup_manager.restore_directory_backup(
-                host=target_host, backup_info=backup_info
+                host=target_host, backup_info=backup_obj
             )
 
             return success, message

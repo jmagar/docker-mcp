@@ -4,7 +4,7 @@ Container Management Service
 Business logic for Docker container operations with formatted output.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -61,7 +61,7 @@ class ContainerService:
             "action": action,
             "error": str(error),
             "error_type": type(error).__name__,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
     def _validate_container_safety(self, container_id: str) -> tuple[bool, str]:
@@ -670,17 +670,31 @@ class ContainerService:
     ) -> dict[str, Any]:
         """Handle list container action."""
         if not host_id:
-            return {
-                "success": False,
-                "error": "host_id is required for list action",
-                "action": "list",
-            }
+            return self._build_error_response(
+                host_id="",
+                container_id=None,
+                action="list",
+                error=ValueError("host_id missing"),
+                message="host_id is required for list action",
+            )
 
         # Validate pagination parameters
         if limit < 1 or limit > 1000:
-            return {"success": False, "error": "limit must be between 1 and 1000"}
+            return self._build_error_response(
+                host_id=host_id,
+                container_id=None,
+                action="list",
+                error=ValueError("invalid limit"),
+                message="limit must be between 1 and 1000",
+            )
         if offset < 0:
-            return {"success": False, "error": "offset must be >= 0"}
+            return self._build_error_response(
+                host_id=host_id,
+                container_id=None,
+                action="list",
+                error=ValueError("invalid offset"),
+                message="offset must be >= 0",
+            )
 
         result = await self.list_containers(host_id, all_containers, limit, offset)
         return self._extract_structured_content(result)
@@ -688,18 +702,21 @@ class ContainerService:
     async def _handle_info_action(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Handle container info action."""
         if not host_id:
-            return {
-                "success": False,
-                "error": "host_id is required for info action",
-                "action": "info",
-            }
+            return self._build_error_response(
+                host_id="",
+                container_id=None,
+                action="info",
+                error=ValueError("host_id missing"),
+                message="host_id is required for info action",
+            )
         if not container_id:
-            return {
-                "success": False,
-                "error": "container_id is required for info action",
-                "action": "info",
-                "host_id": host_id,
-            }
+            return self._build_error_response(
+                host_id=host_id,
+                container_id=None,
+                action="info",
+                error=ValueError("container_id missing"),
+                message="container_id is required for info action",
+            )
 
         info_result = await self.get_container_info(host_id, container_id)
         return self._extract_structured_content(info_result)
@@ -709,22 +726,31 @@ class ContainerService:
     ) -> dict[str, Any]:
         """Handle container management actions (start, stop, restart, etc.)."""
         if not host_id:
-            return {
-                "success": False,
-                "error": f"host_id is required for {action} action",
-                "action": str(action),
-            }
+            return self._build_error_response(
+                host_id="",
+                container_id=None,
+                action=str(action),
+                error=ValueError("host_id missing"),
+                message=f"host_id is required for {action} action",
+            )
         if not container_id:
-            return {
-                "success": False,
-                "error": f"container_id is required for {action} action",
-                "action": str(action),
-                "host_id": host_id,
-            }
+            return self._build_error_response(
+                host_id=host_id,
+                container_id=None,
+                action=str(action),
+                error=ValueError("container_id missing"),
+                message=f"container_id is required for {action} action",
+            )
 
         # Validate timeout parameter
         if timeout < 1 or timeout > 300:
-            return {"success": False, "error": "timeout must be between 1 and 300 seconds"}
+            return self._build_error_response(
+                host_id=host_id,
+                container_id=container_id,
+                action=str(action),
+                error=ValueError("invalid timeout"),
+                message="timeout must be between 1 and 300 seconds",
+            )
 
         result = await self.manage_container(host_id, container_id, action.value, force, timeout)
         return self._extract_structured_content(result)
@@ -734,22 +760,31 @@ class ContainerService:
     ) -> dict[str, Any]:
         """Handle container logs action."""
         if not host_id:
-            return {
-                "success": False,
-                "error": "host_id is required for logs action",
-                "action": "logs",
-            }
+            return self._build_error_response(
+                host_id="",
+                container_id=None,
+                action="logs",
+                error=ValueError("host_id missing"),
+                message="host_id is required for logs action",
+            )
         if not container_id:
-            return {
-                "success": False,
-                "error": "container_id is required for logs action",
-                "action": "logs",
-                "host_id": host_id,
-            }
+            return self._build_error_response(
+                host_id=host_id,
+                container_id=None,
+                action="logs",
+                error=ValueError("container_id missing"),
+                message="container_id is required for logs action",
+            )
 
         # Validate lines parameter
         if lines < 1 or lines > 10000:
-            return {"success": False, "error": "lines must be between 1 and 10000"}
+            return self._build_error_response(
+                host_id=host_id,
+                container_id=container_id,
+                action="logs",
+                error=ValueError("invalid lines parameter"),
+                message="lines must be between 1 and 10000",
+            )
 
         try:
             logs_result = await self.logs_service.get_container_logs(
@@ -780,28 +815,32 @@ class ContainerService:
             }
 
         except Exception as e:
-            self.logger.error(
-                "Failed to get container logs",
+            return self._build_error_response(
                 host_id=host_id,
                 container_id=container_id,
-                error=str(e),
+                action="logs",
+                error=e,
+                message="Failed to get container logs",
             )
-            return {
-                "success": False,
-                "error": str(e),
-                "host_id": host_id,
-                "container_id": container_id,
-            }
 
     async def _handle_pull_action(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Handle image pull action."""
         if not host_id:
-            return {"success": False, "error": "host_id is required for pull action"}
+            return self._build_error_response(
+                host_id="",
+                container_id=None,
+                action="pull",
+                error=ValueError("host_id missing"),
+                message="host_id is required for pull action",
+            )
         if not container_id:
-            return {
-                "success": False,
-                "error": "container_id is required for pull action (image name)",
-            }
+            return self._build_error_response(
+                host_id=host_id,
+                container_id=None,
+                action="pull",
+                error=ValueError("image name missing"),
+                message="container_id is required for pull action (image name)",
+            )
 
         # For pull, container_id is actually the image name
         result = await self.pull_image(host_id, container_id)
@@ -818,7 +857,6 @@ class ContainerService:
                 "start",
                 "stop",
                 "restart",
-                "build",
                 "logs",
                 "pull",
             ],

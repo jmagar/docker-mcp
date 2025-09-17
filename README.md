@@ -67,10 +67,9 @@ Simplified Docker hosts management tool.
 
 • **discover**: Discover paths and capabilities on hosts
   - Required: host_id (use 'all' to discover all hosts sequentially)
-  - Discovers: compose_path, appdata_path, ZFS capabilities
+  - Discovers: compose_path, appdata_path
   - Single host: Fast discovery (5-15 seconds)
   - All hosts: Sequential discovery (30-60 seconds total)
-  - Auto-tags: Adds "zfs" tag if ZFS detected
 
 • **edit**: Modify host configuration
   - Required: host_id
@@ -228,16 +227,15 @@ Different operations need different approaches:
 
 **🚀 Advanced Migration Features:**
 
-**Automatic Transfer Method Selection:**
-- **ZFS Send/Receive**: Used automatically when both hosts have `zfs_capable: true` - provides block-level transfers, atomic snapshots, and property preservation
-- **Rsync Fallback**: Universal compatibility for mixed environments or non-ZFS hosts
+**Transfer Method:**
+- **Rsync**: Universal compatibility for all Docker environments with compression and delta transfers
 
 **Enhanced Safety Features:**
 - **Always stops containers by default** (must explicitly skip with `skip_stop_source: true` - NOT recommended)
 - **Verifies all containers are completely stopped** before archiving (prevents data corruption)
 - **Archive integrity verification** before transfer
 - **Filesystem sync delays** after container shutdown
-- **Atomic operations** with ZFS snapshots for crash-consistent backups
+- **Reliable transfers** with rsync for data consistency
 
 ## 💡 Real-World Use Cases
 
@@ -287,31 +285,7 @@ Perfect for hardware upgrades, load balancing, or moving to faster storage:
    "Do a dry run migration of wordpress from old-server to new-server"
    ```
 
-2. **High-Performance ZFS Migration** (automatic when both hosts support ZFS):
-   ```yaml
-   # Both hosts configured with ZFS support
-   hosts:
-     old-server:
-       hostname: old.example.com
-       appdata_path: /tank/appdata
-       zfs_capable: true
-       zfs_dataset: tank/appdata
-       
-     new-server:
-       hostname: new.example.com  
-       appdata_path: /pool/appdata
-       zfs_capable: true
-       zfs_dataset: pool/appdata
-   ```
-   
-   **ZFS Migration Process:**
-   - Creates atomic snapshot on source dataset
-   - Uses `zfs send | zfs receive` for block-level transfer
-   - Preserves all metadata, permissions, and timestamps
-   - **Up to 10x faster** than rsync for large datasets
-   - Automatic cleanup of temporary snapshots
-
-3. **Universal Rsync Migration** (automatic fallback for mixed environments):
+2. **Rsync Migration** (universal compatibility):
    - **ALWAYS stops containers by default** (safety first!)
    - **Verifies all containers are completely stopped** (prevents data corruption)
    - Waits for filesystem sync to ensure data consistency
@@ -326,7 +300,7 @@ Perfect for hardware upgrades, load balancing, or moving to faster storage:
 - Named Docker volumes and bind mounts
 - Compose configurations and environment variables
 - Path translation between different host structures
-- **Automatic method selection** (ZFS when available, rsync otherwise)
+- **Rsync transfer** with compression and delta synchronization
 - **Data consistency** through container stopping and verification
 
 ## 🔧 Configuration (Optional!)
@@ -342,31 +316,23 @@ But if you want to customize:
 Create `~/.docker-mcp/config/hosts.yml`:
 ```yaml
 hosts:
-  # High-Performance ZFS Host
-  zfs-server:
+  # Production Docker Host
+  production-server:
     hostname: 192.168.1.100
     user: myuser
-    description: "ZFS-enabled Docker server"
-    compose_path: /tank/compose      # Where to store compose files
-    appdata_path: /tank/appdata      # ZFS dataset mount point  
-    zfs_capable: true                # Enable ZFS send/receive migrations
-    zfs_dataset: tank/appdata        # ZFS dataset for block-level transfers
+    description: "Production Docker server"
+    compose_path: /opt/compose       # Where to store compose files
+    appdata_path: /opt/appdata       # Container data directory
     
-  # Standard Linux Host  
-  standard-server:
+  # Staging Docker Host  
+  staging-server:
     hostname: 192.168.1.101
     user: myuser
-    description: "Standard Docker server" 
+    description: "Staging Docker server" 
     compose_path: /opt/compose       # Where to store compose files
-    appdata_path: /opt/appdata       # Standard filesystem directory
-    zfs_capable: false               # Will use rsync for migrations
+    appdata_path: /opt/appdata       # Container data directory
 ```
 
-**ZFS Configuration Benefits:**
-- **Automatic optimization**: System chooses ZFS send/receive when both hosts support it
-- **Graceful fallback**: Uses rsync when ZFS isn't available on source or target
-- **Zero configuration**: Just mark hosts as `zfs_capable: true` and provide the dataset
-- **Performance gains**: Up to 10x faster transfers for large datasets with ZFS
 
 ### Use Environment Variables
 ```bash
@@ -374,27 +340,20 @@ FASTMCP_PORT=8080  # Change port
 LOG_LEVEL=DEBUG    # More verbose logging
 ```
 
-### 🚀 Transfer Methods Comparison
+### 🚀 Transfer Method
 
-| Feature | ZFS Send/Receive | Rsync |
-|---------|------------------|-------|
-| **Speed** | Up to 10x faster for large datasets | Universal baseline speed |
-| **Compatibility** | ZFS hosts only | Works with any Linux host |
-| **Data Integrity** | Block-level checksums + atomic snapshots | File-level verification |
-| **Incremental** | Built-in incremental support | Delta sync with compression |
-| **Metadata** | Preserves all ZFS properties | Standard file attributes |
-| **Atomic** | Snapshot-based (crash consistent) | File-by-file transfer |
-| **Use Case** | Large datasets, ZFS infrastructure | Mixed environments, universal |
+**Rsync Transfer Features:**
+- **Universal Compatibility**: Works with any Linux Docker host
+- **Data Integrity**: File-level verification with checksums
+- **Incremental**: Delta sync with compression for efficiency
+- **Metadata**: Preserves permissions, timestamps, and ownership
+- **Reliable**: File-by-file transfer with retry capabilities
+- **Use Case**: All Docker environments, universal compatibility
 
-**When ZFS is Used:**
-- Both source AND target hosts must have `zfs_capable: true`
-- ZFS datasets must exist and be accessible
-- Automatic fallback to rsync if ZFS detection fails
-
-**Performance Example:**
-- **50GB WordPress site with media**: ZFS ~8 minutes, rsync ~45 minutes
-- **Small config-only stack**: Both methods complete in under 1 minute
-- **Database with frequent changes**: ZFS snapshots ensure consistency
+**Performance:**
+- **Large datasets**: Efficient delta transfers reduce bandwidth
+- **Small stacks**: Quick transfers with minimal overhead
+- **Database migrations**: Container stopping ensures data consistency
 
 ## 🐳 Docker Deployment
 

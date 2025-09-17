@@ -1,7 +1,8 @@
 """Log streaming MCP tools."""
 
 import asyncio
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import docker
@@ -24,16 +25,43 @@ class LogTools:
         self.context_manager = context_manager
 
     def _build_error_response(
-        self, host_id: str, operation: str, error_message: str, container_id: str | None = None, **context
+        self,
+        host_id: str,
+        operation: str,
+        error_message: str,
+        container_id: str | None = None,
+        problem_type: str | None = None,
+        **context,
     ) -> dict[str, Any]:
-        """Build standardized error response with container context."""
+        """Build standardized error response with container context.
+
+        Args:
+            host_id: ID of the Docker host
+            operation: Name of the operation that failed
+            error_message: Error message to include
+            container_id: Optional container ID for container-specific errors
+            problem_type: Explicit error type specification for precise categorization.
+                         Valid values: 'container_not_found', 'host_not_found',
+                         'docker_context_error', 'generic'
+            **context: Additional context to include in error response
+        """
         base_context = {"host_id": host_id, "operation": operation}
         if container_id:
             base_context["container_id"] = container_id
         # Merge additional context parameters
         base_context.update(context)
 
-        # Determine error type based on message content
+        # Use explicit problem_type if provided for precise error categorization
+        if problem_type == "container_not_found":
+            return DockerMCPErrorResponse.container_not_found(host_id, container_id or "unknown")
+        elif problem_type == "host_not_found":
+            return DockerMCPErrorResponse.host_not_found(host_id)
+        elif problem_type == "docker_context_error":
+            return DockerMCPErrorResponse.docker_context_error(host_id, operation, error_message)
+        elif problem_type == "generic":
+            return DockerMCPErrorResponse.generic_error(error_message, base_context)
+
+        # Fallback to pattern matching for backward compatibility when no explicit type provided
         if "not found" in error_message.lower():
             if container_id:
                 return DockerMCPErrorResponse.container_not_found(host_id, container_id)
@@ -67,7 +95,13 @@ class LogTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return self._build_error_response(host_id, "get_container_logs", f"Could not connect to Docker on host {host_id}", container_id)
+                return self._build_error_response(
+                    host_id,
+                    "get_container_logs",
+                    f"Could not connect to Docker on host {host_id}",
+                    container_id,
+                    problem_type="docker_context_error",
+                )
 
             # Get container and retrieve logs using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -78,7 +112,11 @@ class LogTools:
                 "timestamps": timestamps,
             }
             if since:
-                logs_kwargs["since"] = since
+                try:
+                    dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                    logs_kwargs["since"] = int(dt.timestamp())
+                except Exception:
+                    logs_kwargs["since"] = since  # fallback
 
             # Get logs using Docker SDK
             logs_bytes = await asyncio.to_thread(container.logs, **logs_kwargs)
@@ -92,7 +130,7 @@ class LogTools:
                 container_id=container_id,
                 host_id=host_id,
                 logs=logs_data,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC),
                 truncated=len(logs_data) >= lines,
             )
 
@@ -105,12 +143,19 @@ class LogTools:
 
             return create_success_response(
                 data=logs.model_dump(),
-                context={"host_id": host_id, "operation": "get_container_logs", "container_id": container_id}
+                context={
+                    "host_id": host_id,
+                    "operation": "get_container_logs",
+                    "container_id": container_id,
+                },
             )
 
         except docker.errors.NotFound:
             logger.error("Container not found for logs", host_id=host_id, container_id=container_id)
-            return self._build_error_response(host_id, "get_container_logs", f"Container {container_id} not found", container_id)
+            return self._build_error_response(
+                host_id, "get_container_logs", f"Container {container_id} not found", container_id,
+                problem_type="container_not_found"
+            )
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error getting container logs",
@@ -118,7 +163,9 @@ class LogTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return self._build_error_response(host_id, "get_container_logs", f"Failed to get logs: {str(e)}", container_id)
+            return self._build_error_response(
+                host_id, "get_container_logs", f"Failed to get logs: {str(e)}", container_id
+            )
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to get container logs",
@@ -169,7 +216,7 @@ class LogTools:
 
             # In a real implementation, this would register the stream
             # with FastMCP's streaming system and return an endpoint URL
-            stream_id = f"{host_id}_{container_id}_{datetime.now(timezone.utc).timestamp()}"
+            stream_id = f"{host_id}_{container_id}_{uuid.uuid4().hex}"
 
             logger.info(
                 "Log stream setup created",
@@ -190,7 +237,11 @@ class LogTools:
                         "reconnect": "Client should handle reconnection on connection loss",
                     },
                 },
-                context={"host_id": host_id, "operation": "stream_container_logs_setup", "container_id": container_id}
+                context={
+                    "host_id": host_id,
+                    "operation": "stream_container_logs_setup",
+                    "container_id": container_id,
+                },
             )
 
         except (DockerCommandError, DockerContextError) as e:
@@ -200,7 +251,9 @@ class LogTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return self._build_error_response(host_id, "stream_container_logs_setup", str(e), container_id)
+            return self._build_error_response(
+                host_id, "stream_container_logs_setup", str(e), container_id
+            )
 
     async def get_service_logs(
         self,
@@ -255,7 +308,11 @@ class LogTools:
                     "logs": logs_data,
                     "truncated": len(logs_data) >= lines,
                 },
-                context={"host_id": host_id, "operation": "get_service_logs", "service_name": service_name}
+                context={
+                    "host_id": host_id,
+                    "operation": "get_service_logs",
+                    "service_name": service_name,
+                },
             )
 
         except (DockerCommandError, DockerContextError) as e:
@@ -265,7 +322,9 @@ class LogTools:
                 service_name=service_name,
                 error=str(e),
             )
-            return self._build_error_response(host_id, "get_service_logs", str(e), service_name=service_name)
+            return self._build_error_response(
+                host_id, "get_service_logs", str(e), service_name=service_name
+            )
 
     async def _validate_container_exists(self, host_id: str, container_id: str) -> None:
         """Validate that a container exists and is accessible."""

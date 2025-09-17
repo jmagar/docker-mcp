@@ -7,6 +7,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: .cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
       - uses: astral-sh/uv-action@v1
       - run: uv run python scripts/analyze_codebase.py --out CODE_HEALTH_DUPLICATES_DEAD_CODE.md --json report.json
       - run: |

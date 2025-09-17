@@ -6,9 +6,10 @@ Handles SSH connectivity, network speed testing, and transfer time calculations.
 """
 
 import asyncio
+import shlex
 import subprocess
 import time
-from typing import Any, Dict
+from typing import Any
 
 import structlog
 from pydantic import BaseModel, Field
@@ -19,20 +20,31 @@ from ...utils import build_ssh_command, format_size
 
 class NetworkTestDetails(BaseModel):
     """Network connectivity test results with detailed information."""
-    
+
     overall_connectivity: bool = Field(description="Whether overall connectivity is successful")
-    tests: Dict[str, Any] = Field(default_factory=dict, description="Individual test results")
+    tests: dict[str, Any] = Field(default_factory=dict, description="Individual test results")
     error: str | None = Field(default=None, description="Error message if test failed")
 
 
 class TransferEstimates(BaseModel):
     """Transfer time estimates based on data size and network speed."""
-    
+
     data_size_bytes: int = Field(description="Size of data to transfer in bytes")
     data_size_human: str = Field(description="Human-readable data size")
     compressed_size_bytes: int = Field(description="Expected compressed size in bytes")
     compressed_size_human: str = Field(description="Human-readable compressed size")
-    estimates: Dict[str, Any] = Field(default_factory=dict, description="Transfer time estimates")
+    estimates: dict[str, Any] = Field(default_factory=dict, description="Transfer time estimates")
+
+
+class BandwidthResult(BaseModel):
+    """Network bandwidth measurement results."""
+
+    success: bool = Field(description="Whether bandwidth measurement succeeded")
+    bandwidth_mbps: float = Field(default=0.0, description="Measured bandwidth in Mbps")
+    test_size_mb: int = Field(description="Test file size in MB")
+    transfer_time_seconds: float = Field(default=0.0, description="Time taken for transfer")
+    throughput_mb_per_sec: float = Field(default=0.0, description="Throughput in MB/s")
+    error: str | None = Field(default=None, description="Error message if measurement failed")
 
 
 class StackNetwork:
@@ -113,7 +125,8 @@ class StackNetwork:
                 try:
                     # Create a small test file on source (1MB)
                     create_test_file_cmd = source_ssh_cmd[:-1] + [
-                        "dd if=/dev/zero of=/tmp/speed_test bs=1M count=1 2>/dev/null && echo 'FILE_CREATED'"  # noqa: S108
+                        "dd if=/dev/zero of=/tmp/speed_test bs=1M count=1 2>/dev/null && "
+                        "echo 'FILE_CREATED'"  # noqa: S108
                     ]
                     result = await asyncio.to_thread(
                         subprocess.run,  # nosec B603
@@ -128,12 +141,13 @@ class StackNetwork:
                         # Transfer the file using rsync
                         start_time = time.perf_counter()
 
-                        import shlex
-                        ssh_e = ["ssh"]
+                        ssh_e = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
                         if target_host.identity_file:
                             ssh_e += ["-i", target_host.identity_file]
                         remote = f"{target_host.user}@{target_host.hostname}:/tmp/speed_test_recv"
-                        remote_cmd = shlex.join(["rsync", "/tmp/speed_test", remote, "-e", shlex.join(ssh_e)])
+                        remote_cmd = shlex.join([
+                            "rsync", "/tmp/speed_test", remote, "-e", shlex.join(ssh_e)
+                        ])  # nosec S108
                         rsync_test_cmd = source_ssh_cmd[:-1] + [remote_cmd]
 
                         result = await asyncio.to_thread(
@@ -161,8 +175,12 @@ class StackNetwork:
                             }
 
                             # Cleanup test files
-                            cleanup_source = source_ssh_cmd[:-1] + ["rm -f /tmp/speed_test"]  # noqa: S108
-                            cleanup_target = target_ssh_cmd[:-1] + ["rm -f /tmp/speed_test_recv"]  # noqa: S108
+                            cleanup_source = source_ssh_cmd[:-1] + [
+                                "rm -f /tmp/speed_test"  # noqa: S108
+                            ]
+                            cleanup_target = target_ssh_cmd[:-1] + [
+                                "rm -f /tmp/speed_test_recv"  # noqa: S108
+                            ]
 
                             await asyncio.gather(
                                 asyncio.to_thread(
@@ -216,8 +234,10 @@ class StackNetwork:
             return False, details
 
     def estimate_transfer_time(
-        self, data_size_bytes: int, network_speed_details: dict = None
-    ) -> dict:
+        self,
+        data_size_bytes: int,
+        network_speed_details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Estimate transfer time based on data size and network speed.
 
         Args:
@@ -241,7 +261,7 @@ class StackNetwork:
 
         return estimates
 
-    def _create_base_estimates(self, data_size_bytes: int) -> dict:
+    def _create_base_estimates(self, data_size_bytes: int) -> dict[str, Any]:
         """Create the base estimates structure with data size information."""
         return {
             "data_size_bytes": data_size_bytes,
@@ -251,7 +271,9 @@ class StackNetwork:
             "estimates": {},
         }
 
-    def _add_actual_network_estimate(self, estimates: dict, network_speed_details: dict) -> None:
+    def _add_actual_network_estimate(
+        self, estimates: dict[str, Any], network_speed_details: dict[str, Any]
+    ) -> None:
         """Add actual network speed estimate based on speed test results."""
         try:
             speed_str = network_speed_details.get("estimated_speed", "10.0 Mbps")
@@ -334,7 +356,7 @@ class StackNetwork:
 
     async def measure_network_bandwidth(
         self, source_host: DockerHost, target_host: DockerHost, test_size_mb: int = 10
-    ) -> dict:
+    ) -> BandwidthResult:
         """Measure actual network bandwidth between hosts.
 
         Args:
@@ -343,22 +365,23 @@ class StackNetwork:
             test_size_mb: Size of test file in MB (default: 10MB)
 
         Returns:
-            Dict with bandwidth measurement results
+            BandwidthResult with bandwidth measurement results
         """
-        result = {
-            "success": False,
-            "bandwidth_mbps": 0.0,
-            "test_size_mb": test_size_mb,
-            "transfer_time_seconds": 0.0,
-            "error": None,
-        }
+        result = BandwidthResult(
+            success=False,
+            bandwidth_mbps=0.0,
+            test_size_mb=test_size_mb,
+            transfer_time_seconds=0.0,
+            error=None,
+        )
 
         try:
             source_ssh_cmd = build_ssh_command(source_host)
             target_ssh_cmd = build_ssh_command(target_host)
             # Create test file on source
             create_cmd = source_ssh_cmd + [
-                f"dd if=/dev/zero of=/tmp/bandwidth_test bs=1M count={test_size_mb} 2>/dev/null && echo 'CREATED'"  # noqa: S108
+                f"dd if=/dev/zero of=/tmp/bandwidth_test bs=1M count={test_size_mb} "
+                "2>/dev/null && echo 'CREATED'"  # noqa: S108
             ]
 
             create_result = await asyncio.to_thread(
@@ -371,18 +394,19 @@ class StackNetwork:
             )
 
             if create_result.returncode != 0 or "CREATED" not in create_result.stdout:
-                result["error"] = f"Failed to create test file: {create_result.stderr}"
+                result.error = f"Failed to create test file: {create_result.stderr}"
                 return result
 
             # Transfer file and measure time
             start_time = time.perf_counter()
 
-            import shlex
-            ssh_e = ["ssh"]
+            ssh_e = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
             if target_host.identity_file:
                 ssh_e += ["-i", target_host.identity_file]
             remote = f"{target_host.user}@{target_host.hostname}:/tmp/bandwidth_test_recv"
-            remote_cmd = shlex.join(["rsync", "/tmp/bandwidth_test", remote, "-e", shlex.join(ssh_e)])
+            remote_cmd = shlex.join([
+                "rsync", "/tmp/bandwidth_test", remote, "-e", shlex.join(ssh_e)
+            ])  # nosec S108
             transfer_cmd = source_ssh_cmd + [remote_cmd]
 
             transfer_result = await asyncio.to_thread(
@@ -401,16 +425,12 @@ class StackNetwork:
                 mb_per_second = test_size_mb / transfer_time if transfer_time > 0 else 0
                 mbps = mb_per_second * 8  # Convert MB/s to Mbps
 
-                result.update(
-                    {
-                        "success": True,
-                        "bandwidth_mbps": mbps,
-                        "transfer_time_seconds": transfer_time,
-                        "throughput_mb_per_sec": mb_per_second,
-                    }
-                )
+                result.success = True
+                result.bandwidth_mbps = mbps
+                result.transfer_time_seconds = transfer_time
+                result.throughput_mb_per_sec = mb_per_second
             else:
-                result["error"] = f"Transfer failed: {transfer_result.stderr}"
+                result.error = f"Transfer failed: {transfer_result.stderr}"
 
             # Cleanup test files
             cleanup_commands = [
@@ -424,12 +444,13 @@ class StackNetwork:
                         subprocess.run,  # nosec B603
                         cmd,
                         check=False,
+                        timeout=10,
                     )
                     for cmd in cleanup_commands
                 ]
             )
 
         except Exception as e:
-            result["error"] = f"Bandwidth measurement failed: {str(e)}"
+            result.error = f"Bandwidth measurement failed: {str(e)}"
 
         return result

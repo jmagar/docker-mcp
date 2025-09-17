@@ -67,7 +67,9 @@ class ContainerTools:
             # Get Docker client and list containers using Docker SDK
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                error_response = self._build_error_response(host_id, "list_containers", f"Could not connect to Docker on host {host_id}")
+                error_response = self._build_error_response(
+                    host_id, "list_containers", f"Could not connect to Docker on host {host_id}"
+                )
                 # Add container-specific fields to error response under "data" key
                 error_response["data"] = {
                     "containers": [],
@@ -165,7 +167,7 @@ class ContainerTools:
                         "has_prev": offset > 0,
                     },
                 },
-                context={"host_id": host_id, "operation": "list_containers"}
+                context={"host_id": host_id, "operation": "list_containers"},
             )
 
         except (DockerCommandError, DockerContextError) as e:
@@ -187,7 +189,7 @@ class ContainerTools:
                             "has_prev": offset > 0,
                         },
                     },
-                }
+                },
             )
 
     async def get_container_info(self, host_id: str, container_id: str) -> dict[str, Any]:
@@ -203,7 +205,12 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return self._build_error_response(host_id, "get_container_info", f"Could not connect to Docker on host {host_id}", container_id)
+                return self._build_error_response(
+                    host_id,
+                    "get_container_info",
+                    f"Could not connect to Docker on host {host_id}",
+                    container_id,
+                )
 
             # Use Docker SDK to get container
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -252,7 +259,11 @@ class ContainerTools:
                     "network_settings": network_settings,
                     "mounts": mounts,
                 },
-                context={"host_id": host_id, "operation": "get_container_info", "container_id": container_id}
+                context={
+                    "host_id": host_id,
+                    "operation": "get_container_info",
+                    "container_id": container_id,
+                },
             )
 
         except docker.errors.NotFound:
@@ -266,7 +277,10 @@ class ContainerTools:
                 error=str(e),
             )
             return DockerMCPErrorResponse.docker_command_error(
-                host_id, f"inspect {container_id}", getattr(e, 'response', {}).get('status_code', 500), str(e)
+                host_id,
+                f"inspect {container_id}",
+                getattr(e, "response", {}).get("status_code", 500),
+                str(e),
             )
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
@@ -277,7 +291,11 @@ class ContainerTools:
             )
             return DockerMCPErrorResponse.generic_error(
                 str(e),
-                {"host_id": host_id, "operation": "get_container_info", "container_id": container_id}
+                {
+                    "host_id": host_id,
+                    "operation": "get_container_info",
+                    "container_id": container_id,
+                },
             )
 
     async def start_container(self, host_id: str, container_id: str) -> dict[str, Any]:
@@ -293,7 +311,12 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return self._build_error_response(host_id, "start_container", f"Could not connect to Docker on host {host_id}", container_id)
+                return self._build_error_response(
+                    host_id,
+                    "start_container",
+                    f"Could not connect to Docker on host {host_id}",
+                    container_id,
+                )
 
             # Get container and start it using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -307,7 +330,11 @@ class ContainerTools:
                     "container_id": container_id,
                     "host_id": host_id,
                 },
-                context={"host_id": host_id, "operation": "start_container", "container_id": container_id}
+                context={
+                    "host_id": host_id,
+                    "operation": "start_container",
+                    "container_id": container_id,
+                },
             )
 
         except docker.errors.NotFound:
@@ -321,7 +348,10 @@ class ContainerTools:
                 error=str(e),
             )
             return DockerMCPErrorResponse.docker_command_error(
-                host_id, f"start {container_id}", getattr(e, 'response', {}).get('status_code', 500), str(e)
+                host_id,
+                f"start {container_id}",
+                getattr(e, "response", {}).get("status_code", 500),
+                str(e),
             )
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
@@ -332,7 +362,7 @@ class ContainerTools:
             )
             return DockerMCPErrorResponse.generic_error(
                 f"Failed to start container {container_id}: {str(e)}",
-                {"host_id": host_id, "operation": "start_container", "container_id": container_id}
+                {"host_id": host_id, "operation": "start_container", "container_id": container_id},
             )
 
     async def stop_container(
@@ -351,7 +381,11 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return self._build_error_response(host_id, "stop_container", f"Could not connect to Docker on host {host_id}", container_id)
+                return DockerMCPErrorResponse.docker_context_error(
+                    host_id=host_id,
+                    operation="stop_container",
+                    cause=f"Could not connect to Docker on host {host_id}"
+                )
 
             # Get container and stop it using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -366,7 +400,11 @@ class ContainerTools:
                     "container_id": container_id,
                     "host_id": host_id,
                 },
-                context={"host_id": host_id, "operation": "stop_container", "container_id": container_id}
+                context={
+                    "host_id": host_id,
+                    "operation": "stop_container",
+                    "container_id": container_id,
+                },
             )
 
         except docker.errors.NotFound:
@@ -379,12 +417,22 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return self._build_error_response(host_id, "stop_container", f"Failed to stop container: {str(e)}", container_id)
+            return DockerMCPErrorResponse.docker_command_error(
+                host_id,
+                f"stop {container_id}",
+                getattr(e, "response", {}).get("status_code", 500),
+                str(e),
+            )
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to stop container", host_id=host_id, container_id=container_id, error=str(e)
             )
-            return self._build_error_response(host_id, "stop_container", f"Failed to stop container {container_id}: {str(e)}", container_id)
+            return self._build_error_response(
+                host_id,
+                "stop_container",
+                f"Failed to stop container {container_id}: {str(e)}",
+                container_id,
+            )
         except Exception as e:
             # Catch network/timeout errors like "fetch failed"
             logger.error(
@@ -396,7 +444,12 @@ class ContainerTools:
             )
             return DockerMCPErrorResponse.generic_error(
                 "Network or timeout error stopping container",
-                {"host_id": host_id, "operation": "stop_container", "container_id": container_id, "cause": str(e)},
+                {
+                    "host_id": host_id,
+                    "operation": "stop_container",
+                    "container_id": container_id,
+                    "cause": str(e),
+                },
             )
 
     async def restart_container(
@@ -415,7 +468,12 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return self._build_error_response(host_id, "restart_container", f"Could not connect to Docker on host {host_id}", container_id)
+                return self._build_error_response(
+                    host_id,
+                    "restart_container",
+                    f"Could not connect to Docker on host {host_id}",
+                    container_id,
+                )
 
             # Get container and restart it using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -430,7 +488,11 @@ class ContainerTools:
                     "container_id": container_id,
                     "host_id": host_id,
                 },
-                context={"host_id": host_id, "operation": "restart_container", "container_id": container_id}
+                context={
+                    "host_id": host_id,
+                    "operation": "restart_container",
+                    "container_id": container_id,
+                },
             )
 
         except docker.errors.NotFound:
@@ -443,7 +505,12 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return self._build_error_response(host_id, "restart_container", f"Failed to restart container: {str(e)}", container_id)
+            return DockerMCPErrorResponse.docker_command_error(
+                host_id,
+                f"restart {container_id}",
+                getattr(e, "response", {}).get("status_code", 500),
+                str(e),
+            )
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to restart container",
@@ -451,7 +518,12 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return self._build_error_response(host_id, "restart_container", f"Failed to restart container {container_id}: {str(e)}", container_id)
+            return self._build_error_response(
+                host_id,
+                "restart_container",
+                f"Failed to restart container {container_id}: {str(e)}",
+                container_id,
+            )
 
     async def get_container_stats(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Get resource statistics for a container.
@@ -466,7 +538,12 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return self._build_error_response(host_id, "get_container_stats", f"Could not connect to Docker on host {host_id}", container_id)
+                return self._build_error_response(
+                    host_id,
+                    "get_container_stats",
+                    f"Could not connect to Docker on host {host_id}",
+                    container_id,
+                )
 
             # Get container and retrieve stats using Docker SDK
             container = await asyncio.to_thread(client.containers.get, container_id)
@@ -526,7 +603,11 @@ class ContainerTools:
             return create_success_response(
                 message=f"Container {container_id} stats retrieved successfully",
                 data=stats.model_dump(),
-                context={"host_id": host_id, "operation": "get_container_stats", "container_id": container_id}
+                context={
+                    "host_id": host_id,
+                    "operation": "get_container_stats",
+                    "container_id": container_id,
+                },
             )
 
         except docker.errors.NotFound:
@@ -543,7 +624,11 @@ class ContainerTools:
             )
             return DockerMCPErrorResponse.generic_error(
                 f"Failed to get stats: {str(e)}",
-                {"host_id": host_id, "operation": "get_container_stats", "container_id": container_id}
+                {
+                    "host_id": host_id,
+                    "operation": "get_container_stats",
+                    "container_id": container_id,
+                },
             )
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
@@ -554,7 +639,11 @@ class ContainerTools:
             )
             return DockerMCPErrorResponse.generic_error(
                 str(e),
-                {"host_id": host_id, "operation": "get_container_stats", "container_id": container_id}
+                {
+                    "host_id": host_id,
+                    "operation": "get_container_stats",
+                    "container_id": container_id,
+                },
             )
 
     def _parse_ports_summary(self, ports_str: str) -> list[str]:
@@ -722,7 +811,12 @@ class ContainerTools:
         """
         valid_actions = ["start", "stop", "restart", "pause", "unpause", "remove"]
         if action not in valid_actions:
-            error_response = self._build_error_response(host_id, "manage_container", f"Invalid action '{action}'. Valid actions: {', '.join(valid_actions)}", container_id)
+            error_response = self._build_error_response(
+                host_id,
+                "manage_container",
+                f"Invalid action '{action}'. Valid actions: {', '.join(valid_actions)}",
+                container_id,
+            )
             error_response.update({"action": action})
             return error_response
 
@@ -755,7 +849,12 @@ class ContainerTools:
                     "container_id": container_id,
                     "host_id": host_id,
                 },
-                context={"host_id": host_id, "operation": "manage_container", "container_id": container_id, "action": action}
+                context={
+                    "host_id": host_id,
+                    "operation": "manage_container",
+                    "container_id": container_id,
+                    "action": action,
+                },
             )
 
         except (DockerCommandError, DockerContextError) as e:
@@ -766,12 +865,19 @@ class ContainerTools:
                 action=action,
                 error=str(e),
             )
-            error_response = self._build_error_response(host_id, "manage_container", f"Failed to {action} container {container_id}: {str(e)}", container_id)
-            error_response.update({
-                "action": action,
-                "force": force,
-                "timeout": timeout if action in ["stop", "restart"] else None,
-            })
+            error_response = self._build_error_response(
+                host_id,
+                "manage_container",
+                f"Failed to {action} container {container_id}: {str(e)}",
+                container_id,
+            )
+            error_response.update(
+                {
+                    "action": action,
+                    "force": force,
+                    "timeout": timeout if action in ["stop", "restart"] else None,
+                }
+            )
             return error_response
 
     async def pull_image(self, host_id: str, image_name: str) -> dict[str, Any]:
@@ -787,7 +893,9 @@ class ContainerTools:
         try:
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                return self._build_error_response(host_id, "pull_image", f"Could not connect to Docker on host {host_id}")
+                return self._build_error_response(
+                    host_id, "pull_image", f"Could not connect to Docker on host {host_id}"
+                )
 
             # Pull image using Docker SDK
             image = await asyncio.to_thread(client.images.pull, image_name)
@@ -806,12 +914,14 @@ class ContainerTools:
                     "image_id": image.id[:12],
                     "host_id": host_id,
                 },
-                context={"host_id": host_id, "operation": "pull_image"}
+                context={"host_id": host_id, "operation": "pull_image"},
             )
 
         except docker.errors.ImageNotFound:
             logger.error("Image not found", host_id=host_id, image_name=image_name)
-            return self._build_error_response(host_id, "pull_image", f"Image {image_name} not found")
+            return self._build_error_response(
+                host_id, "pull_image", f"Image {image_name} not found"
+            )
         except docker.errors.APIError as e:
             logger.error(
                 "Docker API error pulling image",
@@ -819,7 +929,9 @@ class ContainerTools:
                 image_name=image_name,
                 error=str(e),
             )
-            return self._build_error_response(host_id, "pull_image", f"Failed to pull image: {str(e)}")
+            return self._build_error_response(
+                host_id, "pull_image", f"Failed to pull image: {str(e)}"
+            )
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
                 "Failed to pull image",
@@ -827,7 +939,9 @@ class ContainerTools:
                 image_name=image_name,
                 error=str(e),
             )
-            return self._build_error_response(host_id, "pull_image", f"Failed to pull image {image_name}: {str(e)}")
+            return self._build_error_response(
+                host_id, "pull_image", f"Failed to pull image {image_name}: {str(e)}"
+            )
 
     def _build_container_command(
         self, action: str, container_id: str, force: bool, timeout: int
@@ -895,7 +1009,7 @@ class ContainerTools:
                     "summary": summary,
                     "cached": False,
                 },
-                context={"host_id": host_id, "operation": "list_host_ports"}
+                context={"host_id": host_id, "operation": "list_host_ports"},
             )
 
         except (DockerCommandError, DockerContextError) as e:
@@ -903,7 +1017,9 @@ class ContainerTools:
             return self._build_error_response(host_id, "list_host_ports", str(e))
         except Exception as e:
             logger.error("Unexpected error listing host ports", host_id=host_id, error=str(e))
-            return self._build_error_response(host_id, "list_host_ports", f"Failed to list ports: {e}")
+            return self._build_error_response(
+                host_id, "list_host_ports", f"Failed to list ports: {e}"
+            )
 
     async def _get_containers_for_port_analysis(
         self, host_id: str, include_stopped: bool
@@ -920,7 +1036,9 @@ class ContainerTools:
         # Return Docker SDK container objects directly for more efficient port extraction
         return docker_containers
 
-    async def _collect_port_mappings(self, host_id: str, containers: list["docker.models.containers.Container"]) -> list[PortMapping]:
+    async def _collect_port_mappings(
+        self, host_id: str, containers: list["docker.models.containers.Container"]
+    ) -> list[PortMapping]:
         """Collect port mappings from all containers."""
         port_mappings = []
 
@@ -938,7 +1056,12 @@ class ContainerTools:
         return port_mappings
 
     def _extract_port_mappings_from_container(
-        self, container: "docker.models.containers.Container", container_id: str, container_name: str, image: str, host_id: str
+        self,
+        container: "docker.models.containers.Container",
+        container_id: str,
+        container_name: str,
+        image: str,
+        host_id: str,
     ) -> list[PortMapping]:
         """Extract port mappings directly from Docker SDK container object."""
         port_mappings = []
@@ -962,20 +1085,22 @@ class ContainerTools:
                     labels = container.labels or {}
                     compose_project = labels.get(DOCKER_COMPOSE_PROJECT, "")
 
-                    port_mapping = PortMapping(
-                        host_id=host_id,
-                        host_ip=host_ip,
-                        host_port=int(host_port) if host_port.isdigit() else 0,
-                        container_port=int(container_port_clean) if container_port_clean.isdigit() else 0,
-                        protocol=protocol,
-                        container_id=container_id,
-                        container_name=container_name,
-                        image=image,
-                        compose_project=compose_project,
-                        is_conflict=False,
-                        conflict_with=[],
-                    )
-                    port_mappings.append(port_mapping)
+                    # Skip non-numeric ports instead of creating invalid mappings with port "0"
+                    if host_port.isdigit() and container_port_clean.isdigit():
+                        port_mapping = PortMapping(
+                            host_id=host_id,
+                            host_ip=host_ip,
+                            host_port=int(host_port),
+                            container_port=int(container_port_clean),
+                            protocol=protocol,
+                            container_id=container_id,
+                            container_name=container_name,
+                            image=image,
+                            compose_project=compose_project,
+                            is_conflict=False,
+                            conflict_with=[],
+                        )
+                        port_mappings.append(port_mapping)
 
         return port_mappings
 
@@ -1077,4 +1202,3 @@ class ContainerTools:
                 port_range_usage["49152-65535"] += 1
         except ValueError:
             pass
-

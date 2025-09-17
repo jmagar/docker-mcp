@@ -4,7 +4,7 @@ import asyncio
 import shlex
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -136,7 +136,7 @@ class MigrationSafety:
             "path": file_path,
             "operation": operation,
             "reason": reason,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "validated": False,
         }
 
@@ -158,6 +158,7 @@ class MigrationSafety:
     def get_deletion_manifest(self) -> list[dict[str, Any]]:
         """Get a copy of the current deletion manifest to prevent external mutation."""
         import copy
+
         return copy.deepcopy(self.deletion_manifest)
 
     def clear_deletion_manifest(self) -> None:
@@ -203,7 +204,9 @@ class MigrationSafety:
             )
         except subprocess.TimeoutExpired:
             error_msg = f"Deletion timeout after {DELETE_TIMEOUT_SECONDS}s"
-            self.logger.error("File deletion timeout", path=file_path, timeout=DELETE_TIMEOUT_SECONDS)
+            self.logger.error(
+                "File deletion timeout", path=file_path, timeout=DELETE_TIMEOUT_SECONDS
+            )
             return False, error_msg
         except Exception as e:
             error_msg = f"Deletion error: {str(e)}"
@@ -218,30 +221,6 @@ class MigrationSafety:
             self.logger.error("File deletion failed", path=file_path, error=result.stderr)
             return False, error_msg
 
-    def validate_zfs_snapshot_deletion(self, snapshot_name: str) -> tuple[bool, str]:
-        """Validate ZFS snapshot deletion to prevent accidental deletion of production snapshots.
-
-        Args:
-            snapshot_name: Full ZFS snapshot name (dataset@snapshot)
-
-        Returns:
-            Tuple of (is_safe: bool, reason: str)
-        """
-        if "@" not in snapshot_name:
-            return False, "Invalid snapshot format - must contain '@'"
-
-        dataset, snap_name = snapshot_name.split("@", 1)
-
-        # Only allow deletion of migration-specific snapshots
-        migration_prefixes = ["migrate_", "migration_", "backup_", "temp_"]
-        if not any(snap_name.startswith(prefix) for prefix in migration_prefixes):
-            return False, f"Snapshot '{snap_name}' does not appear to be migration-related"
-
-        # Check for suspicious patterns
-        if len(snap_name) < 10:  # Migration snapshots should have timestamps
-            return False, f"Snapshot name '{snap_name}' is too short - may not be migration-related"
-
-        return True, f"ZFS snapshot deletion validated: {snapshot_name}"
 
     async def safe_cleanup_archive(
         self, ssh_cmd: list[str], archive_path: str, reason: str = "Migration cleanup"

@@ -47,7 +47,8 @@ class ContainerService:
 
 ### Pydantic v2 Input Validation
 ```python
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import ValidationInfo
 from typing import Literal, Annotated
 import re
 
@@ -59,14 +60,13 @@ class ContainerOperationRequest(BaseModel):
     timeout: Annotated[int, Field(ge=1, le=300)] = 30
     force: bool = False
     
-    @validator('host_id')
+    @field_validator("host_id")
     @classmethod
-    def validate_host_exists(cls, v, values, **kwargs):
-        # Can access service context through custom validation
-        if hasattr(kwargs.get('context'), 'config'):
-            config = kwargs['context'].config
-            if v not in config.hosts:
-                raise ValueError(f"Host '{v}' not found in configuration")
+    def validate_host_exists(cls, v: str, info: ValidationInfo) -> str:
+        ctx = (info.context or {})
+        config = getattr(ctx, "config", None)
+        if config and v not in config.hosts:
+            raise ValueError(f"Host '{v}' not found in configuration")
         return v
 
 class StackDeployRequest(BaseModel):
@@ -78,18 +78,18 @@ class StackDeployRequest(BaseModel):
     pull_images: bool = True
     recreate: bool = False
     
-    @validator('stack_name')
-    @classmethod  
-    def validate_stack_name_security(cls, v):
+    @field_validator("stack_name")
+    @classmethod
+    def validate_stack_name_security(cls, v: str) -> str:
         """Ensure stack name is safe for filesystem operations."""
         reserved_names = {"docker", "compose", "system", "network", "volume"}
         if v.lower() in reserved_names:
             raise ValueError(f"Stack name '{v}' is reserved")
         return v
     
-    @validator('environment')
+    @field_validator("environment")
     @classmethod
-    def validate_no_sensitive_env(cls, v):
+    def validate_no_sensitive_env(cls, v: dict[str, str]) -> dict[str, str]:
         """Check for accidentally exposed secrets in environment."""
         sensitive_patterns = [r"password", r"secret", r"token", r"key"]
         for key, value in v.items():
@@ -182,21 +182,20 @@ async def validate_deployment_requirements(
     """Comprehensive async validation with detailed results."""
     result: ValidationResult[StackDeployRequest] = ValidationResult()
     
-    # Parallel validation checks
-    async with asyncio.TaskGroup() as tg:
-        host_task = tg.create_task(self._check_host_connectivity(host_id))
-        port_task = tg.create_task(self._check_port_conflicts(host_id, compose_content))
-        syntax_task = tg.create_task(self._validate_compose_syntax(compose_content))
-    
+    # Parallel validation checks (3.10-compatible)
+    host_ok, port_conflicts, syntax_errors = await asyncio.gather(
+        self._check_host_connectivity(host_id),
+        self._check_port_conflicts(host_id, compose_content),
+        self._validate_compose_syntax(compose_content),
+    )
+
     # Process validation results
-    if not await host_task:
+    if not host_ok:
         result.add_error(f"Cannot connect to host '{host_id}'")
     
-    port_conflicts = await port_task
     if port_conflicts:
         result.add_error(f"Port conflicts detected: {', '.join(map(str, port_conflicts))}")
     
-    syntax_errors = await syntax_task
     if syntax_errors:
         result.add_error(f"Compose syntax errors: {'; '.join(syntax_errors)}")
     
@@ -287,7 +286,7 @@ class ServiceOperationContext:
         self.resources: list[Any] = []
     
     async def __aenter__(self):
-        await self.logger.ainfo(
+        self.logger.info(
             "Service operation started",
             host_id=self.host_id,
             operation=self.operation
@@ -303,7 +302,7 @@ class ServiceOperationContext:
                 await resource.close()
         
         if exc_type:
-            await self.logger.aerror(
+            self.logger.error(
                 "Service operation failed",
                 host_id=self.host_id,
                 operation=self.operation,
@@ -311,7 +310,7 @@ class ServiceOperationContext:
                 duration_seconds=duration
             )
         else:
-            await self.logger.ainfo(
+            self.logger.info(
                 "Service operation completed",
                 host_id=self.host_id,
                 operation=self.operation,
@@ -387,7 +386,7 @@ async def batch_operation_context(
         "errors": []
     }
     
-    await self.logger.ainfo(
+    self.logger.info(
         "Batch operation started",
         operation=operation_name,
         batch_id=batch_id,
@@ -398,7 +397,7 @@ async def batch_operation_context(
         yield progress
     finally:
         # Always log batch completion stats
-        await self.logger.ainfo(
+        self.logger.info(
             "Batch operation completed",
             operation=operation_name,
             batch_id=batch_id,
@@ -414,27 +413,18 @@ async def batch_container_operations(
     """Execute multiple container operations with progress tracking."""
     
     async with self.batch_operation_context("container_batch", operations) as progress:
-        # Use TaskGroup for concurrent execution with proper error handling
-        async with asyncio.TaskGroup() as tg:
-            tasks = []
-            
-            for op in operations:
-                task = tg.create_task(
-                    self._execute_single_container_operation(op, progress)
-                )
-                tasks.append(task)
-        
-        # Aggregate results
-        results = []
-        for task in tasks:
-            try:
-                result = await task
-                results.append(result)
-            except* Exception as eg:
-                # Handle partial failures in batch
-                for error in eg.exceptions:
-                    progress["errors"].append(str(error))
-                    progress["failed"] += 1
+        tasks = [
+            self._execute_single_container_operation(op, progress) for op in operations
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for r in results:
+            if isinstance(r, Exception):
+                progress["errors"].append(str(r))
+                progress["failed"] += 1
+            else:
+                progress["results"].append(r)
+                progress["completed"] += 1
         
         return ToolResult(
             content=[TextContent(
@@ -541,7 +531,7 @@ async def service_method(self, host_id: str) -> ToolResult:
             return self._multi_error_result(errors)
             
         except asyncio.TimeoutError:
-            await ctx.logger.aerror(
+            ctx.logger.error(
                 "Operation timeout",
                 host_id=host_id,
                 timeout_seconds=60.0
@@ -557,7 +547,7 @@ async def service_method(self, host_id: str) -> ToolResult:
             )
             
         except Exception as e:
-            await ctx.logger.aerror(
+            ctx.logger.error(
                 "Unexpected service error",
                 host_id=host_id,
                 error=str(e),

@@ -93,6 +93,11 @@ tmp/
 # Cache directories
 .cache/
 .cache/uv/
+.cache/ruff/
+.cache/mypy/
+.cache/pytest/
+.cache/coverage/
+.cache/coverage_html/
 
 # Tests (exclude from git tracking)
 tests/

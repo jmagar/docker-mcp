@@ -90,86 +90,21 @@ class BaseTransfer(ABC):
     def get_transfer_type(self) -> str
 
 # Concrete implementations
-class ZFSTransfer(BaseTransfer):      # Block-level ZFS send/receive
 class RsyncTransfer(BaseTransfer):    # Universal rsync compatibility
 class ArchiveUtils:                   # Tar/gzip with intelligent exclusions
 ```
 
-### Automatic Method Selection
+### Transfer Method Selection
 ```python
-# Migration manager chooses optimal transfer method
+# Migration manager uses rsync for universal compatibility
 class MigrationManager:
     async def choose_transfer_method(self, source_host, target_host):
-        if source_host.zfs_capable and target_host.zfs_capable:
-            return "zfs", self.zfs_transfer
         return "rsync", self.rsync_transfer
 ```
 
-**Transfer Method Priority:**
-1. **ZFS send/receive** - When both hosts have `zfs_capable: true`
-2. **Rsync fallback** - Universal compatibility for mixed environments
+**Transfer Method:**
+- **Rsync** - Universal compatibility for all Docker environments
 
-### ZFS Integration Patterns
-
-```python
-# ZFS capability detection
-class ZFSTransfer:
-    async def detect_zfs_capability(self, host, appdata_path):
-        # Verify ZFS availability and dataset existence
-        zfs_check = await self._run_ssh_command(host, ["zfs", "list", dataset])
-        return zfs_check.returncode == 0
-    
-    async def create_snapshot(self, host, dataset, snapshot_name):
-        # Create atomic snapshot for consistent backups
-        cmd = ["zfs", "snapshot", f"{dataset}@{snapshot_name}"]
-        return await self._run_ssh_command(host, cmd)
-```
-
-### ZFS Dataset Auto-Creation
-
-```python
-# Automatic dataset creation for services
-class ZFSTransfer:
-    async def ensure_service_dataset_exists(self, host, service_path):
-        """Ensure a service path exists as a ZFS dataset.
-        
-        - Checks if dataset already exists
-        - Converts existing directory to dataset (preserving data)
-        - Creates empty dataset if neither exists
-        """
-        service_name = service_path.split("/")[-1]
-        expected_dataset = f"{host.zfs_dataset}/{service_name}"
-        
-        # Auto-convert directories to datasets safely
-        if directory_exists and not dataset_exists:
-            await self._convert_directory_to_dataset(host, service_path, expected_dataset)
-        
-        return expected_dataset
-    
-    async def transfer_multiple_services(self, source_host, target_host, service_paths):
-        """Transfer multiple service datasets with auto-creation.
-        
-        - Automatically creates datasets on both source and target
-        - Groups services by dataset to avoid duplicate transfers
-        - Handles mixed directory/dataset scenarios safely
-        """
-        for service_path in service_paths:
-            # Ensure datasets exist on both sides
-            source_dataset = await self.ensure_service_dataset_exists(source_host, service_path)
-            target_dataset = await self.ensure_service_dataset_exists(target_host, target_service_path)
-            
-            # Transfer the dataset
-            await self.transfer(source_host, target_host, source_path, target_path,
-                              source_dataset=source_dataset, target_dataset=target_dataset)
-```
-
-**ZFS Benefits:**
-- Block-level transfers (faster for large datasets)
-- Atomic snapshots (crash-consistent backups)
-- Property preservation (permissions, timestamps, metadata)
-- **Auto-dataset creation** (no manual ZFS setup required)
-- **Directory-to-dataset conversion** (preserves existing data)
-- Incremental send/receive support (future enhancement)
 
 ## Common Development Commands
 
@@ -187,7 +122,7 @@ uv run pytest --cov=docker_mcp           # With coverage
 # Transfer module testing
 uv run pytest tests/test_migration.py    # Migration and transfer tests
 uv run pytest -k "migration"             # All migration-related tests
-uv run pytest -k "transfer"              # Transfer module tests
+uv run pytest -k "rsync"                 # Rsync transfer tests
 
 # Code quality
 uv run ruff format .                      # Format code
@@ -373,7 +308,7 @@ async def migrate_stack(
 - **Default to Safe**: Containers stopped by default unless explicitly skipped
 - **Verify State**: Confirm containers are completely stopped before archiving
 - **Data Integrity**: Archive verification before transfer
-- **Atomic Operations**: Use snapshots and atomic transfers where possible
+- **Atomic Operations**: Use rsync for reliable data transfers
 - **Rollback Capability**: Maintain source until target is verified
 
 ## Configuration Hierarchy
@@ -384,46 +319,25 @@ async def migrate_stack(
 4. Docker context discovery (automatic)
 5. Environment variables (legacy)
 
-### ZFS Configuration
+### Host Configuration
 
 ```yaml
 hosts:
   production-1:
     hostname: server.example.com
     user: dockeruser
-    appdata_path: "/tank/appdata"        # ZFS dataset mount point
-    zfs_capable: true                    # Enable ZFS transfers
-    zfs_dataset: "tank/appdata"          # ZFS dataset for send/receive
+    appdata_path: "/opt/appdata"         # Container data storage path
     
-  legacy-host:
-    hostname: old-server.example.com
+  staging-host:
+    hostname: staging.example.com
     user: dockeruser  
     appdata_path: "/opt/appdata"         # Standard filesystem
-    zfs_capable: false                   # Will use rsync fallback
-```
-
-**ZFS Auto-Detection & Dataset Management:**
-- System automatically detects ZFS availability if `zfs_capable: true`
-- **Auto-creates service datasets** during migration (no manual setup required)
-- **Safely converts directories to datasets** while preserving existing data
-- Falls back to rsync if ZFS detection fails
-- Migration chooses optimal method based on both source AND target capabilities
-
-**ZFS Dataset Patterns:**
-```bash
-# Automatic dataset structure created by migration
-rpool/appdata                    # Parent dataset (configured in hosts.yml)
-├── rpool/appdata/authelia       # Service dataset (auto-created)
-├── rpool/appdata/plex          # Service dataset (auto-created)
-├── rpool/appdata/jellyfin      # Service dataset (auto-created)
-└── ...                         # Additional services as separate datasets
 ```
 
 **Migration Behavior:**
-- **Existing ZFS datasets**: Used directly for efficient ZFS send/receive
-- **Existing directories**: Safely converted to ZFS datasets with data preservation
-- **New services**: Empty ZFS datasets created automatically
-- **Multi-service stacks**: Each service component gets its own dataset
+- **Universal rsync transfer** for all host environments
+- **Directory synchronization** with compression and delta transfers
+- **Preserves all data** including permissions and timestamps
 
 ## Testing Conventions
 

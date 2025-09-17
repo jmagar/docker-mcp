@@ -12,8 +12,35 @@ if TYPE_CHECKING:
 
 import structlog
 from fastmcp.resources.resource import FunctionResource
+from pydantic import AnyUrl
+
+from ..models.enums import ProtocolLiteral
 
 logger = structlog.get_logger()
+
+
+def _validate_and_normalize_protocol(protocol: str | None) -> ProtocolLiteral | None:
+    """Validate and normalize protocol string against ProtocolLiteral type.
+
+    Args:
+        protocol: Protocol string to validate (case-insensitive)
+
+    Returns:
+        Normalized protocol value or None if invalid/None
+
+    Raises:
+        ValueError: If protocol is invalid
+    """
+    if protocol is None:
+        return None
+
+    protocol_lower = protocol.lower().strip()
+    if protocol_lower not in ("tcp", "udp", "sctp"):
+        raise ValueError(
+            f"Invalid protocol '{protocol}'. Must be one of: tcp, udp, sctp"
+        )
+
+    return protocol_lower  # type: ignore[return-value]
 
 
 class PortMappingResource(FunctionResource):
@@ -48,6 +75,25 @@ class PortMappingResource(FunctionResource):
                 scan_available = kwargs.get("scan_available", False)
                 suggest_next = kwargs.get("suggest_next", False)
                 use_cache = kwargs.get("use_cache", True)
+
+                # Validate and normalize protocol parameter
+                try:
+                    normalized_protocol = _validate_and_normalize_protocol(filter_protocol)
+                    filter_protocol = normalized_protocol
+                except ValueError as e:
+                    logger.error(
+                        "Invalid protocol parameter",
+                        host_id=host_id,
+                        filter_protocol=filter_protocol,
+                        error=str(e),
+                    )
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "host_id": host_id,
+                        "resource_uri": f"ports://{host_id}",
+                        "resource_type": "port_mappings",
+                    }
 
                 logger.info(
                     "Fetching port data",
@@ -120,10 +166,10 @@ class PortMappingResource(FunctionResource):
         # Initialize FunctionResource with closure-based function
         super().__init__(
             fn=_get_port_data,
-            uri="ports://{host_id}",
+            uri=AnyUrl("ports://{host_id}"),
             name="Docker Port Mappings",
             title="Port mappings for Docker hosts",
             description="Provides comprehensive port mapping information for Docker containers on a host",
             mime_type="application/json",
-            tags=("docker", "ports", "networking"),
+            tags={"docker", "ports", "networking"},
         )

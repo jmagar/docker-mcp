@@ -6,8 +6,7 @@ Business logic for Docker cleanup and disk usage operations.
 
 import asyncio
 import re
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -107,7 +106,7 @@ class CleanupService:
                 summary_stdout, summary_stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=60
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 return {"success": False, "error": "Timeout getting docker disk usage summary"}
@@ -129,7 +128,7 @@ class CleanupService:
                 detailed_stdout, detailed_stderr = await asyncio.wait_for(
                     dproc.communicate(), timeout=120
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 dproc.kill()
                 await dproc.wait()
                 detailed_stdout = b""  # fall back to no details
@@ -275,7 +274,7 @@ class CleanupService:
         )  # nosec B603
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return {
@@ -694,25 +693,29 @@ class CleanupService:
         # SI decimal prefixes (KB, MB, GB, TB, PB) use 1000 multipliers
         unit_upper = unit.upper()
 
-        if unit.endswith('IB') or unit_upper in ['KIB', 'MIB', 'GIB', 'TIB', 'PIB']:
+        if unit_upper.endswith("IB"):
             # Binary/IEC units (base-1024) - only explicit IEC suffixes
             multipliers = {
-                "KIB": 1024, "MIB": 1024**2, "GIB": 1024**3,
-                "TIB": 1024**4, "PIB": 1024**5, "B": 1
+                "KIB": 1024,
+                "MIB": 1024**2,
+                "GIB": 1024**3,
+                "TIB": 1024**4,
+                "PIB": 1024**5,
+                "B": 1,
             }
         else:
             # Decimal/SI units (base-1000) - KB/MB/GB/TB and variants use 1000-based
             multipliers = {
                 "B": 1,
-                "KB": 1000, "kB": 1000, "Kb": 1000, "kb": 1000,
-                "MB": 1000**2, "mB": 1000**2, "Mb": 1000**2, "mb": 1000**2,
-                "GB": 1000**3, "gB": 1000**3, "Gb": 1000**3, "gb": 1000**3,
-                "TB": 1000**4, "tB": 1000**4, "Tb": 1000**4, "tb": 1000**4,
-                "PB": 1000**5, "pB": 1000**5, "Pb": 1000**5, "pb": 1000**5
+                "KB": 1000,
+                "MB": 1000**2,
+                "GB": 1000**3,
+                "TB": 1000**4,
+                "PB": 1000**5,
             }
 
         # Use case-insensitive lookup for IEC units, exact match for decimal variants
-        if unit.endswith('IB') or unit_upper in ['KIB', 'MIB', 'GIB', 'TIB', 'PIB']:
+        if unit_upper.endswith("IB"):
             multiplier = multipliers.get(unit_upper, 1)
         else:
             multiplier = multipliers.get(unit, 1)
@@ -1044,7 +1047,7 @@ class CleanupService:
             frequency=cast(Literal["daily", "weekly", "monthly", "custom"], schedule_frequency),
             time=schedule_time,
             enabled=True,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
         # Add to configuration

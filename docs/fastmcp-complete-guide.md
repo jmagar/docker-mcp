@@ -380,8 +380,6 @@ class DockerHostsParams(BaseModel):
     compose_path: str | None = None
     appdata_path: str | None = None
     enabled: bool = True
-    zfs_capable: bool = False
-    zfs_dataset: str = ""
     port: int = Field(default=0, ge=0, le=65535, description="Port number to check availability")
     cleanup_type: Literal["check", "safe", "moderate", "aggressive"] | None = None
     frequency: Literal["daily", "weekly", "monthly", "custom"] | None = None

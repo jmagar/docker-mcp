@@ -147,7 +147,7 @@ def _format_port_mapping_details(self, port_mappings: list[dict[str, Any]]) -> l
 **Formatted Output**:
 ```
 Docker Hosts (7 configured)
-Host         Address              ZFS Dataset             
+Host         Address              Status                  
 ------------ -------------------- --- --------------------
 tootie       tootie:29229         ✓   cache/appdata       
 shart        SHART:22             ✓   backup/appdata      
@@ -161,17 +161,16 @@ async def list_docker_hosts(self) -> dict[str, Any]:
     # Create human-readable summary for efficient display
     summary_lines = [
         f"Docker Hosts ({len(hosts)} configured)",
-        f"{'Host':<12} {'Address':<20} {'ZFS':<3} {'Dataset':<20}",
+        f"{'Host':<12} {'Address':<20} {'Status':<20}",
         f"{'-'*12:<12} {'-'*20:<20} {'-'*3:<3} {'-'*20:<20}",
     ]
     
     for host_data in hosts:
-        zfs_indicator = "✓" if host_data.get('zfs_capable') else "✗"
+        status = "✓" if host_data.get('enabled', True) else "✗"
         address = f"{host_data['hostname']}:{host_data['port']}"
-        dataset = host_data.get('zfs_dataset', '-') or '-'
         
         summary_lines.append(
-            f"{host_data[HOST_ID]:<12} {address:<20} {zfs_indicator:<3} {dataset[:20]:<20}"
+            f"{host_data[HOST_ID]:<12} {address:<20} {status:<20}"
         )
     
     return {
@@ -371,7 +370,7 @@ Host added: prod (prod.example.com)
 SSH: docker@prod.example.com:22 | tested: ✓
 
 Host updated: prod
-Fields: ssh_user, ssh_port, zfs_capable
+Fields: ssh_user, ssh_port, enabled
 
 Host removed: prod (prod.example.com)
 
@@ -469,8 +468,7 @@ Token Efficiency Strategy: Aligned table for multi‑host discovery and compact 
 Formatted Output (single host):
 ```
 Host Discovery on squirts
-Compose paths: 3 | Appdata paths: 2 | ZFS: ✓
-ZFS dataset: rpool/appdata
+Compose paths: 3 | Appdata paths: 2 | Status: ✓
 
 Compose paths:
   /mnt/user/compose/swag-mcp
@@ -484,9 +482,9 @@ Appdata paths:
 Formatted Output (all hosts):
 ```
 Host Discovery (all)
-Hosts: 5 | ZFS-capable: 3 | Total paths: 27 | Recommendations: 8
+Hosts: 5 | Enabled: 5 | Total paths: 27 | Recommendations: 8
 
-Host         OK ZFS Paths Recs
+Host         OK Status Paths Recs
 ------------ -- --- ----- ----
 prod         ✓  ✓   12    4
 test         ✓  ✗   3     1
@@ -1190,7 +1188,7 @@ def _format_discover_result(self, result: dict[str, Any], host_id: str) -> dict[
     result["discovery_summary"] = {
         "host_id": host_id,
         "paths_discovered": discovery_count,
-        "zfs_capable": result.get("zfs_discovery", {}).get("capable", False),
+        "enabled": result.get("host_status", {}).get("enabled", True),
         "recommendations_count": len(result.get("recommendations", [])),
     }
 
@@ -1219,15 +1217,15 @@ def _format_discover_all_result(self, result: dict[str, Any]) -> dict[str, Any]:
 
     # Add summary statistics
     total_recommendations = 0
-    zfs_hosts = 0
+    enabled_hosts = 0
     total_paths = 0
 
     discoveries = result.get("discoveries", {})
     for host_discovery in discoveries.values():
         if host_discovery.get("success"):
             total_recommendations += len(host_discovery.get("recommendations", []))
-            if host_discovery.get("zfs_discovery", {}).get("capable"):
-                zfs_hosts += 1
+            if host_discovery.get("host_status", {}).get("enabled", True):
+                enabled_hosts += 1
 
             compose_paths = len(host_discovery.get("compose_discovery", {}).get("paths", []))
             appdata_paths = len(host_discovery.get("appdata_discovery", {}).get("paths", []))
@@ -1236,7 +1234,7 @@ def _format_discover_all_result(self, result: dict[str, Any]) -> dict[str, Any]:
     result["discovery_summary"] = {
         "total_hosts_discovered": result.get("successful_discoveries", 0),
         "total_recommendations": total_recommendations,
-        "zfs_capable_hosts": zfs_hosts,
+        "enabled_hosts": enabled_hosts,
         "total_paths_found": total_paths,
     }
 
@@ -1244,7 +1242,7 @@ def _format_discover_all_result(self, result: dict[str, Any]) -> dict[str, Any]:
 ```
 
 **Key Features:**
-- **Summary Statistics**: Path discovery counts, ZFS capability detection
+- **Summary Statistics**: Path discovery counts, host status detection
 - **Guidance Formatting**: Human-readable guidance with emojis for visual clarity
 - **Multi-host Aggregation**: Summary stats across all discovered hosts
 - **Recommendation Tracking**: Count of actionable configuration recommendations
@@ -1305,7 +1303,7 @@ def _format_stack_action_result(self, result, stack_name, action):
 - `_format_discover_result()` - Single host discovery with guidance and recommendations
 - `_format_discover_all_result()` - Multi-host discovery with aggregated statistics
 
-**Responsibility**: Host capability discovery, ZFS detection, path recommendations
+**Responsibility**: Host capability discovery, path recommendations
 
 #### Configuration Service (`docker_mcp/services/config.py`)
 

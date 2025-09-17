@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 import docker
 import structlog
 from fastmcp.resources.resource import FunctionResource
+from pydantic import AnyUrl
+
+from docker_mcp.core.error_response import DockerMCPErrorResponse
 
 logger = structlog.get_logger()
 
@@ -54,13 +57,17 @@ class DockerInfoResource(FunctionResource):
                 client = await context_manager.get_client(host_id)
                 if client is None:
                     logger.warning("No Docker client available", host_id=host_id)
-                    return {
-                        "success": False,
-                        "error": "Docker client unavailable for host",
-                        "host_id": host_id,
+                    error_response = DockerMCPErrorResponse.docker_context_error(
+                        host_id=host_id,
+                        operation="get_client",
+                        cause="Docker client unavailable for host"
+                    )
+                    # Add resource-specific context
+                    error_response.update({
                         "resource_uri": f"docker://{host_id}/info",
                         "resource_type": "docker_info",
-                    }
+                    })
+                    return error_response
 
                 # Get Docker system info and version using SDK
                 docker_info = await asyncio.to_thread(client.info)
@@ -112,12 +119,12 @@ class DockerInfoResource(FunctionResource):
 
         super().__init__(
             fn=_get_docker_info,
-            uri="docker://{host_id}/info",
+            uri=AnyUrl("docker://{host_id}/info"),
             name="Docker Host Information",
             title="Docker host system information and configuration",
             description="Provides comprehensive Docker host information including version, system info, and configuration details",
             mime_type="application/json",
-            tags=("docker", "system", "info"),
+            tags={"docker", "system", "info"},
         )
 
 
@@ -152,8 +159,14 @@ class DockerContainersResource(FunctionResource):
             try:
                 # Extract parameters with defaults
                 all_containers = kwargs.get("all_containers", False)
-                limit = kwargs.get("limit", 20)
-                offset = kwargs.get("offset", 0)
+                try:
+                    limit = max(0, int(kwargs.get("limit", 20)))
+                except (TypeError, ValueError):
+                    limit = 20
+                try:
+                    offset = max(0, int(kwargs.get("offset", 0)))
+                except (TypeError, ValueError):
+                    offset = 0
 
                 logger.info(
                     "Fetching containers",
@@ -208,12 +221,12 @@ class DockerContainersResource(FunctionResource):
 
         super().__init__(
             fn=_get_containers,
-            uri="docker://{host_id}/containers",
+            uri=AnyUrl("docker://{host_id}/containers"),
             name="Docker Container Listings",
             title="List of Docker containers on a host",
             description="Provides comprehensive container information including status, networks, volumes, and compose project details",
             mime_type="application/json",
-            tags=("docker", "containers"),
+            tags={"docker", "containers"},
         )
 
 
@@ -309,10 +322,10 @@ class DockerComposeResource(FunctionResource):
 
         super().__init__(
             fn=_get_compose_info,
-            uri="docker://{host_id}/compose",
+            uri=AnyUrl("docker://{host_id}/compose"),
             name="Docker Compose Information",
             title="Docker Compose stacks and projects",
             description="Provides information about Docker Compose stacks, projects, and their configurations on a host",
             mime_type="application/json",
-            tags=("docker", "compose", "stacks"),
+            tags={"docker", "compose", "stacks"},
         )

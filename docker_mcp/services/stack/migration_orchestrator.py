@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent
-from structlog import BoundLogger
+from structlog.stdlib import BoundLogger
 
 if TYPE_CHECKING:
     from docker_mcp.core.docker_context import DockerContextManager
@@ -185,7 +185,11 @@ class StackMigrationOrchestrator:
         return source_host, target_host
 
     async def _retrieve_and_validate_compose(
-        self, source_host_id: str, stack_name: str, migration_steps: list[str], migration_data: dict[str, Any]
+        self,
+        source_host_id: str,
+        stack_name: str,
+        migration_steps: list[str],
+        migration_data: dict[str, Any],
     ) -> ToolResult | tuple[str, str]:
         """Retrieve and validate compose file."""
         migration_steps.append("📋 Retrieving compose configuration...")
@@ -210,8 +214,8 @@ class StackMigrationOrchestrator:
 
     async def _run_preflight_checks(
         self,
-        source_host,
-        target_host,
+        source_host: DockerHost,
+        target_host: DockerHost,
         compose_content: str,
         stack_name: str,
         migration_steps: list[str],
@@ -282,9 +286,12 @@ class StackMigrationOrchestrator:
                 transfer_estimates = self.network.estimate_transfer_time(
                     estimated_data_size, speed_test
                 )
-                migration_steps.append(
-                    f"⏱️  Estimated transfer time: {transfer_estimates.get('estimates', {}).get('actual_network', {}).get('time_human', 'unknown')}"
+                actual_time = (
+                    transfer_estimates.get("estimates", {})
+                    .get("actual_network", {})
+                    .get("time_human", "unknown")
                 )
+                migration_steps.append(f"⏱️  Estimated transfer time: {actual_time}")
                 migration_data["transfer_estimates"] = transfer_estimates
         else:
             migration_steps.append("⚠️  Network connectivity issues detected")
@@ -435,8 +442,8 @@ class StackMigrationOrchestrator:
 
     async def _transfer_migration_data(
         self,
-        source_host,
-        target_host,
+        source_host: DockerHost,
+        target_host: DockerHost,
         source_paths: list[str],
         stack_name: str,
         migration_steps: list[str],
@@ -452,9 +459,7 @@ class StackMigrationOrchestrator:
         migration_steps.append("🚚 Direct data transfer completed")
         migration_data["transfer_type"] = transfer_results.get("transfer_type", "unknown")
 
-        if migration_data["transfer_type"] == "zfs":
-            migration_steps.append("⚙️  Transfer method: ZFS send/receive")
-        elif migration_data["transfer_type"] == "rsync":
+        if migration_data["transfer_type"] == "rsync":
             migration_steps.append("⚙️  Transfer method: direct rsync sync")
 
         return transfer_results

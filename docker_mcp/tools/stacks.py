@@ -4,8 +4,9 @@ import asyncio
 import json
 import shlex
 import subprocess
+import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -143,7 +144,24 @@ class StackTools:
                 # Get unique services and timestamps
                 services = list(set(c["service"] for c in project_containers if c["service"]))
                 created_times = [c["created"] for c in project_containers if c["created"]]
-                created = min(created_times) if created_times else ""
+
+                # Convert created times to datetime objects
+                created_datetimes = []
+                for created_str in created_times:
+                    if created_str and isinstance(created_str, str):
+                        try:
+                            # Parse ISO format timestamp (Docker API format)
+                            # Handle both with and without microseconds
+                            if "." in created_str:
+                                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                            else:
+                                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                            created_datetimes.append(created_dt)
+                        except (ValueError, TypeError):
+                            # Skip invalid timestamp formats
+                            continue
+
+                created = min(created_datetimes) if created_datetimes else None
 
                 stack = StackInfo(
                     name=project_name,
@@ -191,6 +209,14 @@ class StackTools:
             Operation result
         """
         try:
+            if not self._validate_stack_name(stack_name):
+                return {
+                    "success": False,
+                    "error": f"Invalid stack name: {stack_name}",
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                    "timestamp": datetime.now().isoformat(),
+                }
             cmd = f"compose --project-name {stack_name} stop"
             await self.context_manager.execute_docker_command(host_id, cmd)
 
@@ -229,6 +255,14 @@ class StackTools:
             Operation result
         """
         try:
+            if not self._validate_stack_name(stack_name):
+                return {
+                    "success": False,
+                    "error": f"Invalid stack name: {stack_name}",
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                    "timestamp": datetime.now().isoformat(),
+                }
             cmd = f"compose --project-name {stack_name} down"
             if remove_volumes:
                 cmd += " --volumes"
@@ -384,12 +418,15 @@ class StackTools:
 
         ssh_cmd.append(remote_cmd)
 
-        # Debug logging (redact potential secrets from remote command)
-        logger.debug(
-            "Executing SSH command",
+        # Record start time and log operation start
+        start_time = time.monotonic()
+        compose_action = " ".join(compose_cmd)
+
+        logger.info(
+            "SSH compose operation started",
             host_id=host_id,
             ssh_host=host_config.hostname,
-            compose_action=" ".join(compose_cmd),  # Safe to log
+            compose_action=compose_action,  # Safe to log
             # Note: remote_command may contain env vars with secrets - not logged
         )
 
@@ -403,15 +440,52 @@ class StackTools:
                 timeout=timeout,
             )
 
+            # Calculate duration and log completion
+            duration = time.monotonic() - start_time
+
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or result.stdout.strip()
+                logger.error(
+                    "SSH compose operation failed",
+                    host_id=host_id,
+                    ssh_host=host_config.hostname,
+                    compose_action=compose_action,
+                    duration=duration,
+                    return_code=result.returncode,
+                    error_message=error_msg
+                )
                 raise DockerCommandError(f"Docker compose command failed: {error_msg}")
 
+            logger.info(
+                "SSH compose operation completed",
+                host_id=host_id,
+                ssh_host=host_config.hostname,
+                compose_action=compose_action,
+                duration=duration
+            )
             return result.stdout.strip()
 
         except subprocess.TimeoutExpired as e:
+            duration = time.monotonic() - start_time
+            logger.error(
+                "SSH compose operation timed out",
+                host_id=host_id,
+                ssh_host=host_config.hostname,
+                compose_action=compose_action,
+                duration=duration,
+                timeout=timeout
+            )
             raise DockerCommandError(f"Docker compose command timed out: {e}") from e
         except Exception as e:
+            duration = time.monotonic() - start_time
+            logger.error(
+                "SSH compose operation failed with exception",
+                host_id=host_id,
+                ssh_host=host_config.hostname,
+                compose_action=compose_action,
+                duration=duration,
+                error=str(e)
+            )
             if isinstance(e, DockerCommandError):
                 raise
             raise DockerCommandError(f"Failed to execute docker compose: {e}") from e
@@ -428,8 +502,6 @@ class StackTools:
         self, project_directory: str, compose_cmd: list[str], environment: dict[str, str] | None
     ) -> str:
         """Build remote Docker compose command with safe quoting."""
-        import shlex
-
         quoted_cd = f"cd {shlex.quote(project_directory)}"
         env_prefix = ""
 
@@ -491,9 +563,10 @@ class StackTools:
         """Execute stack command via SSH for all stack operations."""
         try:
             # Build compose arguments for the action
-            compose_args = self._build_compose_args(action, options)
-            if isinstance(compose_args, dict):  # Error response
-                return compose_args
+            try:
+                compose_args = self._build_compose_args(action, options)
+            except ValueError as e:
+                return self._build_error_response(host_id, stack_name, action, str(e))
 
             # Add service filter if specified
             self._add_service_filter(compose_args, options)
@@ -544,8 +617,12 @@ class StackTools:
 
     def _build_compose_args(
         self, action: str, options: dict[str, Any]
-    ) -> list[str] | dict[str, Any]:
-        """Build compose arguments based on action and options."""
+    ) -> list[str]:
+        """Build compose arguments based on action and options.
+
+        Raises:
+            ValueError: If the action is not supported
+        """
         # Get the argument builder for the action
         builders = self._get_compose_args_builders()
         builder = builders.get(action)
@@ -553,14 +630,10 @@ class StackTools:
         if builder:
             return builder(options)
         else:
-            # Return error response for unsupported actions
-            return {
-                "success": False,
-                "error": f"Action '{action}' not supported",
-                "timestamp": datetime.now().isoformat(),
-            }
+            # Raise exception instead of returning error dict
+            raise ValueError(f"Action '{action}' not supported")
 
-    def _get_compose_args_builders(self) -> dict[str, Callable]:
+    def _get_compose_args_builders(self) -> Mapping[str, Callable[..., list[str]]]:
         """Get mapping of actions to their argument builders."""
         return {
             "ps": self._build_ps_args,
@@ -685,6 +758,7 @@ class StackTools:
                     if line.strip():
                         services.append(json.loads(line))
                 except json.JSONDecodeError:
+                    logger.warning("Failed to parse JSON line from compose ps", line=line)
                     continue
             return {"services": services}
 
@@ -735,14 +809,35 @@ class StackTools:
             ssh_cmd = build_ssh_command(host)
             ssh_cmd.append(f"cat {shlex.quote(compose_file_path)}")
 
-            result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                ssh_cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    ssh_cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired as timeout_err:
+                # Extract SSH target from command for context
+                ssh_target = f"{host.user}@{host.hostname}"
+                logger.error(
+                    "SSH cat command timeout",
+                    compose_file_path=compose_file_path,
+                    ssh_target=ssh_target,
+                    timeout_seconds=30,
+                    original_error=str(timeout_err)
+                )
+                return {
+                    "success": False,
+                    "error": f"Timeout reading compose file at {compose_file_path} from {ssh_target} (30s timeout)",
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                    "compose_file_path": compose_file_path,
+                    "ssh_target": ssh_target,
+                    "timeout_seconds": 30,
+                    "timestamp": datetime.now().isoformat(),
+                }
 
             if result.returncode == 0:
                 return {
@@ -792,140 +887,6 @@ class StackTools:
                 "path": None,
                 "base_cmd": f"compose --project-name {stack_name}",
             }
-
-    async def _build_stack_command(
-        self, action: str, stack_name: str, options: dict[str, Any], compose_info: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Build Docker Compose command for specific action."""
-        cmd = compose_info["base_cmd"]
-
-        # Special validation for 'up' action
-        if action == "up" and not compose_info["exists"]:
-            return {
-                "success": False,
-                "error": f"No compose file found for stack '{stack_name}'. Use deploy_stack tool for new deployments.",
-                "timestamp": datetime.now().isoformat(),
-            }
-
-        # Build action-specific commands
-        if action == "up":
-            cmd += self._build_up_command(options)
-        elif action == "down":
-            cmd += self._build_down_command(options)
-        elif action == "restart":
-            cmd += self._build_restart_command(options)
-        elif action == "build":
-            cmd += self._build_build_command(options)
-        elif action == "pull":
-            cmd += self._build_pull_command(options)
-        elif action == "logs":
-            cmd += self._build_logs_command(options)
-        elif action == "ps":
-            cmd += " ps --format json"
-
-        # Add service filter if specified
-        if options.get("services"):
-            cmd += self._build_services_filter(options["services"])
-
-        return {"success": True, "command": cmd}
-
-    def _build_up_command(self, options: dict[str, Any]) -> str:
-        """Build 'up' command options."""
-        cmd = " up -d"
-        if options.get("force_recreate", False):
-            cmd += " --force-recreate"
-        if options.get("build", False):
-            cmd += " --build"
-        if options.get("pull", True):
-            cmd += " --pull always"
-        return cmd
-
-    def _build_down_command(self, options: dict[str, Any]) -> str:
-        """Build 'down' command options."""
-        cmd = " down"
-        if options.get("volumes", False):
-            cmd += " --volumes"
-        if options.get("remove_orphans", False):
-            cmd += " --remove-orphans"
-        return cmd
-
-    def _build_restart_command(self, options: dict[str, Any]) -> str:
-        """Build 'restart' command options."""
-        cmd = " restart"
-        if options.get("timeout"):
-            cmd += f" --timeout {options['timeout']}"
-        return cmd
-
-    def _build_build_command(self, options: dict[str, Any]) -> str:
-        """Build 'build' command options."""
-        cmd = " build"
-        if options.get("no_cache", False):
-            cmd += " --no-cache"
-        if options.get("pull", False):
-            cmd += " --pull"
-        return cmd
-
-    def _build_pull_command(self, options: dict[str, Any]) -> str:
-        """Build 'pull' command options."""
-        cmd = " pull"
-        if options.get("ignore_pull_failures", False):
-            cmd += " --ignore-pull-failures"
-        return cmd
-
-    def _build_logs_command(self, options: dict[str, Any]) -> str:
-        """Build 'logs' command options."""
-        cmd = " logs"
-        if options.get("follow", False):
-            cmd += " --follow"
-        if options.get("tail"):
-            cmd += f" --tail {options['tail']}"
-        return cmd
-
-    def _build_services_filter(self, services: Any) -> str:
-        """Build services filter for command."""
-        if isinstance(services, list):
-            return " " + " ".join(services)
-        else:
-            return f" {services}"
-
-    def _parse_stack_output(self, action: str, result: Any) -> dict[str, Any] | None:
-        """Parse specific command outputs."""
-        if action == "ps" and isinstance(result, dict) and "output" in result:
-            try:
-                services = []
-                for line in result["output"].strip().split("\\n"):
-                    if line.strip():
-                        try:
-                            service_data = json.loads(line)
-                            services.append(service_data)
-                        except json.JSONDecodeError:
-                            continue
-                return {"services": services}
-            except Exception:
-                return {"services": []}
-        return None
-
-    def _build_success_response(
-        self,
-        host_id: str,
-        stack_name: str,
-        action: str,
-        options: dict[str, Any],
-        result: Any,
-        output_data: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        """Build success response."""
-        return {
-            "success": True,
-            "message": f"Stack {stack_name} {action} completed successfully",
-            "host_id": host_id,
-            "stack_name": stack_name,
-            "action": action,
-            "options": options,
-            "output": result.get("output", "") if isinstance(result, dict) else str(result),
-            "data": output_data,
-            "timestamp": datetime.now().isoformat(),
-        }
 
     def _build_error_response(
         self, host_id: str, stack_name: str, action: str, error: str

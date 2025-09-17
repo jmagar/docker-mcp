@@ -4,7 +4,6 @@ Archive utilities for Docker MCP backup operations.
 IMPORTANT: These utilities are for BACKUP purposes only.
 Do NOT use for migration - migrations should use direct transfer methods:
 - rsync: Direct directory synchronization
-- ZFS: Native ZFS send/receive
 
 Archive operations are only used for:
 - Creating point-in-time backups before risky operations
@@ -174,7 +173,6 @@ class ArchiveUtils:
 
         WARNING: Do not use for migration! Migrations should use:
         - rsync for direct directory sync
-        - ZFS send/receive for dataset transfers
 
         This method is only for backup operations.
 

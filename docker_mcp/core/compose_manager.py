@@ -406,7 +406,7 @@ class ComposeManager:
                 raise Exception(f"Failed to create directory on remote host: {mkdir_result.stderr}")
 
             # Then, copy the file using scp
-            scp_cmd = ["scp"]
+            scp_cmd = ["scp", "-B"]
 
             # Add port if not default
             if host_config.port != 22:

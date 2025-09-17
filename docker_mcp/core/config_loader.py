@@ -2,12 +2,12 @@
 
 import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import structlog
-import yaml  # type: ignore[import-untyped]
+import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
@@ -27,8 +27,6 @@ class DockerHost(BaseModel):
     docker_context: str | None = None
     compose_path: str | None = None  # Path where compose files are stored on this host
     appdata_path: str | None = None  # Path where container data volumes are stored
-    zfs_capable: bool = False  # Whether this host has ZFS available
-    zfs_dataset: str | None = None  # ZFS dataset path for appdata (e.g., "tank/appdata")
     enabled: bool = True
 
 
@@ -41,7 +39,7 @@ class CleanupSchedule(BaseModel):
     time: str  # HH:MM (24h)
     enabled: bool = True
     log_path: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ServerConfig(BaseModel):
@@ -67,7 +65,23 @@ class DockerMCPConfig(BaseSettings):
 
 
 def load_config(config_path: str | None = None) -> DockerMCPConfig:
-    """Load configuration from multiple sources.
+    """Load configuration from multiple sources (synchronous interface).
+
+    Args:
+        config_path: Optional path to YAML config file
+
+    Returns:
+        Loaded configuration
+
+    Note:
+        This function uses asyncio.run() for backward compatibility.
+        For async code, use load_config_async() instead.
+    """
+    return asyncio.run(load_config_async(config_path))
+
+
+async def load_config_async(config_path: str | None = None) -> DockerMCPConfig:
+    """Load configuration from multiple sources (async interface).
 
     Args:
         config_path: Optional path to YAML config file
@@ -83,14 +97,14 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
 
     # Load user config if exists
     user_config_path = Path.home() / ".config" / "docker-mcp" / "hosts.yml"
-    asyncio.run(_load_config_file(config, user_config_path))
+    await _load_config_file(config, user_config_path)
 
     # Load project config (from env var or default)
     from ..server import get_config_dir  # Import at use to avoid circular imports
 
     default_config_file = os.getenv("DOCKER_HOSTS_CONFIG", str(get_config_dir() / "hosts.yml"))
     project_config_path = Path(config_path or default_config_file)
-    asyncio.run(_load_config_file(config, project_config_path))
+    await _load_config_file(config, project_config_path)
 
     # Set the actual config file path on the config object
     config.config_file = str(project_config_path)
@@ -166,10 +180,18 @@ def _expand_yaml_config(content: str) -> str:
 
     # Define allowed environment variables for Docker MCP config
     allowed_env_vars = {
-        "HOME", "USER", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-        "DOCKER_HOSTS_CONFIG", "DOCKER_MCP_CONFIG_DIR",
-        "FASTMCP_HOST", "FASTMCP_PORT", "LOG_LEVEL",
-        "SSH_CONFIG_PATH", "COMPOSE_PATH", "APPDATA_PATH"
+        "HOME",
+        "USER",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "DOCKER_HOSTS_CONFIG",
+        "DOCKER_MCP_CONFIG_DIR",
+        "FASTMCP_HOST",
+        "FASTMCP_PORT",
+        "LOG_LEVEL",
+        "SSH_CONFIG_PATH",
+        "COMPOSE_PATH",
+        "APPDATA_PATH",
     }
 
     def replace_var(match):
@@ -177,19 +199,29 @@ def _expand_yaml_config(content: str) -> str:
         if var_name in allowed_env_vars:
             return os.getenv(var_name, f"${{{var_name}}}")  # Keep original if not found
         else:
-            logger.warning(f"Environment variable ${{{var_name}}} not in allowlist, skipping expansion")
+            logger.warning(
+                f"Environment variable ${{{var_name}}} not in allowlist, skipping expansion"
+            )
             return match.group(0)  # Return original unexpanded
 
     def replace_if_allowed(match):
         """Helper to conditionally replace $VAR pattern based on allowlist."""
-        if match.group(1) in allowed_env_vars:
-            return replace_var(match)
+        var_name = match.group(1)
+        original_pattern = match.group(0)  # Extract for clarity
+
+        if var_name in allowed_env_vars:
+            return os.getenv(var_name, original_pattern)  # Keep original if not found
         else:
-            return match.group(0)  # Return original unexpanded
+            logger.warning(
+                "Environment variable not in allowlist, skipping expansion",
+                variable=var_name,
+                pattern=original_pattern
+            )
+            return original_pattern  # Return original unexpanded
 
     # Replace ${VAR} and $VAR patterns with allowlist check
-    content = re.sub(r'\$\{([^}]+)\}', replace_var, content)
-    content = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', replace_if_allowed, content)
+    content = re.sub(r"\$\{([^}]+)\}", replace_var, content)
+    content = re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*)", replace_if_allowed, content)
 
     return content
 
@@ -260,8 +292,6 @@ def _build_host_data(host_config: DockerHost) -> dict[str, Any]:
         ("compose_path", host_config.compose_path, bool(host_config.compose_path)),
         ("docker_context", host_config.docker_context, bool(host_config.docker_context)),
         ("appdata_path", host_config.appdata_path, bool(host_config.appdata_path)),
-        ("zfs_capable", host_config.zfs_capable, host_config.zfs_capable),
-        ("zfs_dataset", host_config.zfs_dataset, bool(host_config.zfs_dataset)),
         ("enabled", host_config.enabled, not host_config.enabled),
     ]
 

@@ -10,7 +10,7 @@ import structlog
 from ...constants import DOCKER_COMPOSE_PROJECT
 from ..config_loader import DockerHost
 from ..exceptions import DockerMCPError
-from ..transfer import ArchiveUtils, RsyncTransfer, ZFSTransfer
+from ..transfer import ArchiveUtils, RsyncTransfer
 from .verification import MigrationVerifier
 from .volume_parser import VolumeParser
 
@@ -36,7 +36,6 @@ class MigrationManager:
         # Initialize transfer methods
         self.archive_utils = ArchiveUtils()
         self.rsync_transfer = RsyncTransfer()
-        self.zfs_transfer = ZFSTransfer()
 
     async def choose_transfer_method(
         self, source_host: DockerHost, target_host: DockerHost
@@ -50,23 +49,8 @@ class MigrationManager:
         Returns:
             Tuple of (transfer_type: str, transfer_instance)
         """
-        # Check if both hosts have ZFS capability configured
-        if (
-            source_host.zfs_capable
-            and target_host.zfs_capable
-            and source_host.zfs_dataset
-            and target_host.zfs_dataset
-        ):
-            # Validate ZFS is actually available
-            source_valid, _ = await self.zfs_transfer.validate_requirements(source_host)
-            target_valid, _ = await self.zfs_transfer.validate_requirements(target_host)
-
-            if source_valid and target_valid:
-                self.logger.info("Using ZFS send/receive for optimal transfer")
-                return "zfs", self.zfs_transfer
-
-        # Fall back to rsync transfer
-        self.logger.info("Using rsync transfer (ZFS not available on both hosts)")
+        # Use rsync transfer as the only transfer method
+        self.logger.info("Using rsync transfer")
         return "rsync", self.rsync_transfer
 
     async def verify_containers_stopped(
@@ -211,78 +195,59 @@ class MigrationManager:
             source_host, target_host
         )
 
-        if transfer_type == "zfs":
-            # ZFS transfer - handle multiple service datasets individually
-            result = await transfer_instance.transfer_multiple_services(
-                source_host=source_host,
-                target_host=target_host,
-                service_paths=source_paths,  # Pass individual service paths
-            )
-
-            if isinstance(result, dict):
-                result.setdefault("transfer_type", "zfs")
-                result.setdefault("success", False)  # Ensure success key exists
-                return result
-            else:
-                # Handle non-dict return values
-                return {
-                    "success": False,
-                    "error": f"Invalid ZFS transfer result: {result}",
-                    "transfer_type": "zfs",
-                }
-        else:
-            # Rsync transfer - direct directory synchronization (no archiving)
-            if dry_run:
-                return {
-                    "success": True,
-                    "message": "Dry run - would transfer via direct rsync",
-                    "transfer_type": "rsync",
-                }
-
-            # For rsync, directly sync each source path to target
-            transfer_results = []
-            overall_success = True
-
-            for source_path in source_paths:
-                try:
-                    # For rsync, sync directly to target_path (which already includes stack name from executor)
-                    # Don't append basename to avoid path duplication like /appdata/stack/stack
-
-                    result = await transfer_instance.transfer(
-                        source_host=source_host,
-                        target_host=target_host,
-                        source_path=source_path,
-                        target_path=target_path,  # Use target_path directly
-                        compress=True,
-                        delete=False,  # Safety: don't delete target files
-                    )
-
-                    transfer_results.append(result)
-                    if not result.get("success", False):
-                        overall_success = False
-
-                except Exception as e:
-                    overall_success = False
-                    transfer_results.append(
-                        {"success": False, "error": str(e), "source_path": source_path}
-                    )
-
-            final_result = {
-                "success": overall_success,
+        # Use rsync transfer - direct directory synchronization
+        # Rsync transfer - direct directory synchronization (no archiving)
+        if dry_run:
+            return {
+                "success": True,
+                "message": "Dry run - would transfer via direct rsync",
                 "transfer_type": "rsync",
-                "transfers": transfer_results,
-                "paths_transferred": len([r for r in transfer_results if r.get("success", False)]),
-                "total_paths": len(source_paths),
             }
 
-            if not overall_success:
-                final_result["message"] = "Some rsync transfers failed"
-            else:
-                final_result["message"] = (
-                    f"Successfully transferred {final_result['paths_transferred']} paths via rsync"
+        # For rsync, directly sync each source path to target
+        transfer_results = []
+        overall_success = True
+
+        for source_path in source_paths:
+            try:
+                # For rsync, sync directly to target_path (which already includes stack name from executor)
+                # Don't append basename to avoid path duplication like /appdata/stack/stack
+
+                result = await transfer_instance.transfer(
+                    source_host=source_host,
+                    target_host=target_host,
+                    source_path=source_path,
+                    target_path=target_path,  # Use target_path directly
+                    compress=True,
+                    delete=False,  # Safety: don't delete target files
                 )
 
-            return final_result
+                transfer_results.append(result)
+                if not result.get("success", False):
+                    overall_success = False
+
+            except Exception as e:
+                overall_success = False
+                transfer_results.append(
+                    {"success": False, "error": str(e), "source_path": source_path}
+                )
+
+        final_result = {
+            "success": overall_success,
+            "transfer_type": "rsync",
+            "transfers": transfer_results,
+            "paths_transferred": len([r for r in transfer_results if r.get("success", False)]),
+            "total_paths": len(source_paths),
+        }
+
+        if not overall_success:
+            final_result["message"] = "Some rsync transfers failed"
+        else:
+            final_result["message"] = (
+                f"Successfully transferred {final_result['paths_transferred']} paths via rsync"
+            )
+
+        return final_result
 
     # Delegate methods to focused components
     async def parse_compose_volumes(

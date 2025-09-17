@@ -6,7 +6,7 @@ import subprocess
 from typing import Any
 
 import structlog
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from ..exceptions import DockerMCPError
 

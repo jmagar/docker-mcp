@@ -133,26 +133,22 @@ class HostService:
                         "enabled": host_config.enabled,
                         COMPOSE_PATH: host_config.compose_path,
                         APPDATA_PATH: host_config.appdata_path,
-                        "zfs_capable": host_config.zfs_capable,
-                        "zfs_dataset": host_config.zfs_dataset,
                     }
                 )
 
             # Create human-readable summary for efficient display
             summary_lines = [
                 f"Docker Hosts ({len(hosts)} configured)",
-                f"{'Host':<12} {'Address':<20} {'ZFS':<3} {'Dataset':<20}",
-                f"{'-' * 12:<12} {'-' * 20:<20} {'-' * 3:<3} {'-' * 20:<20}",
+                f"{'Host':<12} {'Address':<20}",
+                f"{'-' * 12:<12} {'-' * 20:<20}",
             ]
 
             for host_data in hosts:
                 host_data = cast(dict[str, Any], host_data)  # Type hint for mypy
-                zfs_indicator = "✓" if host_data.get("zfs_capable") else "✗"
                 address = f"{host_data['hostname']}:{host_data['port']}"
-                dataset: str = host_data.get("zfs_dataset", "-") or "-"
 
                 summary_lines.append(
-                    f"{host_data.get(HOST_ID, 'unknown'):<12} {address:<20} {zfs_indicator:<3} {dataset[:20]:<20}"
+                    f"{host_data.get(HOST_ID, 'unknown'):<12} {address:<20}"
                 )
 
             return {
@@ -201,8 +197,6 @@ class HostService:
         tags: list[str] | None = None,
         compose_path: str | None = None,
         appdata_path: str | None = None,
-        zfs_capable: bool | None = None,
-        zfs_dataset: str | None = None,
         enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Edit an existing Docker host configuration.
@@ -217,8 +211,6 @@ class HostService:
             tags: Tags for host categorization (optional update)
             compose_path: Path where compose files are stored (optional update)
             appdata_path: Path where container data is stored (optional update)
-            zfs_capable: Whether ZFS is available on the host (optional update)
-            zfs_dataset: ZFS dataset path for appdata (optional update)
             enabled: Whether the host is enabled (optional update)
 
         Returns:
@@ -252,16 +244,12 @@ class HostService:
                 APPDATA_PATH: appdata_path
                 if appdata_path is not None and appdata_path != ""
                 else current_host.appdata_path,
-                "zfs_capable": zfs_capable if zfs_capable is not None else current_host.zfs_capable,
-                "zfs_dataset": zfs_dataset
-                if zfs_dataset is not None and zfs_dataset != ""
-                else current_host.zfs_dataset,
                 "enabled": enabled if enabled is not None else current_host.enabled,
             }
 
             # Create and validate the new host configuration before updating
             try:
-                new_host_config = DockerHost(**updated_config)  # type: ignore[arg-type]
+                new_host_config = DockerHost(**updated_config)
             except Exception as validation_error:
                 return {
                     "success": False,
@@ -296,7 +284,7 @@ class HostService:
                     k
                     for k, v in locals().items()
                     if k.startswith(
-                        ("ssh_", "description", "tags", "compose_", "appdata_", "zfs_", "enabled")
+                        ("ssh_", "description", "tags", "compose_", "appdata_", "enabled")
                     )
                     and v is not None
                 ],
@@ -431,7 +419,7 @@ class HostService:
             }
 
     async def discover_host_capabilities(self, host_id: str) -> dict[str, Any]:
-        """Discover host capabilities including paths and ZFS support.
+        """Discover host capabilities including paths.
 
         Args:
             host_id: Host identifier to discover capabilities for
@@ -455,7 +443,7 @@ class HostService:
                 return discovery_results
 
             # Process discovery results
-            compose_result, appdata_result, zfs_result = self._process_discovery_results(
+            compose_result, appdata_result = self._process_discovery_results(
                 discovery_results
             )
 
@@ -465,18 +453,17 @@ class HostService:
                 HOST_ID: host_id,
                 "compose_discovery": compose_result,
                 "appdata_discovery": appdata_result,
-                "zfs_discovery": zfs_result,
                 "recommendations": [],
             }
 
             # Generate recommendations
             await self._generate_recommendations(
-                capabilities, compose_result, appdata_result, zfs_result, host_id
+                capabilities, compose_result, appdata_result, host_id
             )
 
             # Add overall guidance if needed
             self._add_overall_guidance(
-                capabilities, compose_result, appdata_result, zfs_result, host_id
+                capabilities, compose_result, appdata_result, host_id
             )
 
             self.logger.info(
@@ -484,7 +471,6 @@ class HostService:
                 host_id=host_id,
                 compose_paths_found=len(compose_result["paths"]),
                 appdata_paths_found=len(appdata_result["paths"]),
-                zfs_capable=zfs_result["capable"],
             )
 
             return capabilities
@@ -523,13 +509,12 @@ class HostService:
                 asyncio.gather(
                     self._discover_compose_paths(host),
                     self._discover_appdata_paths(host),
-                    self._discover_zfs_capability(host),
                     return_exceptions=True,
                 ),
                 timeout=30.0,  # 30 second timeout per host
             )
             return {"results": results}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.logger.warning(f"Discovery timed out for host {host_id}")
             return {
                 "success": False,
@@ -539,7 +524,7 @@ class HostService:
 
     def _process_discovery_results(
         self, discovery_data: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Process discovery results into structured data."""
         results = discovery_data["results"]
 
@@ -553,20 +538,14 @@ class HostService:
             if not isinstance(results[1], Exception)
             else {"paths": [], "recommended": None, "success": False}
         )
-        zfs_result: dict[str, Any] = (
-            {**results[2], "success": True}
-            if not isinstance(results[2], Exception)
-            else {"capable": False, "success": False}
-        )
 
-        return compose_result, appdata_result, zfs_result
+        return compose_result, appdata_result
 
     async def _generate_recommendations(
         self,
         capabilities: dict[str, Any],
         compose_result: dict[str, Any],
         appdata_result: dict[str, Any],
-        zfs_result: dict[str, Any],
         host_id: str,
     ) -> None:
         """Generate configuration recommendations."""
@@ -590,105 +569,14 @@ class HostService:
                 }
             )
 
-        # Add ZFS recommendation and handle configuration updates
-        if zfs_result["capable"]:
-            zfs_recommendation = await self._handle_zfs_configuration(zfs_result, host_id)
-            capabilities["recommendations"].append(zfs_recommendation)
 
-    async def _handle_zfs_configuration(
-        self, zfs_result: dict[str, Any], host_id: str
-    ) -> dict[str, Any]:
-        """Handle ZFS configuration updates and return recommendation."""
-        host = self.config.hosts[host_id]
-        tag_added = False
-        config_changed = False
 
-        # Auto-add 'zfs' tag to host if not already present
-        if "zfs" not in host.tags:
-            host.tags.append("zfs")
-            tag_added = True
-            config_changed = True
-            self.logger.info("Auto-added 'zfs' tag to host", host_id=host_id)
-
-        # Always update ZFS capabilities and dataset if discovered
-        if not host.zfs_capable:
-            host.zfs_capable = True
-            config_changed = True
-            self.logger.info("Updated zfs_capable to True", host_id=host_id)
-
-        # Update dataset if different
-        discovered_dataset = zfs_result.get("dataset")
-        if discovered_dataset and host.zfs_dataset != discovered_dataset:
-            old_dataset = host.zfs_dataset
-            host.zfs_dataset = discovered_dataset
-            config_changed = True
-            self.logger.info(
-                "Updated zfs_dataset",
-                host_id=host_id,
-                old_dataset=old_dataset,
-                new_dataset=host.zfs_dataset,
-            )
-
-        # Save configuration if any changes were made
-        save_success, save_error = await self._save_config_changes(config_changed, host_id)
-
-        # Build recommendation
-        message = (
-            "ZFS support detected and 'zfs' tag automatically added"
-            if tag_added
-            else "ZFS support detected ('zfs' tag already present)"
-        )
-        zfs_recommendation: dict[str, Any] = {
-            "type": "zfs_config",
-            "message": message,
-            "zfs_dataset": zfs_result.get("dataset"),
-            "tag_added": tag_added,
-        }
-
-        # Add save status if config was changed
-        if config_changed:
-            zfs_recommendation["config_saved"] = save_success
-            if not save_success:
-                zfs_recommendation["save_error"] = save_error
-                zfs_recommendation["message"] += (
-                    f" (WARNING: Config save failed: {save_error or 'unknown error'})"
-                )
-
-        return zfs_recommendation
-
-    async def _save_config_changes(
-        self, config_changed: bool, host_id: str
-    ) -> tuple[bool, str | None]:
-        """Save configuration changes and return success status."""
-        if not config_changed:
-            return True, None
-
-        try:
-            config_file_path = getattr(self.config, "config_file", None)
-            self.logger.info(
-                "Attempting to save config after ZFS updates",
-                host_id=host_id,
-                config_file_path=config_file_path,
-            )
-            await asyncio.to_thread(save_config, self.config, config_file_path)
-            self.logger.info(
-                "Successfully saved config after ZFS updates",
-                host_id=host_id,
-                config_file_path=config_file_path,
-            )
-            return True, None
-        except Exception as e:
-            self.logger.error(
-                "Failed to save config after ZFS updates", host_id=host_id, error=str(e)
-            )
-            return False, str(e)
 
     def _add_overall_guidance(
         self,
         capabilities: dict[str, Any],
         compose_result: dict[str, Any],
         appdata_result: dict[str, Any],
-        zfs_result: dict[str, Any],
         host_id: str,
     ) -> None:
         """Add overall guidance if discovery found nothing useful."""
@@ -697,7 +585,6 @@ class HostService:
         )
         has_useful_discovery = (
             total_paths_found > 0
-            or zfs_result["capable"]
             or len(cast(list, capabilities["recommendations"])) > 0
         )
 
@@ -748,7 +635,7 @@ class HostService:
                     asyncio.gather(*discovery_tasks, return_exceptions=True),
                     timeout=60.0,  # 60 second timeout for all discoveries
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self.logger.warning("Discovery operation timed out after 60 seconds")
                 # Return partial results - what we have so far
                 results = [Exception("Discovery timed out") for _ in host_ids]
@@ -898,7 +785,7 @@ class HostService:
             )
             return result, result.get("success", False)
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             error_msg = "Discovery timed out after 30 seconds"
             self.logger.error(f"Discovery timed out for host {host_id}")
             return {"success": False, "error": error_msg, HOST_ID: host_id}, False
@@ -911,14 +798,11 @@ class HostService:
     def _calculate_discovery_statistics(self, discoveries: dict[str, Any]) -> dict[str, int]:
         """Calculate summary statistics from discovery results."""
         total_recommendations = 0
-        zfs_capable_hosts = 0
         total_paths_found = 0
 
         for discovery in discoveries.values():
             if discovery.get("success") and discovery.get("recommendations"):
                 total_recommendations += len(discovery["recommendations"])
-            if discovery.get("zfs_discovery", {}).get("capable"):
-                zfs_capable_hosts += 1
             if discovery.get("compose_discovery", {}).get("paths"):
                 total_paths_found += len(discovery["compose_discovery"]["paths"])
             if discovery.get("appdata_discovery", {}).get("paths"):
@@ -926,7 +810,6 @@ class HostService:
 
         return {
             "total_recommendations": total_recommendations,
-            "zfs_capable_hosts": zfs_capable_hosts,
             "total_paths_found": total_paths_found,
         }
 
@@ -992,7 +875,11 @@ class HostService:
                         max(path_counts.items(), key=lambda x: x[1])[0] if path_counts else None
                     )
 
-                    return {"success": True, "paths": list(path_counts.keys()), "recommended": recommended}
+                    return {
+                        "success": True,
+                        "paths": list(path_counts.keys()),
+                        "recommended": recommended,
+                    }
 
             # Fallback to file system search if no running containers with compose labels
             fallback_cmd = ssh_cmd + [
@@ -1068,7 +955,11 @@ class HostService:
                 if base_path_counts:
                     # Recommend the path with most mounted volumes
                     recommended = max(base_path_counts.items(), key=lambda x: x[1])[0]
-                    return {"success": True, "paths": list(base_path_counts.keys()), "recommended": recommended}
+                    return {
+                        "success": True,
+                        "paths": list(base_path_counts.keys()),
+                        "recommended": recommended,
+                    }
 
         return None
 
@@ -1111,7 +1002,9 @@ class HostService:
 
     async def _test_path_exists_writable(self, ssh_cmd: list[str], path: str) -> bool:
         """Test if a path exists and is writable."""
-        test_cmd = ssh_cmd + [f"test -d {shlex.quote(path)} && test -w {shlex.quote(path)} && echo {shlex.quote(path)}"]
+        test_cmd = ssh_cmd + [
+            f"test -d {shlex.quote(path)} && test -w {shlex.quote(path)} && echo {shlex.quote(path)}"
+        ]
 
         process = await asyncio.create_subprocess_exec(
             *test_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -1121,104 +1014,11 @@ class HostService:
 
         return process.returncode == 0 and bool(stdout.strip())
 
-    async def _discover_zfs_capability(self, host: DockerHost) -> dict[str, Any]:
-        """Discover ZFS capabilities on the host."""
-        try:
-            ssh_cmd = build_ssh_command(host)
 
-            # Check if ZFS is available
-            version = await self._check_zfs_availability(ssh_cmd)
-            if not version:
-                return {"capable": False, "reason": "ZFS not available"}
 
-            # Get ZFS pools
-            pools = await self._get_zfs_pools(ssh_cmd)
 
-            # Find optimal dataset
-            dataset = await self._find_optimal_zfs_dataset(ssh_cmd, pools) if pools else None
 
-            return {
-                "capable": True,
-                "version": version,
-                "pools": pools,
-                "dataset": dataset,
-            }
 
-        except Exception as e:
-            return {"capable": False, "reason": f"ZFS check failed: {str(e)}"}
-
-    async def _check_zfs_availability(self, ssh_cmd: list[str]) -> str | None:
-        """Check if ZFS is available and return version."""
-        zfs_cmd = ssh_cmd + ["which zfs >/dev/null 2>&1 && zfs version | head -1"]
-
-        process = await asyncio.create_subprocess_exec(
-            *zfs_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-
-        version_stdout, _ = await process.communicate()
-
-        if process.returncode != 0:
-            return None
-
-        return version_stdout.decode().strip() if version_stdout else "unknown"
-
-    async def _get_zfs_pools(self, ssh_cmd: list[str]) -> list[str]:
-        """Get list of available ZFS pools."""
-        pools_cmd = ssh_cmd + ["zpool list -H -o name 2>/dev/null || true"]
-
-        process = await asyncio.create_subprocess_exec(
-            *pools_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-
-        pools_stdout, _ = await process.communicate()
-        return [p.strip() for p in pools_stdout.decode().strip().split("\n") if p.strip()]
-
-    async def _find_optimal_zfs_dataset(self, ssh_cmd: list[str], pools: list[str]) -> str | None:
-        """Find the optimal ZFS dataset for appdata storage."""
-        system_pools = ["bpool", "boot-pool", "boot"]
-
-        # First, check for existing appdata datasets
-        for pool in pools:
-            if pool not in system_pools:
-                if dataset := await self._check_existing_appdata_dataset(ssh_cmd, pool):
-                    return dataset
-
-        # If no existing dataset, use intelligent pool selection
-        return self._select_optimal_pool(pools, system_pools)
-
-    async def _check_existing_appdata_dataset(self, ssh_cmd: list[str], pool: str) -> str | None:
-        """Check if appdata dataset already exists on a pool."""
-        check_existing_cmd = ssh_cmd + [
-            f"zfs list {pool}/appdata >/dev/null 2>&1 && echo 'EXISTS' || echo 'NOT_FOUND'"
-        ]
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *check_existing_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await process.communicate()
-            if process.returncode == 0 and "EXISTS" in stdout.decode():
-                return f"{pool}/appdata"
-        except Exception as e:
-            self.logger.debug("ZFS dataset check failed", pool=pool, error=str(e))
-
-        return None
-
-    def _select_optimal_pool(self, pools: list[str], system_pools: list[str]) -> str | None:
-        """Select the best pool for appdata storage."""
-        # Prefer 'rpool' if available and not a system pool
-        if "rpool" in pools and "rpool" not in system_pools:
-            return "rpool/appdata"
-
-        # Use first non-system pool
-        for pool in pools:
-            if pool not in system_pools:
-                return f"{pool}/appdata"
-
-        # Last resort: use first available pool even if it's a system pool
-        if pools:
-            return f"{pools[0]}/appdata"
-
-        return None
 
     def _recommend_compose_path(self, paths: list[str]) -> str | None:
         """Recommend the best compose path from discovered options using smart detection."""
@@ -1386,8 +1186,6 @@ class HostService:
             params.get("tags"),
             params.get("compose_path"),
             params.get("appdata_path"),
-            params.get("zfs_capable"),
-            params.get("zfs_dataset"),
             params.get("enabled"),
         )
 
@@ -1462,13 +1260,15 @@ class HostService:
                     selected_hosts=selected_hosts,
                     result_type=type(result).__name__,
                     has_content=hasattr(result, "content"),
-                    content_preview=str(result.content)[:200] if hasattr(result, "content") else None
+                    content_preview=str(result.content)[:200]
+                    if hasattr(result, "content")
+                    else None,
                 )
                 import_result = {
                     "success": False,
                     "error": "import_ssh_config returned invalid/missing structured_content",
                     "detail": f"Expected structured data but received: {type(result.structured_content).__name__}",
-                    "operation": "import_ssh_config"
+                    "operation": "import_ssh_config",
                 }
         else:
             import_result = result
@@ -1569,7 +1369,6 @@ class HostService:
         result["discovery_summary"] = {
             HOST_ID: host_id,
             "paths_discovered": discovery_count,
-            "zfs_capable": result.get("zfs_discovery", {}).get("capable", False),
             "recommendations_count": len(result.get("recommendations", [])),
         }
 
@@ -1598,15 +1397,12 @@ class HostService:
 
         # Add summary statistics
         total_recommendations = 0
-        zfs_hosts = 0
         total_paths = 0
 
         discoveries = result.get("discoveries", {})
         for host_discovery in discoveries.values():
             if host_discovery.get("success"):
                 total_recommendations += len(host_discovery.get("recommendations", []))
-                if host_discovery.get("zfs_discovery", {}).get("capable"):
-                    zfs_hosts += 1
 
                 compose_paths = len(host_discovery.get("compose_discovery", {}).get("paths", []))
                 appdata_paths = len(host_discovery.get("appdata_discovery", {}).get("paths", []))
@@ -1615,7 +1411,6 @@ class HostService:
         result["discovery_summary"] = {
             "total_hosts_discovered": result.get("successful_discoveries", 0),
             "total_recommendations": total_recommendations,
-            "zfs_capable_hosts": zfs_hosts,
             "total_paths_found": total_paths,
         }
 

@@ -2,12 +2,11 @@
 
 import asyncio
 import datetime
-import hashlib
 import json
 import shlex
 import subprocess
 from subprocess import CompletedProcess
-from typing import Any, Dict
+from typing import Any
 
 import structlog
 
@@ -22,7 +21,6 @@ class MigrationVerifier:
 
     def __init__(self):
         self.logger = logger.bind(component="migration_verifier")
-        self._checksum_algorithm_cache: Dict[str, hashlib._Hash] = {}
 
     async def _run_remote(
         self, cmd: list[str], description: str = "", timeout: int = 60
@@ -37,7 +35,6 @@ class MigrationVerifier:
             check=False,
             timeout=timeout,
         )
-
 
     async def create_source_inventory(
         self,
@@ -59,7 +56,7 @@ class MigrationVerifier:
             "total_size": 0,
             "paths": {},
             "critical_files": {},
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         for path in volume_paths:
@@ -208,7 +205,7 @@ class MigrationVerifier:
 
         target_file_set = set(target_file_list)
         missing_files = source_files - target_file_set
-        verification["data_transfer"]["missing_files"] = list(missing_files)
+        verification["data_transfer"]["missing_files"] = sorted(missing_files)
 
         # Calculate match percentages
         if source_inventory["total_files"] > 0:

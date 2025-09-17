@@ -6,6 +6,7 @@ Provides a clean interface while maintaining backward compatibility.
 """
 
 import re
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -241,40 +242,7 @@ class StackService:
         This method consolidates all dispatcher logic from server.py into the service layer.
         """
         try:
-            # Normalize strings to enum when possible
-            if isinstance(action, str):
-                try:
-                    action = ComposeAction(action.lower().strip())
-                except ValueError:
-                    pass
-            # Route to appropriate handler
-            if action == ComposeAction.LIST:
-                return await self._handle_list_action(**params)
-            elif action == ComposeAction.VIEW:
-                return await self._handle_view_action(**params)
-            elif action == ComposeAction.DEPLOY:
-                return await self._handle_deploy_action(**params)
-            elif action in ["up", "down", "restart", "build", "pull"]:
-                return await self._handle_manage_action(action, **params)
-            elif action == ComposeAction.LOGS:
-                return await self._handle_logs_action(**params)
-            elif action == ComposeAction.DISCOVER:
-                return await self._handle_discover_action(**params)
-            elif action == ComposeAction.MIGRATE:
-                return await self._handle_migrate_action(**params)
-            elif action in [
-                ComposeAction.UP,
-                ComposeAction.DOWN,
-                ComposeAction.RESTART,
-                ComposeAction.BUILD,
-            ]:
-                return await self._handle_lifecycle_action(action, **params)
-            else:
-                return {
-                    "success": False,
-                    "error": f"Unsupported action: {action.value if hasattr(action, 'value') else action}",
-                    "supported_actions": [a.value for a in ComposeAction],
-                }
+            return await self._dispatch_action(action, **params)
         except Exception as e:
             self.logger.error(
                 "stack service action error",
@@ -290,6 +258,54 @@ class StackService:
                 "host_id": params.get("host_id", ""),
                 "stack_name": params.get("stack_name", ""),
             }
+
+    async def _dispatch_action(self, action: "ComposeAction" | str, **params) -> dict[str, Any]:
+        """Dispatch action to appropriate handler method."""
+        # Normalize strings to enum when possible
+        normalized_action = self._normalize_action(action)
+
+        # Create dispatch mapping
+        dispatch_map: dict[ComposeAction, Callable[..., Awaitable[dict[str, Any]]]] = {
+            ComposeAction.LIST: self._handle_list_action,
+            ComposeAction.VIEW: self._handle_view_action,
+            ComposeAction.DEPLOY: self._handle_deploy_action,
+            ComposeAction.LOGS: self._handle_logs_action,
+            ComposeAction.DISCOVER: self._handle_discover_action,
+            ComposeAction.MIGRATE: self._handle_migrate_action,
+            ComposeAction.UP: self._handle_lifecycle_action,
+            ComposeAction.DOWN: self._handle_lifecycle_action,
+            ComposeAction.RESTART: self._handle_lifecycle_action,
+            ComposeAction.BUILD: self._handle_lifecycle_action,
+            ComposeAction.PULL: self._handle_lifecycle_action,
+        }
+
+        # Handle string actions that map to manage action
+        if normalized_action in ["up", "down", "restart", "build", "pull"]:
+            return await self._handle_manage_action(normalized_action, **params)
+
+        # Dispatch to appropriate handler
+        if isinstance(normalized_action, ComposeAction):
+            handler = dispatch_map.get(normalized_action)
+            if handler:
+                if normalized_action in [ComposeAction.UP, ComposeAction.DOWN, ComposeAction.RESTART,
+                                       ComposeAction.BUILD, ComposeAction.PULL]:
+                    return await handler(normalized_action, **params)
+                return await handler(**params)
+
+        return {
+            "success": False,
+            "error": f"Unsupported action: {normalized_action.value if hasattr(normalized_action, 'value') else normalized_action}",
+            "supported_actions": [a.value for a in ComposeAction],
+        }
+
+    def _normalize_action(self, action: "ComposeAction" | str) -> "ComposeAction" | str:
+        """Normalize action string to enum when possible."""
+        if isinstance(action, str):
+            try:
+                return ComposeAction(action.lower().strip())
+            except ValueError:
+                return action.lower().strip()
+        return action
 
     async def _handle_list_action(self, **params) -> dict[str, Any]:
         """Handle LIST action."""

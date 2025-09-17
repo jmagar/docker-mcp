@@ -3,11 +3,11 @@
 import asyncio
 import shlex
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import structlog
+from pydantic import BaseModel, Field
 
 from ..utils import build_ssh_command, format_size
 from .config_loader import DockerHost
@@ -18,7 +18,27 @@ logger = structlog.get_logger()
 
 # Timeout constants for backup operations
 BACKUP_TIMEOUT_SECONDS = 300  # 5 minutes for backup operations
-CHECK_TIMEOUT_SECONDS = 30   # 30 seconds for status checks
+CHECK_TIMEOUT_SECONDS = 30  # 30 seconds for status checks
+
+
+class BackupInfo(BaseModel):
+    """Backup information with validation and schema guarantees."""
+
+    success: bool = Field(description="Whether backup was successful")
+    type: str = Field(description="Type of backup (directory)")
+    host_id: str = Field(description="Host identifier where backup was created")
+    source_path: str | None = Field(
+        default=None, description="Source directory path for directory backups"
+    )
+    backup_path: str | None = Field(
+        default=None, description="Path to backup file (for directory backups)"
+    )
+    backup_size: int = Field(description="Size of backup in bytes")
+    backup_size_human: str = Field(description="Human-readable backup size")
+    timestamp: str = Field(description="Timestamp when backup was created")
+    reason: str = Field(description="Reason for creating the backup")
+    stack_name: str = Field(description="Stack name associated with the backup")
+    created_at: str = Field(description="ISO 8601 creation timestamp")
 
 
 class BackupError(DockerMCPError):
@@ -33,7 +53,7 @@ class BackupManager:
     def __init__(self):
         self.logger = logger.bind(component="backup_manager")
         self.safety = MigrationSafety()
-        self.backups: list[dict[str, Any]] = []
+        self.backups: list[BackupInfo] = []
 
     async def backup_directory(
         self,
@@ -41,7 +61,7 @@ class BackupManager:
         source_path: str,
         stack_name: str,
         backup_reason: str = "Pre-migration backup",
-    ) -> dict[str, Any]:
+    ) -> BackupInfo:
         """Create a backup of a directory using tar.
 
         Args:
@@ -53,7 +73,7 @@ class BackupManager:
         Returns:
             Backup information dictionary
         """
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_filename = f"backup_{stack_name}_{timestamp}.tar.gz"
         remote_tmp_dir = "/tmp/docker_mcp_backups"  # noqa: S108 - Remote temp dir, not local
         backup_path = f"{remote_tmp_dir}/{backup_filename}"
@@ -61,7 +81,11 @@ class BackupManager:
         ssh_cmd = build_ssh_command(host)
 
         # Check if source path exists
-        check_cmd = ssh_cmd + [f"test -d {shlex.quote(source_path)} && echo 'EXISTS' || echo 'NOT_FOUND'"]
+        check_cmd = ssh_cmd + [
+            "sh",
+            "-lc",
+            f"test -d {shlex.quote(source_path)} && echo 'EXISTS' || echo 'NOT_FOUND'",
+        ]
         try:
             result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
@@ -76,23 +100,32 @@ class BackupManager:
                 "Source path check timed out",
                 host_id=host.hostname,
                 source_path=source_path,
-                timeout_seconds=CHECK_TIMEOUT_SECONDS
+                timeout_seconds=CHECK_TIMEOUT_SECONDS,
             )
-            raise BackupError(f"Source path check timed out after {CHECK_TIMEOUT_SECONDS} seconds") from None
+            raise BackupError(
+                f"Source path check timed out after {CHECK_TIMEOUT_SECONDS} seconds"
+            ) from None
 
         if "NOT_FOUND" in result.stdout:
             self.logger.info("Source path does not exist, no backup needed", path=source_path)
-            return {
-                "success": True,
-                "backup_path": None,
-                "backup_size": 0,
-                "message": f"No existing data at {source_path} - backup skipped",
-            }
+            return BackupInfo(
+                success=True,
+                type="directory",
+                host_id=host.hostname,
+                source_path=source_path,
+                backup_path=None,
+                backup_size=0,
+                backup_size_human="0 B",
+                timestamp=datetime.now(UTC).strftime("%Y%m%d_%H%M%S"),
+                reason=backup_reason,
+                stack_name=stack_name,
+                created_at=datetime.now(UTC).isoformat(),
+            )
 
         # Create backup using tar
         backup_cmd = ssh_cmd + [
             "sh",
-            "-c",
+            "-lc",
             (
                 f"mkdir -p {shlex.quote(remote_tmp_dir)} && "
                 f"cd {shlex.quote(str(Path(source_path).parent))} && "
@@ -124,7 +157,7 @@ class BackupManager:
                 host_id=host.hostname,
                 source_path=source_path,
                 backup_path=backup_path,
-                timeout_seconds=BACKUP_TIMEOUT_SECONDS
+                timeout_seconds=BACKUP_TIMEOUT_SECONDS,
             )
             # Try to clean up partial backup
             cleanup_cmd = ssh_cmd + ["rm", "-f", shlex.quote(backup_path)]
@@ -138,13 +171,20 @@ class BackupManager:
                 )
             except Exception as cleanup_err:
                 logger.warning("Failed to cleanup partial backup", error=str(cleanup_err))
-            raise BackupError(f"Backup operation timed out after {BACKUP_TIMEOUT_SECONDS} seconds") from None
+            raise BackupError(
+                f"Backup operation timed out after {BACKUP_TIMEOUT_SECONDS} seconds"
+            ) from None
 
         if "BACKUP_FAILED" in result.stdout or result.returncode != 0:
             raise BackupError(f"Failed to create backup: {result.stderr}")
 
         # Get backup size
-        size_cmd = ssh_cmd + [f"stat -c%s {shlex.quote(backup_path)} 2>/dev/null || echo '0'"]
+        size_cmd = ssh_cmd + [
+            "sh",
+            "-lc",
+            f"stat -c%s {shlex.quote(backup_path)} 2>/dev/null || echo '0'",
+        ]
+        backup_size = 0  # Initialize to prevent UnboundLocalError
         try:
             size_result = await asyncio.to_thread(
                 subprocess.run,  # nosec B603
@@ -159,147 +199,51 @@ class BackupManager:
                 "Backup size check timed out",
                 host_id=host.hostname,
                 backup_path=backup_path,
-                timeout_seconds=CHECK_TIMEOUT_SECONDS
+                timeout_seconds=CHECK_TIMEOUT_SECONDS,
             )
             backup_size = 0  # Default to 0 if we can't check size
+        except Exception as e:
+            logger.warning(
+                "Backup size check failed",
+                host_id=host.hostname,
+                backup_path=backup_path,
+                error=str(e),
+            )
+            backup_size = 0  # Default to 0 on any other error
         else:
-            backup_size = int(size_result.stdout.strip()) if size_result.stdout.strip().isdigit() else 0
+            backup_size = (
+                int(size_result.stdout.strip()) if size_result.stdout.strip().isdigit() else 0
+            )
 
         # Create backup record
-        backup_info = {
-            "success": True,
-            "type": "directory",
-            "host_id": host.hostname,
-            "source_path": source_path,
-            "backup_path": backup_path,
-            "backup_size": backup_size,
-            "backup_size_human": format_size(backup_size),
-            "timestamp": timestamp,
-            "reason": backup_reason,
-            "stack_name": stack_name,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
+        backup_info = BackupInfo(
+            success=True,
+            type="directory",
+            host_id=host.hostname,
+            source_path=source_path,
+            backup_path=backup_path,
+            backup_size=backup_size,
+            backup_size_human=format_size(backup_size),
+            timestamp=timestamp,
+            reason=backup_reason,
+            stack_name=stack_name,
+            created_at=datetime.now(UTC).isoformat(),
+        )
 
         self.backups.append(backup_info)
 
         self.logger.info(
             "Directory backup created successfully",
             backup=backup_path,
-            size=backup_info["backup_size_human"],
+            size=backup_info.backup_size_human,
             host=host.hostname,
         )
 
         return backup_info
 
-    async def backup_zfs_dataset(
-        self,
-        host: DockerHost,
-        dataset: str,
-        stack_name: str,
-        backup_reason: str = "Pre-migration ZFS backup",
-    ) -> dict[str, Any]:
-        """Create a ZFS snapshot backup.
-
-        Args:
-            host: Host configuration
-            dataset: ZFS dataset to backup
-            stack_name: Stack name for backup naming
-            backup_reason: Reason for backup
-
-        Returns:
-            Backup information dictionary
-        """
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        snapshot_name = f"backup_{stack_name}_{timestamp}"
-        full_snapshot = f"{dataset}@{snapshot_name}"
-
-        ssh_cmd = build_ssh_command(host)
-
-        # Create ZFS snapshot
-        snap_cmd = ssh_cmd + ["zfs", "snapshot", shlex.quote(full_snapshot)]
-
-        self.logger.info(
-            "Creating ZFS backup snapshot",
-            dataset=dataset,
-            snapshot=full_snapshot,
-            host=host.hostname,
-            reason=backup_reason,
-        )
-
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                snap_cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=CHECK_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            logger.error(
-                "ZFS snapshot creation timed out",
-                host_id=host.hostname,
-                dataset=dataset,
-                snapshot=full_snapshot,
-                timeout_seconds=CHECK_TIMEOUT_SECONDS
-            )
-            raise BackupError(f"ZFS snapshot creation timed out after {CHECK_TIMEOUT_SECONDS} seconds") from None
-
-        if result.returncode != 0:
-            raise BackupError(f"Failed to create ZFS backup snapshot: {result.stderr}")
-
-        # Get snapshot size
-        size_cmd = ssh_cmd + ["sh", "-c", f"zfs list -H -o used {shlex.quote(full_snapshot)} 2>/dev/null || echo '0'"]
-        try:
-            size_result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                size_cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=CHECK_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning(
-                "ZFS snapshot size check timed out",
-                host_id=host.hostname,
-                snapshot=full_snapshot,
-                timeout_seconds=CHECK_TIMEOUT_SECONDS
-            )
-            backup_size = 0  # Default to 0 if we can't check size
-        else:
-            # Parse ZFS size format (e.g., "1.2G", "512M", "4K")
-            size_str = size_result.stdout.strip()
-            backup_size = self._parse_zfs_size(size_str)
-
-        # Create backup record
-        backup_info = {
-            "success": True,
-            "type": "zfs_snapshot",
-            "host_id": host.hostname,
-            "dataset": dataset,
-            "snapshot_name": full_snapshot,
-            "backup_size": backup_size,
-            "backup_size_human": size_str,
-            "timestamp": timestamp,
-            "reason": backup_reason,
-            "stack_name": stack_name,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        self.backups.append(backup_info)
-
-        self.logger.info(
-            "ZFS backup snapshot created successfully",
-            snapshot=full_snapshot,
-            size=size_str,
-            host=host.hostname,
-        )
-
-        return backup_info
 
     async def restore_directory_backup(
-        self, host: DockerHost, backup_info: dict[str, Any]
+        self, host: DockerHost, backup_info: BackupInfo
     ) -> tuple[bool, str]:
         """Restore a directory from backup.
 
@@ -310,14 +254,17 @@ class BackupManager:
         Returns:
             Tuple of (success: bool, message: str)
         """
-        if backup_info["type"] != "directory":
-            return False, f"Not a directory backup: {backup_info['type']}"
+        if backup_info.type != "directory":
+            return False, f"Not a directory backup: {backup_info.type}"
 
-        backup_path = backup_info["backup_path"]
-        source_path = backup_info["source_path"]
+        backup_path = backup_info.backup_path
+        source_path = backup_info.source_path
 
         if not backup_path:
             return True, "No backup to restore (directory didn't exist)"
+
+        if not source_path:
+            return False, "No source path specified in backup info"
 
         ssh_cmd = build_ssh_command(host)
 
@@ -355,72 +302,19 @@ class BackupManager:
                 host_id=host.hostname,
                 backup_path=backup_path,
                 source_path=source_path,
-                timeout_seconds=BACKUP_TIMEOUT_SECONDS
+                timeout_seconds=BACKUP_TIMEOUT_SECONDS,
             )
-            raise BackupError(f"Backup restore operation timed out after {BACKUP_TIMEOUT_SECONDS} seconds") from None
+            raise BackupError(
+                f"Backup restore operation timed out after {BACKUP_TIMEOUT_SECONDS} seconds"
+            ) from None
 
         if "RESTORE_FAILED" in result.stdout or result.returncode != 0:
             return False, f"Failed to restore backup: {result.stderr}"
 
         return True, f"Directory restored from backup: {backup_path}"
 
-    async def restore_zfs_backup(
-        self, host: DockerHost, backup_info: dict[str, Any]
-    ) -> tuple[bool, str]:
-        """Restore a ZFS dataset from snapshot backup.
 
-        Args:
-            host: Host configuration
-            backup_info: Backup information from backup_zfs_dataset()
-
-        Returns:
-            Tuple of (success: bool, message: str)
-        """
-        if backup_info["type"] != "zfs_snapshot":
-            return False, f"Not a ZFS backup: {backup_info['type']}"
-
-        snapshot_name = backup_info["snapshot_name"]
-        dataset = backup_info["dataset"]
-
-        ssh_cmd = build_ssh_command(host)
-
-        # Rollback to snapshot
-        rollback_cmd = ssh_cmd + ["zfs", "rollback", shlex.quote(snapshot_name)]
-
-        self.logger.info(
-            "Rolling back ZFS dataset to backup snapshot",
-            snapshot=snapshot_name,
-            dataset=dataset,
-            host=host.hostname,
-        )
-
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                rollback_cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=CHECK_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            logger.error(
-                "ZFS rollback operation timed out",
-                host_id=host.hostname,
-                snapshot=snapshot_name,
-                dataset=dataset,
-                timeout_seconds=CHECK_TIMEOUT_SECONDS
-            )
-            return False, f"ZFS rollback operation timed out after {CHECK_TIMEOUT_SECONDS} seconds"
-
-        if result.returncode != 0:
-            return False, f"Failed to rollback ZFS dataset: {result.stderr}"
-
-        return True, f"ZFS dataset rolled back to snapshot: {snapshot_name}"
-
-    async def cleanup_backup(
-        self, host: DockerHost, backup_info: dict[str, Any]
-    ) -> tuple[bool, str]:
+    async def cleanup_backup(self, host: DockerHost, backup_info: BackupInfo) -> tuple[bool, str]:
         """Clean up a backup after successful migration.
 
         Args:
@@ -430,56 +324,17 @@ class BackupManager:
         Returns:
             Tuple of (success: bool, message: str)
         """
-        if backup_info["type"] == "directory":
-            if not backup_info["backup_path"]:
+        if backup_info.type == "directory":
+            if not backup_info.backup_path:
                 return True, "No backup file to clean up"
 
             success, message = await self.safety.safe_delete_file(
                 build_ssh_command(host),
-                backup_info["backup_path"],
-                f"Cleanup backup for {backup_info['stack_name']}",
+                backup_info.backup_path,
+                f"Cleanup backup for {backup_info.stack_name}",
             )
             return success, message
 
-        elif backup_info["type"] == "zfs_snapshot":
-            # For ZFS snapshots, we might want to keep them longer
-            # Or provide option to delete
-            return True, f"ZFS backup snapshot retained: {backup_info['snapshot_name']}"
 
-        return False, f"Unknown backup type: {backup_info['type']}"
+        return False, f"Unknown backup type: {backup_info.type}"
 
-    def _parse_zfs_size(self, size_str: str) -> int:
-        """Parse ZFS size string to bytes.
-
-        Args:
-            size_str: Size string like "1.2G", "512M", "4K"
-
-        Returns:
-            Size in bytes
-        """
-        size_str = size_str.strip().upper()
-        if not size_str or size_str == "0":
-            return 0
-
-        # Extract number and unit
-        import re
-
-        match = re.match(r"([0-9.]+)([KMGTPE]?)", size_str)
-        if not match:
-            return 0
-
-        number = float(match.group(1))
-        unit = match.group(2)
-
-        # Convert to bytes
-        multipliers = {
-            "": 1,
-            "K": 1024,
-            "M": 1024**2,
-            "G": 1024**3,
-            "T": 1024**4,
-            "P": 1024**5,
-            "E": 1024**6,
-        }
-
-        return int(number * multipliers.get(unit, 1))

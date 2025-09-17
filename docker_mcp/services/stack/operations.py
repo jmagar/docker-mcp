@@ -63,8 +63,7 @@ class StackOperations:
                     for _ in range(5):
                         list_result = await self.stack_tools.list_stacks(host_id)
                         if any(
-                            isinstance(s, dict) and 
-                            s.get("name", "").lower() == stack_name.lower()
+                            isinstance(s, dict) and s.get("name", "").lower() == stack_name.lower()
                             for s in list_result.get("stacks", [])
                         ):
                             break

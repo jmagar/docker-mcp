@@ -46,13 +46,17 @@ class RsyncTransfer(BaseTransfer):
         check_cmd = ssh_cmd + ["which rsync > /dev/null 2>&1 && echo 'OK' || echo 'FAILED'"]
 
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,  # nosec B603
-                check_cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,  # nosec B603
+                    check_cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=RSYNC_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                return False, f"Rsync availability check timed out after {RSYNC_TIMEOUT}s"
 
             if "OK" in result.stdout:
                 return True, ""
@@ -101,7 +105,8 @@ class RsyncTransfer(BaseTransfer):
             rsync_opts.append("--dry-run")
 
         # Build target URL for rsync running ON source host with quoted path
-        target_url = f"{target_host.user}@{target_host.hostname}:{shlex.quote(target_path)}"
+        target_user = (target_host.user or "root").strip() or "root"
+        target_url = f"{target_user}@{target_host.hostname}:{shlex.quote(target_path)}"
 
         # Build SSH options for nested connection
         ssh_opts = []
@@ -112,9 +117,15 @@ class RsyncTransfer(BaseTransfer):
 
         # Build rsync command that will run on the source host with proper argument separation
         rsync_args = ["rsync"] + rsync_opts
+
+        # Always specify explicit SSH shell to avoid environment variance
         if ssh_opts:
             ssh_command = f"ssh {' '.join(ssh_opts)}"
             rsync_args.extend(["-e", ssh_command])
+        else:
+            # Explicitly specify ssh as remote shell even without custom options
+            rsync_args.extend(["-e", "ssh"])
+
         rsync_args.extend([source_path, target_url])
 
         # Full command: SSH into source, then run rsync from there to target

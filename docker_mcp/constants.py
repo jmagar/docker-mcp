@@ -18,8 +18,6 @@ HOST_ID = "host_id"
 APPDATA_PATH = "appdata_path"
 COMPOSE_PATH = "compose_path"
 IDENTITY_FILE = "identity_file"
-ZFS_DATASET = "zfs_dataset"
-ZFS_CAPABLE = "zfs_capable"
 
 # Container Fields
 TOTAL_CONTAINERS = "total_containers"
@@ -66,7 +64,6 @@ BACKUP_PATH = "backup_path"
 BACKUP_SIZE = "backup_size"
 BACKUP_SIZE_HUMAN = "backup_size_human"
 SNAPSHOT_NAME = "snapshot_name"
-ZFS_SNAPSHOT = "zfs_snapshot"
 
 # Date/Time Formats
 BACKUP_DATE_FORMAT = "%Y%m%d_%H%M%S"
@@ -80,7 +77,6 @@ DOCKER_PS_PROJECT_FILTER = (
     "docker ps --filter 'label=com.docker.compose.project={0}' --format '{{{{.Names}}}}'"
 )
 DOCKER_COMPOSE_PROJECT_FILTER = " -type f 2>/dev/null | wc -l"
-ZFS_SNAPSHOT_COMMAND = "zfs snapshot "
 
 # SSH Command Templates
 SSH_RSYNC_KEY_TEMPLATE = " -e 'ssh -i {0}'"
@@ -153,7 +149,6 @@ TOTAL_HOSTS = "total_hosts"
 DISCOVERIES = "discoveries"
 COMPOSE_DISCOVERY = "compose_discovery"
 APPDATA_DISCOVERY = "appdata_discovery"
-ZFS_DISCOVERY = "zfs_discovery"
 IMPORTED_HOSTS = "imported_hosts"
 VALID_ACTIONS = "valid_actions"
 STACKS_FOUND = "stacks_found"

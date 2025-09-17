@@ -224,13 +224,17 @@ class StackValidation:
                     timeout=30,
                 )
             except subprocess.TimeoutExpired:
-                return False, f"Disk space check timed out after 30s on {host.hostname}", {
-                    "host": host.hostname,
-                    "path_checked": appdata_path,
-                    "operation": "check_disk_space",
-                    "timed_out": True,
-                    "timeout_seconds": 30,
-                }
+                return (
+                    False,
+                    f"Disk space check timed out after 30s on {host.hostname}",
+                    {
+                        "host": host.hostname,
+                        "path_checked": appdata_path,
+                        "operation": "check_disk_space",
+                        "timed_out": True,
+                        "timeout_seconds": 30,
+                    },
+                )
 
             if result.returncode == 0 and result.stdout.strip():
                 total, used, available = map(int, result.stdout.strip().split())
@@ -299,20 +303,18 @@ class StackValidation:
                         "Tool availability check timed out",
                         hostname=host.hostname,
                         tool=tool,
-                        timeout_seconds=30
+                        timeout_seconds=30,
                     )
                     # Create fallback result indicating timeout (treat as missing)
                     result = subprocess.CompletedProcess(
                         args=check_cmd,
                         returncode=1,
                         stdout="MISSING",
-                        stderr="Tool check command timed out after 30 seconds"
+                        stderr="Tool check command timed out after 30 seconds",
                     )
                 except asyncio.CancelledError:
                     self.logger.warning(
-                        "Tool availability check cancelled",
-                        hostname=host.hostname,
-                        tool=tool
+                        "Tool availability check cancelled", hostname=host.hostname, tool=tool
                     )
                     raise
 
@@ -504,14 +506,14 @@ class StackValidation:
                         "Port availability check timed out",
                         hostname=host.hostname,
                         port=port,
-                        timeout_seconds=30
+                        timeout_seconds=30,
                     )
                     # Create fallback result indicating timeout
                     result = subprocess.CompletedProcess(
                         args=check_cmd,
                         returncode=1,
                         stdout="",
-                        stderr="Port check command timed out after 30 seconds"
+                        stderr="Port check command timed out after 30 seconds",
                     )
 
                 is_in_use = result.returncode == 0 and "IN_USE" in result.stdout
@@ -639,14 +641,14 @@ class StackValidation:
                         "Network conflict check timed out",
                         hostname=host.hostname,
                         network_name=network_name,
-                        timeout_seconds=30
+                        timeout_seconds=30,
                     )
                     # Create fallback result indicating timeout
                     result = subprocess.CompletedProcess(
                         args=check_cmd,
                         returncode=1,
                         stdout="",
-                        stderr="Command timed out after 30 seconds"
+                        stderr="Command timed out after 30 seconds",
                     )
 
                 has_conflict = result.returncode == 0 and "CONFLICT" in result.stdout
