@@ -120,11 +120,35 @@ class DockerComposeParams(MCPModel):
     )
     compose_content: str = Field(default="", description="Docker Compose file content")
     environment: dict[str, str] = Field(default_factory=dict, description="Environment variables")
+
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, v):
+        """Validate environment variable keys and values."""
+        import re
+        if not isinstance(v, dict):
+            return v
+        
+        for key, value in v.items():
+            # Check for empty keys
+            if not key or key.strip() == "":
+                raise ValueError("Environment variable keys cannot be empty")
+            
+            # Check for None values
+            if value is None:
+                raise ValueError(f"Environment variable '{key}' cannot have None value")
+            
+            # Validate key follows environment variable naming conventions
+            # Must be alphanumeric plus underscore, not starting with digit
+            if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", key):
+                raise ValueError(f"Environment variable key '{key}' must contain only letters, numbers, and underscores, and cannot start with a digit")
+        
+        return v
     pull_images: bool = Field(default=True, description="Pull images before deploying")
     recreate: bool = Field(default=False, description="Recreate containers")
     follow: bool = Field(default=False, description="Follow log output")
     lines: int = Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve")
-    dry_run: bool = Field(default=False, description="Perform a dry run without making changes")
+    dry_run: bool = Field(description="Perform a dry run without making changes (must be explicitly specified)")
     options: dict[str, str] | None = Field(
         default=None, description="Additional options for the operation"
     )

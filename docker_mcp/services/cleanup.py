@@ -6,16 +6,22 @@ Business logic for Docker cleanup and disk usage operations.
 
 import asyncio
 import re
-from datetime import UTC, datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Literal, cast
 
 import structlog
 
-from ..core.config_loader import DockerHost, DockerMCPConfig
+from ..core.config_loader import CleanupSchedule, DockerHost, DockerMCPConfig
 from ..utils import build_ssh_command, format_size, validate_host
 
 # Constants
 TOP_CANDIDATES = 10
+TOP_CONSUMERS = 10
+
+# Docker container parsing constants
+CONTAINER_SIZE_COLUMN_INDEX = 5  # Column after SIZE in docker ps output
+CONTAINER_CREATED_COLUMN_INDEX = 8  # CREATED column index
+MIN_CONTAINER_COLUMNS = 9  # Minimum columns expected for complete container info
 
 
 class CleanupService:
@@ -106,7 +112,7 @@ class CleanupService:
                 summary_stdout, summary_stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=60
                 )
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
                 return {"success": False, "error": "Timeout getting docker disk usage summary"}
@@ -128,7 +134,7 @@ class CleanupService:
                 detailed_stdout, detailed_stderr = await asyncio.wait_for(
                     dproc.communicate(), timeout=120
                 )
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 dproc.kill()
                 await dproc.wait()
                 detailed_stdout = b""  # fall back to no details
@@ -259,7 +265,7 @@ class CleanupService:
         moderate_result["cleanup_type"] = "aggressive"
         moderate_result["mode"] = "aggressive"
         moderate_result["message"] = (
-            "⚠️  AGGRESSIVE cleanup completed - removed unused containers, networks, "
+            "⚠️ AGGRESSIVE cleanup completed - removed unused containers, networks, "
             "build cache, images, and volumes"
         )
 
@@ -274,7 +280,7 @@ class CleanupService:
         )  # nosec B603
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             return {
@@ -536,7 +542,8 @@ class CleanupService:
         result: dict[str, Any],
     ) -> None:
         """Parse a data line based on section type."""
-        parts = line.split()
+        # Use more robust parsing - split on whitespace but handle multiple spaces
+        parts = [part for part in line.split() if part.strip()]
         if len(parts) < 3:
             return
 
@@ -555,15 +562,27 @@ class CleanupService:
 
     def _parse_images_list_line(self, parts: list[str], images: list[dict[str, Any]]) -> None:
         """Parse images section line."""
+        # Docker system df -v format: REPOSITORY TAG IMAGE_ID CREATED SIZE
         if len(parts) >= 5:
             repo = parts[0]
             tag = parts[1]
-            size_str = parts[4]
+            # Size is typically the last column, but could be in position 4
+            size_str = parts[-1] if len(parts) >= 5 else parts[4]
+            
+            # Ensure we have a valid size string
+            if not size_str or size_str in ["<none>", "<missing>"]:
+                size_str = "0B"
+                
             size_bytes = self._parse_docker_size(size_str)
+
+            # Handle repository name formatting
+            name = f"{repo}:{tag}" if tag not in ["<none>", "<missing>"] else repo
+            if name == "<none>:<none>":
+                name = f"<none>@{parts[2][:12]}" if len(parts) > 2 else "<none>"
 
             images.append(
                 {
-                    "name": f"{repo}:{tag}" if tag != "<none>" else repo,
+                    "name": name,
                     "size": size_str,
                     "size_bytes": size_bytes,
                 }
@@ -604,8 +623,8 @@ class CleanupService:
 
     def _parse_container_status(self, parts: list[str]) -> bool:
         """Parse container status and return True if running."""
-        # Look for status keywords starting from index 5 onward (after SIZE)
-        for i in range(5, len(parts) - 1):  # -1 to exclude NAMES column
+        # Look for status keywords starting from index after SIZE onward
+        for i in range(CONTAINER_SIZE_COLUMN_INDEX, len(parts) - 1):  # -1 to exclude NAMES column
             word = parts[i].lower()
             if word in ["up", "exited", "restarting", "paused", "dead", "created"]:
                 # Found status start, collect status text
@@ -614,8 +633,8 @@ class CleanupService:
                 return "up" in status_text
 
         # Fallback: assume everything after CREATED is STATUS
-        if len(parts) > 9:
-            status_text = " ".join(parts[8:-1]).lower()
+        if len(parts) > MIN_CONTAINER_COLUMNS:
+            status_text = " ".join(parts[CONTAINER_CREATED_COLUMN_INDEX:-1]).lower()
             return "up" in status_text
 
         return False
@@ -628,8 +647,8 @@ class CleanupService:
         images.sort(key=lambda x: x["size_bytes"], reverse=True)
         volumes.sort(key=lambda x: x["size_bytes"], reverse=True)
 
-        result["top_images"] = images[:5]  # Top 5 largest images
-        result["top_volumes"] = volumes[:5]  # Top 5 largest volumes
+        result["top_images"] = images[:TOP_CONSUMERS]  # Top largest images
+        result["top_volumes"] = volumes[:TOP_CONSUMERS]  # Top largest volumes
         result["container_stats"]["total_size"] = format_size(
             result["container_stats"]["total_size_bytes"]
         )
@@ -1037,17 +1056,13 @@ class CleanupService:
             }
 
         # Create schedule configuration
-        from typing import Literal, cast
-
-        from ..core.config_loader import CleanupSchedule
-
         schedule_config = CleanupSchedule(
             host_id=host_id,
             cleanup_type=cast(Literal["safe", "moderate"], cleanup_type),
             frequency=cast(Literal["daily", "weekly", "monthly", "custom"], schedule_frequency),
             time=schedule_time,
             enabled=True,
-            created_at=datetime.now(UTC),
+            created_at=datetime.now(timezone.utc),
         )
 
         # Add to configuration

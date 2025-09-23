@@ -65,6 +65,21 @@ class ArchiveUtils:
         "*.bak",
         "*.backup",
         "*.old",
+        # Docker-related temporary files and directories
+        ".dockerignore",
+        "Dockerfile.tmp",
+        "*.dockerfile.tmp",
+        ".docker-compose-cache/",
+        ".docker/",
+        "docker-compose.override.yml.bak",
+        "docker-compose.*.tmp",
+        ".compose-cache/",
+        # Hidden files that aren't needed (exclude unless explicitly needed)
+        ".*",
+        # But include some essential hidden files
+        "!.env",
+        "!.gitkeep",
+        "!.htaccess",
     ]
 
     def __init__(self):

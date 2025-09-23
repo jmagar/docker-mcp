@@ -108,6 +108,101 @@ class ContainerService:
         )
         return True, ""
 
+    async def _check_container_exists(self, host_id: str, container_id: str) -> dict[str, Any]:
+        """Check if a container exists on the host before performing operations."""
+        try:
+            # Use container tools to get container info (which checks existence)
+            container_info = await self.container_tools.get_container_info(host_id, container_id)
+            
+            if "error" in container_info:
+                # Try to provide helpful suggestions
+                suggestion = ""
+                if "not found" in container_info["error"].lower():
+                    # Get list of available containers to suggest alternatives
+                    containers_result = await self.container_tools.list_containers(host_id, all_containers=True, limit=10, offset=0)
+                    if containers_result.get("success") and containers_result.get("containers"):
+                        container_names = [c.get("name", "") for c in containers_result["containers"]]
+                        # Find similar names
+                        similar_names = [name for name in container_names if container_id.lower() in name.lower() or name.lower() in container_id.lower()]
+                        if similar_names:
+                            suggestion = f"Did you mean one of: {', '.join(similar_names[:3])}?"
+                        else:
+                            suggestion = f"Available containers: {', '.join(container_names[:5])}"
+                
+                return {
+                    "exists": False,
+                    "error": container_info["error"],
+                    "suggestion": suggestion
+                }
+            
+            return {"exists": True, "info": container_info}
+            
+        except Exception as e:
+            return {
+                "exists": False,
+                "error": f"Failed to check container existence: {str(e)}",
+                "suggestion": "Verify the container name and try again"
+            }
+
+    def _enhance_operation_result(self, result: dict[str, Any], host_id: str, container_id: str, action: str) -> dict[str, Any]:
+        """Enhance operation result with context and user-friendly messaging."""
+        from datetime import UTC, datetime
+        
+        enhanced = result.copy()
+        
+        # Add operation context
+        enhanced["operation_context"] = {
+            "host_id": host_id,
+            "container_id": container_id,
+            "action": action,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "operation_type": "container_management"
+        }
+        
+        # Create user-friendly messages
+        if result.get("success"):
+            action_messages = {
+                "start": f"Container '{container_id}' started successfully on {host_id}",
+                "stop": f"Container '{container_id}' stopped successfully on {host_id}",
+                "restart": f"Container '{container_id}' restarted successfully on {host_id}",
+                "remove": f"Container '{container_id}' removed successfully from {host_id}",
+                "pause": f"Container '{container_id}' paused successfully on {host_id}",
+                "unpause": f"Container '{container_id}' unpaused successfully on {host_id}"
+            }
+            enhanced["user_message"] = action_messages.get(action, f"Container operation '{action}' completed successfully")
+            
+            # Add helpful next steps
+            if action == "start":
+                enhanced["next_steps"] = [
+                    "Check container logs if needed: docker_container logs",
+                    "Monitor container status: docker_container info"
+                ]
+            elif action == "stop":
+                enhanced["next_steps"] = [
+                    "Container can be restarted with: docker_container start",
+                    "Remove container if no longer needed: docker_container remove"
+                ]
+        else:
+            error_message = result.get("message", result.get("error", "Unknown error"))
+            enhanced["user_message"] = f"Failed to {action} container '{container_id}' on {host_id}: {error_message}"
+            
+            # Add troubleshooting hints
+            enhanced["troubleshooting_hints"] = [
+                "Verify the container name is correct",
+                "Check if you have sufficient permissions",
+                "Ensure the container is in the correct state for this operation"
+            ]
+            
+            if "permission denied" in error_message.lower():
+                enhanced["troubleshooting_hints"].insert(0, "Check Docker daemon permissions and user group membership")
+            elif "already" in error_message.lower():
+                enhanced["troubleshooting_hints"].insert(0, "Container may already be in the target state")
+        
+        # Preserve original message in raw_message for debugging
+        enhanced["raw_message"] = result.get("message", "")
+        
+        return enhanced
+
     async def list_containers(
         self, host_id: str, all_containers: bool = False, limit: int = 20, offset: int = 0
     ) -> ToolResult:
@@ -339,15 +434,18 @@ class ContainerService:
                 host_id, container_id, action, force, timeout
             )
 
-            if result["success"]:
+            # Enhance response with operation context and user-friendly formatting
+            enhanced_result = self._enhance_operation_result(result, host_id, container_id, action)
+            
+            if enhanced_result["success"]:
                 return ToolResult(
-                    content=[TextContent(type="text", text=f"Success: {result['message']}")],
-                    structured_content=result,
+                    content=[TextContent(type="text", text=f"✅ {enhanced_result['user_message']}")],
+                    structured_content=enhanced_result,
                 )
             else:
                 return ToolResult(
-                    content=[TextContent(type="text", text=f"Error: {result['message']}")],
-                    structured_content=result,
+                    content=[TextContent(type="text", text=f"❌ {enhanced_result['user_message']}")],
+                    structured_content=enhanced_result,
                 )
 
         except Exception as e:

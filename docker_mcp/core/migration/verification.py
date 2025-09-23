@@ -59,6 +59,17 @@ class MigrationVerifier:
             "timestamp": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
+        # Validate source paths exist before gathering inventory
+        for path in volume_paths:
+            path_exists_cmd = ssh_cmd + [f"test -e {shlex.quote(path)} && echo 'EXISTS' || echo 'NOT_FOUND'"]
+            result = await self._run_remote(path_exists_cmd, "path_existence_check", timeout=30)
+            
+            if result.returncode != 0 or "NOT_FOUND" in result.stdout:
+                raise ValueError(f"Source path does not exist: {path}")
+                
+            if "EXISTS" not in result.stdout:
+                raise ValueError(f"Unable to verify source path existence: {path}")
+
         for path in volume_paths:
             path_inventory: dict[str, Any] = {}
 
@@ -92,15 +103,27 @@ class MigrationVerifier:
                 result.stdout.strip().split("\n") if result.returncode == 0 else []
             )
 
-            # Find and checksum critical files (databases, configs)
-            # Use MD5 consistently for maximum compatibility across hosts
-            critical_cmd = ssh_cmd + [
-                f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' \\) "
-                f"-exec md5sum {{}} + 2>/dev/null"
+            # Find and checksum critical files (databases, configs) plus additional integrity verification
+            # Use SHA256 for better integrity verification, fallback to MD5 for compatibility
+            critical_files: dict[str, Any] = {}
+            
+            # First try SHA256 for better integrity verification
+            sha256_cmd = ssh_cmd + [
+                f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' -o -name '*.json' -o -name '*.xml' -o -name '*.yml' -o -name '*.yaml' \\) "
+                f"-exec sha256sum {{}} + 2>/dev/null"
             ]
-            result = await self._run_remote(critical_cmd, "critical_files", timeout=300)
+            result = await self._run_remote(sha256_cmd, "critical_files_sha256", timeout=300)
+            
+            checksum_algorithm = "sha256"
+            if result.returncode != 0 or not result.stdout.strip():
+                # Fallback to MD5 for maximum compatibility across hosts
+                md5_cmd = ssh_cmd + [
+                    f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' -o -name '*.json' -o -name '*.xml' -o -name '*.yml' -o -name '*.yaml' \\) "
+                    f"-exec md5sum {{}} + 2>/dev/null"
+                ]
+                result = await self._run_remote(md5_cmd, "critical_files_md5", timeout=300)
+                checksum_algorithm = "md5"
 
-            critical_files: dict[str, str] = {}
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().split("\n"):
                     if line:
@@ -113,9 +136,14 @@ class MigrationVerifier:
                                 rel_path = filepath[len(path_normalized) + 1 :]
                             else:
                                 rel_path = filepath
-                            critical_files[rel_path] = checksum
+                            critical_files[rel_path] = {
+                                "checksum": checksum,
+                                "algorithm": checksum_algorithm,
+                                "full_path": filepath
+                            }
 
             path_inventory["critical_files"] = critical_files
+            path_inventory["checksum_algorithm"] = checksum_algorithm
 
             # Add to inventory
             inventory["paths"][path] = path_inventory
@@ -218,15 +246,27 @@ class MigrationVerifier:
                 target_size / source_inventory["total_size"] * 100
             )
 
-        # Verify critical files checksums
+        # Verify critical files checksums with enhanced integrity verification
         critical_files_verified: dict[str, Any] = {}
-        for rel_path, source_checksum in source_inventory["critical_files"].items():
+        for rel_path, file_info in source_inventory["critical_files"].items():
             target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
             qfile = shlex.quote(target_file_path)
-            # Use MD5 consistently for maximum compatibility across hosts
-            checksum_cmd = ssh_cmd + [f"md5sum {qfile} 2>/dev/null | cut -d' ' -f1"]
+            
+            # Handle both old (string) and new (dict) checksum formats for backward compatibility
+            if isinstance(file_info, str):
+                source_checksum = file_info
+                algorithm = "md5"  # Default for legacy format
+            else:
+                source_checksum = file_info["checksum"]
+                algorithm = file_info["algorithm"]
+            
+            # Use the same algorithm that was used for source checksums
+            if algorithm == "sha256":
+                checksum_cmd = ssh_cmd + [f"sha256sum {qfile} 2>/dev/null | cut -d' ' -f1"]
+            else:
+                checksum_cmd = ssh_cmd + [f"md5sum {qfile} 2>/dev/null | cut -d' ' -f1"]
 
-            result = await self._run_remote(checksum_cmd, "checksum", timeout=300)
+            result = await self._run_remote(checksum_cmd, f"checksum_{algorithm}", timeout=300)
 
             if result.returncode == 0 and result.stdout.strip():
                 target_checksum = result.stdout.strip()
@@ -234,12 +274,14 @@ class MigrationVerifier:
                     "verified": source_checksum == target_checksum,
                     "source_checksum": source_checksum,
                     "target_checksum": target_checksum,
+                    "algorithm": algorithm,
                 }
             else:
                 critical_files_verified[rel_path] = {
                     "verified": False,
                     "source_checksum": source_checksum,
                     "target_checksum": None,
+                    "algorithm": algorithm,
                     "error": "File not found or inaccessible",
                 }
 

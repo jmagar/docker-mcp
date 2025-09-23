@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import structlog
 from watchfiles import awatch
 
-from .config_loader import DockerMCPConfig, load_config
+from .config_loader import DockerMCPConfig, load_config_async
 from .exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -98,7 +98,7 @@ class ConfigFileWatcher:
 
             # Load the new configuration
             logger.info("Reloading configuration", path=str(self.config_path))
-            new_config = load_config(str(self.config_path))
+            new_config = await load_config_async(str(self.config_path))
 
             # Calculate a simple hash to avoid unnecessary reloads
             config_hash = self._calculate_config_hash(new_config)

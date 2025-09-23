@@ -129,7 +129,7 @@ class StackTools:
                         }
                     )
 
-            # Convert to StackInfo objects
+            # Convert to StackInfo objects with resource usage
             stacks = []
             for project_name, project_containers in projects.items():
                 # Determine overall project status
@@ -163,15 +163,25 @@ class StackTools:
 
                 created = min(created_datetimes) if created_datetimes else None
 
-                stack = StackInfo(
+                # Collect resource usage information
+                resource_usage = await self._collect_stack_resource_usage(
+                    client, project_name, project_containers
+                )
+
+                # Create stack info with resource usage
+                stack_data = StackInfo(
                     name=project_name,
                     host_id=host_id,
                     services=services,
                     status=project_status,
                     created=created,
                     updated=created,  # Docker SDK doesn't provide separate updated time
-                )
-                stacks.append(stack.model_dump())
+                ).model_dump()
+                
+                # Add resource usage information
+                stack_data["resource_usage"] = resource_usage
+                
+                stacks.append(stack_data)
 
             logger.info("Listed stacks", host_id=host_id, count=len(stacks))
             return {
@@ -907,6 +917,179 @@ class StackTools:
             "action": action,
             "timestamp": datetime.now().isoformat(),
         }
+
+    async def _collect_stack_resource_usage(
+        self, client: docker.DockerClient, project_name: str, project_containers: list[dict]
+    ) -> dict[str, Any]:
+        """Collect resource usage statistics for a stack.
+        
+        Args:
+            client: Docker client instance
+            project_name: Name of the Docker Compose project
+            project_containers: List of containers in the project
+            
+        Returns:
+            Dictionary with resource usage information
+        """
+        resource_stats = {
+            "total_memory_usage": 0,
+            "total_memory_limit": 0,
+            "total_cpu_usage": 0.0,
+            "total_storage_usage": 0,
+            "container_count": len(project_containers),
+            "running_containers": 0,
+            "network_usage": {"rx_bytes": 0, "tx_bytes": 0},
+            "service_breakdown": [],
+            "collection_timestamp": datetime.now().isoformat(),
+            "collection_errors": []
+        }
+
+        try:
+            for container_info in project_containers:
+                container = container_info["container"]
+                service_name = container_info["service"]
+                
+                service_stats = {
+                    "service_name": service_name,
+                    "container_id": container.id[:12],
+                    "status": container.status,
+                    "memory_usage": 0,
+                    "memory_limit": 0,
+                    "cpu_percentage": 0.0,
+                    "storage_usage": 0,
+                    "network_rx": 0,
+                    "network_tx": 0,
+                    "collection_success": False
+                }
+
+                try:
+                    # Only collect stats for running containers
+                    if container.status == "running":
+                        resource_stats["running_containers"] += 1
+                        
+                        # Get container stats (non-blocking, single sample)
+                        stats_gen = await asyncio.to_thread(container.stats, stream=False)
+                        
+                        if stats_gen:
+                            # Memory usage
+                            memory_stats = stats_gen.get("memory_stats", {})
+                            if memory_stats:
+                                memory_usage = memory_stats.get("usage", 0)
+                                memory_limit = memory_stats.get("limit", 0)
+                                service_stats["memory_usage"] = memory_usage
+                                service_stats["memory_limit"] = memory_limit
+                                resource_stats["total_memory_usage"] += memory_usage
+                                resource_stats["total_memory_limit"] += memory_limit
+
+                            # CPU usage calculation
+                            cpu_stats = stats_gen.get("cpu_stats", {})
+                            precpu_stats = stats_gen.get("precpu_stats", {})
+                            
+                            if cpu_stats and precpu_stats:
+                                cpu_usage = self._calculate_cpu_percentage(cpu_stats, precpu_stats)
+                                service_stats["cpu_percentage"] = cpu_usage
+                                resource_stats["total_cpu_usage"] += cpu_usage
+
+                            # Network usage
+                            networks = stats_gen.get("networks", {})
+                            for network_name, network_stats in networks.items():
+                                rx_bytes = network_stats.get("rx_bytes", 0)
+                                tx_bytes = network_stats.get("tx_bytes", 0)
+                                service_stats["network_rx"] += rx_bytes
+                                service_stats["network_tx"] += tx_bytes
+                                resource_stats["network_usage"]["rx_bytes"] += rx_bytes
+                                resource_stats["network_usage"]["tx_bytes"] += tx_bytes
+
+                            service_stats["collection_success"] = True
+
+                    # Get container size information
+                    try:
+                        container_inspect = await asyncio.to_thread(client.api.inspect_container, container.id)
+                        size_info = container_inspect.get("SizeRw", 0) or 0
+                        service_stats["storage_usage"] = size_info
+                        resource_stats["total_storage_usage"] += size_info
+                    except Exception as size_error:
+                        logger.debug(
+                            "Failed to get container size",
+                            container_id=container.id[:12],
+                            error=str(size_error)
+                        )
+
+                except Exception as container_error:
+                    error_msg = f"Failed to collect stats for {service_name}: {str(container_error)}"
+                    resource_stats["collection_errors"].append(error_msg)
+                    logger.warning(
+                        "Container stats collection failed",
+                        service_name=service_name,
+                        container_id=container.id[:12],
+                        error=str(container_error)
+                    )
+
+                resource_stats["service_breakdown"].append(service_stats)
+
+            # Calculate averages and add summary information
+            if resource_stats["running_containers"] > 0:
+                resource_stats["average_cpu_per_container"] = (
+                    resource_stats["total_cpu_usage"] / resource_stats["running_containers"]
+                )
+                resource_stats["average_memory_per_container"] = (
+                    resource_stats["total_memory_usage"] / resource_stats["running_containers"]
+                )
+            else:
+                resource_stats["average_cpu_per_container"] = 0.0
+                resource_stats["average_memory_per_container"] = 0
+
+            # Convert bytes to human-readable format for summary
+            resource_stats["memory_usage_mb"] = resource_stats["total_memory_usage"] / (1024 * 1024)
+            resource_stats["memory_limit_mb"] = resource_stats["total_memory_limit"] / (1024 * 1024)
+            resource_stats["storage_usage_mb"] = resource_stats["total_storage_usage"] / (1024 * 1024)
+            resource_stats["network_rx_mb"] = resource_stats["network_usage"]["rx_bytes"] / (1024 * 1024)
+            resource_stats["network_tx_mb"] = resource_stats["network_usage"]["tx_bytes"] / (1024 * 1024)
+
+            logger.debug(
+                "Resource usage collected for stack",
+                project_name=project_name,
+                containers=resource_stats["container_count"],
+                running=resource_stats["running_containers"],
+                memory_mb=round(resource_stats["memory_usage_mb"], 2),
+                cpu_total=round(resource_stats["total_cpu_usage"], 2),
+                errors=len(resource_stats["collection_errors"])
+            )
+
+        except Exception as e:
+            error_msg = f"Failed to collect resource usage for stack {project_name}: {str(e)}"
+            resource_stats["collection_errors"].append(error_msg)
+            logger.error(
+                "Stack resource collection failed",
+                project_name=project_name,
+                error=str(e)
+            )
+
+        return resource_stats
+
+    def _calculate_cpu_percentage(self, cpu_stats: dict, precpu_stats: dict) -> float:
+        """Calculate CPU usage percentage from Docker stats.
+        
+        Args:
+            cpu_stats: Current CPU stats
+            precpu_stats: Previous CPU stats
+            
+        Returns:
+            CPU usage percentage
+        """
+        try:
+            cpu_delta = cpu_stats["cpu_usage"]["total_usage"] - precpu_stats["cpu_usage"]["total_usage"]
+            system_delta = cpu_stats["system_cpu_usage"] - precpu_stats["system_cpu_usage"]
+            
+            if system_delta > 0 and cpu_delta > 0:
+                cpu_count = len(cpu_stats["cpu_usage"].get("percpu_usage", [1]))
+                cpu_percentage = (cpu_delta / system_delta) * cpu_count * 100.0
+                return round(cpu_percentage, 2)
+            
+        except (KeyError, ZeroDivisionError, TypeError):
+            pass
+        
+        return 0.0
 
     def _validate_stack_name(self, stack_name: str) -> bool:
         """Validate stack name for security and Docker Compose compatibility."""

@@ -1,1 +1,7 @@
 /cache
+# Exclude temporary memory files but preserve important project memory
+# Temporary session memory files should not be committed
+temp_memory_*.md
+session_*.md
+# Keep permanent project memory files like project_overview.md, architecture.md, etc.
+# Only exclude files with temporary naming patterns

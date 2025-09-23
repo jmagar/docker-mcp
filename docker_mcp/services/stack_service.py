@@ -236,7 +236,180 @@ class StackService:
         volume_utils = StackVolumeUtils()
         return volume_utils.normalize_volume_entry(volume, target_appdata, stack_name)
 
-    async def handle_action(self, action: "ComposeAction" | str, **params) -> dict[str, Any]:
+    async def _validate_compose_file_syntax(self, host_id: str, compose_content: str, environment: dict[str, str] | None = None) -> dict[str, Any]:
+        """Validate compose file syntax using docker compose config."""
+        import tempfile
+        import os
+        import asyncio
+        from ..utils import build_ssh_command
+        
+        try:
+            # Validate host exists
+            is_valid, error_msg = self._validate_host(host_id)
+            if not is_valid:
+                return {
+                    "valid": False,
+                    "errors": [f"Host validation failed: {error_msg}"],
+                    "details": {"host_error": error_msg}
+                }
+            
+            host = self.config.hosts[host_id]
+            
+            # Create temporary files for compose content and environment
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as compose_file:
+                compose_file.write(compose_content)
+                compose_file_path = compose_file.name
+            
+            env_file_path = None
+            if environment:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.env', delete=False) as env_file:
+                    for key, value in environment.items():
+                        env_file.write(f"{key}={value}\n")
+                    env_file_path = env_file.name
+            
+            try:
+                # Build SSH command to validate compose file on remote host
+                ssh_cmd = build_ssh_command(host)
+                
+                # Transfer compose file to remote host for validation
+                remote_compose_path = f"/tmp/docker-mcp-validate-{os.path.basename(compose_file_path)}"
+                remote_env_path = f"/tmp/docker-mcp-validate-{os.path.basename(env_file_path)}" if env_file_path else None
+                
+                # Copy compose file to remote host
+                copy_cmd = ["scp"]
+                if host.port != 22:
+                    copy_cmd.extend(["-P", str(host.port)])
+                if host.identity_file:
+                    copy_cmd.extend(["-i", host.identity_file])
+                copy_cmd.extend([compose_file_path, f"{host.user}@{host.hostname}:{remote_compose_path}"])
+                
+                copy_process = await asyncio.create_subprocess_exec(
+                    *copy_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _, copy_stderr = await copy_process.communicate()
+                
+                if copy_process.returncode != 0:
+                    return {
+                        "valid": False,
+                        "errors": [f"Failed to copy compose file to remote host: {copy_stderr.decode().strip()}"],
+                        "details": {"copy_error": copy_stderr.decode().strip()}
+                    }
+                
+                # Copy environment file if exists
+                if env_file_path and remote_env_path:
+                    env_copy_cmd = ["scp"]
+                    if host.port != 22:
+                        env_copy_cmd.extend(["-P", str(host.port)])
+                    if host.identity_file:
+                        env_copy_cmd.extend(["-i", host.identity_file])
+                    env_copy_cmd.extend([env_file_path, f"{host.user}@{host.hostname}:{remote_env_path}"])
+                    
+                    env_copy_process = await asyncio.create_subprocess_exec(
+                        *env_copy_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    await env_copy_process.communicate()
+                
+                # Run docker compose config validation on remote host
+                validate_cmd = ssh_cmd + [
+                    f"cd /tmp && docker compose -f {remote_compose_path}"
+                ]
+                if remote_env_path:
+                    validate_cmd.extend(["--env-file", remote_env_path])
+                validate_cmd.extend(["config", "--quiet"])
+                
+                validate_process = await asyncio.create_subprocess_exec(
+                    *validate_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await validate_process.communicate()
+                
+                # Clean up remote files
+                cleanup_cmd = ssh_cmd + [f"rm -f {remote_compose_path}"]
+                if remote_env_path:
+                    cleanup_cmd.extend([f"; rm -f {remote_env_path}"])
+                
+                cleanup_process = await asyncio.create_subprocess_exec(
+                    *cleanup_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await cleanup_process.communicate()
+                
+                if validate_process.returncode == 0:
+                    return {
+                        "valid": True,
+                        "errors": [],
+                        "details": {"message": "Compose file syntax is valid"}
+                    }
+                else:
+                    # Parse validation errors for user-friendly messages
+                    error_output = stderr.decode().strip()
+                    validation_errors = self._parse_compose_validation_errors(error_output)
+                    
+                    return {
+                        "valid": False,
+                        "errors": validation_errors,
+                        "details": {
+                            "raw_error": error_output,
+                            "docker_exit_code": validate_process.returncode
+                        }
+                    }
+                    
+            finally:
+                # Clean up local temporary files
+                try:
+                    os.unlink(compose_file_path)
+                    if env_file_path:
+                        os.unlink(env_file_path)
+                except OSError:
+                    pass  # Files may have already been cleaned up
+                    
+        except Exception as e:
+            return {
+                "valid": False,
+                "errors": [f"Validation process failed: {str(e)}"],
+                "details": {"exception": str(e), "exception_type": type(e).__name__}
+            }
+
+    def _parse_compose_validation_errors(self, error_output: str) -> list[str]:
+        """Parse docker compose validation errors into user-friendly messages."""
+        if not error_output:
+            return ["Unknown validation error"]
+        
+        errors = []
+        lines = error_output.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Common Docker Compose error patterns
+            if "yaml:" in line.lower():
+                errors.append(f"YAML syntax error: {line}")
+            elif "invalid" in line.lower() and "service" in line.lower():
+                errors.append(f"Invalid service configuration: {line}")
+            elif "missing" in line.lower():
+                errors.append(f"Missing required field: {line}")
+            elif "unknown" in line.lower() and "field" in line.lower():
+                errors.append(f"Unknown configuration field: {line}")
+            elif "environment variable" in line.lower():
+                errors.append(f"Environment variable issue: {line}")
+            elif "volume" in line.lower() and ("invalid" in line.lower() or "error" in line.lower()):
+                errors.append(f"Volume configuration error: {line}")
+            elif "network" in line.lower() and ("invalid" in line.lower() or "error" in line.lower()):
+                errors.append(f"Network configuration error: {line}")
+            elif "port" in line.lower() and ("invalid" in line.lower() or "error" in line.lower()):
+                errors.append(f"Port configuration error: {line}")
+            else:
+                # Generic error
+                errors.append(f"Validation error: {line}")
+        
+        # If no specific errors were parsed, return the original output
+        if not errors:
+            errors.append(f"Docker compose validation failed: {error_output}")
+            
+        return errors
+
+    async def handle_action(self, action: ComposeAction | str, **params) -> dict[str, Any]:
         """Unified action handler for all stack operations.
 
         This method consolidates all dispatcher logic from server.py into the service layer.
@@ -259,7 +432,7 @@ class StackService:
                 "stack_name": params.get("stack_name", ""),
             }
 
-    async def _dispatch_action(self, action: "ComposeAction" | str, **params) -> dict[str, Any]:
+    async def _dispatch_action(self, action: ComposeAction | str, **params) -> dict[str, Any]:
         """Dispatch action to appropriate handler method."""
         # Normalize strings to enum when possible
         normalized_action = self._normalize_action(action)
@@ -298,7 +471,7 @@ class StackService:
             "supported_actions": [a.value for a in ComposeAction],
         }
 
-    def _normalize_action(self, action: "ComposeAction" | str) -> "ComposeAction" | str:
+    def _normalize_action(self, action: ComposeAction | str) -> ComposeAction | str:
         """Normalize action string to enum when possible."""
         if isinstance(action, str):
             try:
@@ -365,6 +538,16 @@ class StackService:
             return {
                 "success": False,
                 "error": f"stack_name '{stack_name}' is reserved",
+            }
+
+        # Validate compose file syntax before deployment
+        validation_result = await self._validate_compose_file_syntax(host_id, compose_content, environment)
+        if not validation_result["valid"]:
+            return {
+                "success": False,
+                "error": "Compose file validation failed",
+                "validation_errors": validation_result["errors"],
+                "validation_details": validation_result.get("details", {})
             }
 
         result = await self.deploy_stack(

@@ -98,7 +98,11 @@ class RsyncTransfer(BaseTransfer):
         # Build rsync options
         rsync_opts = ["-avP", "--stats"]  # Add --stats for consistent output parsing
         if compress:
-            rsync_opts.append("-z")
+            # Add compression with optimized level and algorithm
+            rsync_opts.extend(["-z", "--compress-level=6"])
+            # Try to use zstd for better compression performance if available
+            # Note: zstd support requires rsync 3.2.0+ on both hosts
+            rsync_opts.append("--compress-choice=zstd")
         if delete:
             rsync_opts.append("--delete")
         if dry_run:

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -74,10 +75,24 @@ def load_config(config_path: str | None = None) -> DockerMCPConfig:
         Loaded configuration
 
     Note:
-        This function uses asyncio.run() for backward compatibility.
+        This function safely handles both sync and async contexts.
         For async code, use load_config_async() instead.
     """
-    return asyncio.run(load_config_async(config_path))
+    try:
+        # Check if we're already in an event loop
+        asyncio.get_running_loop()
+        # If we get here, there's a running loop - we can't use asyncio.run()
+        raise RuntimeError(
+            "load_config() cannot be called from within an async context. "
+            "Use 'await load_config_async()' instead."
+        )
+    except RuntimeError as e:
+        if "no running event loop" in str(e).lower():
+            # Safe to use asyncio.run() - no existing loop
+            return asyncio.run(load_config_async(config_path))
+        else:
+            # Re-raise the specific error about being in async context
+            raise
 
 
 async def load_config_async(config_path: str | None = None) -> DockerMCPConfig:
@@ -169,14 +184,17 @@ async def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         # Securely expand only allowed environment variables
         content = _expand_yaml_config(content)
 
-        return yaml.safe_load(content) or {}
+        loaded = yaml.safe_load(content)
+        # Ensure we always return a dict (yaml.safe_load can return None, str, list, etc.)
+        if not isinstance(loaded, dict):
+            return {}
+        return loaded
     except Exception as e:
         raise ValueError(f"Failed to load config from {config_path}: {e}") from e
 
 
 def _expand_yaml_config(content: str) -> str:
     """Securely expand environment variables with allowlist."""
-    import re
 
     # Define allowed environment variables for Docker MCP config
     allowed_env_vars = {
@@ -347,7 +365,7 @@ def _write_yaml_value(f, key: str, value: Any) -> None:
     elif isinstance(value, bool):
         f.write(f"    {key}: {value}\n")
     elif isinstance(value, list):
-        f.write(f"    {key}: {yaml.dump(value, default_flow_style=True).strip()}\n")
+        f.write(f"    {key}: {yaml.safe_dump(value, default_flow_style=True).strip()}\n")
     elif isinstance(value, dict):
         dumped = yaml.safe_dump(value, default_flow_style=False, sort_keys=False, indent=2).rstrip()
         indented = "".join(f"      {line}" for line in dumped.splitlines(True))

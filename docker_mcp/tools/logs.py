@@ -1,6 +1,7 @@
 """Log streaming MCP tools."""
 
 import asyncio
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,148 @@ class LogTools:
     def __init__(self, config: DockerMCPConfig, context_manager: DockerContextManager):
         self.config = config
         self.context_manager = context_manager
+        self._init_log_sanitization_patterns()
+
+    def _init_log_sanitization_patterns(self) -> None:
+        """Initialize regex patterns for sanitizing sensitive information from logs."""
+        self.sanitization_patterns = [
+            # API Keys and tokens
+            {
+                "pattern": re.compile(r'\b[Aa]pi[_-]?[Kk]ey["\s]*[:=]["\s]*([a-zA-Z0-9\-_]{16,})', re.IGNORECASE),
+                "replacement": r'api_key="[REDACTED_API_KEY]"',
+                "description": "API keys"
+            },
+            {
+                "pattern": re.compile(r'\b[Tt]oken["\s]*[:=]["\s]*([a-zA-Z0-9\-_\.]{20,})', re.IGNORECASE),
+                "replacement": r'token="[REDACTED_TOKEN]"',
+                "description": "Authentication tokens"
+            },
+            {
+                "pattern": re.compile(r'\b[Bb]earer\s+([a-zA-Z0-9\-_\.]{20,})', re.IGNORECASE),
+                "replacement": r'Bearer [REDACTED_BEARER_TOKEN]',
+                "description": "Bearer tokens"
+            },
+            # Password patterns
+            {
+                "pattern": re.compile(r'\b[Pp]assword["\s]*[:=]["\s]*([^\s"\']{6,})', re.IGNORECASE),
+                "replacement": r'password="[REDACTED_PASSWORD]"',
+                "description": "Passwords"
+            },
+            {
+                "pattern": re.compile(r'\b[Pp]asswd["\s]*[:=]["\s]*([^\s"\']{6,})', re.IGNORECASE),
+                "replacement": r'passwd="[REDACTED_PASSWORD]"',
+                "description": "Password abbreviations"
+            },
+            # Secret patterns
+            {
+                "pattern": re.compile(r'\b[Ss]ecret["\s]*[:=]["\s]*([^\s"\']{8,})', re.IGNORECASE),
+                "replacement": r'secret="[REDACTED_SECRET]"',
+                "description": "Secrets"
+            },
+            # Database connection strings
+            {
+                "pattern": re.compile(r'([a-zA-Z]+://[^:]+:)([^@]+)(@[^\s]+)', re.IGNORECASE),
+                "replacement": r'\1[REDACTED_DB_PASSWORD]\3',
+                "description": "Database connection strings"
+            },
+            # Private keys (basic detection)
+            {
+                "pattern": re.compile(r'-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----.*?-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----', re.DOTALL | re.IGNORECASE),
+                "replacement": '[REDACTED_PRIVATE_KEY]',
+                "description": "Private keys"
+            },
+            # AWS/Cloud credentials
+            {
+                "pattern": re.compile(r'\bAKIA[0-9A-Z]{16}\b', re.IGNORECASE),
+                "replacement": '[REDACTED_AWS_ACCESS_KEY]',
+                "description": "AWS access keys"
+            },
+            {
+                "pattern": re.compile(r'\b[0-9a-zA-Z/+]{40}\b'),
+                "replacement": '[REDACTED_AWS_SECRET_KEY]',
+                "description": "AWS secret keys"
+            },
+            # Personal information patterns (basic)
+            {
+                "pattern": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
+                "replacement": '[REDACTED_EMAIL]',
+                "description": "Email addresses"
+            },
+            # Credit card numbers (basic detection)
+            {
+                "pattern": re.compile(r'\b(?:\d{4}[-\s]?){3}\d{4}\b'),
+                "replacement": '[REDACTED_CARD_NUMBER]',
+                "description": "Credit card numbers"
+            },
+            # JWT tokens
+            {
+                "pattern": re.compile(r'\beyJ[a-zA-Z0-9\-_\.]{20,}\b'),
+                "replacement": '[REDACTED_JWT_TOKEN]',
+                "description": "JWT tokens"
+            }
+        ]
+
+    def _sanitize_log_content(self, log_content: list[str]) -> list[str]:
+        """Sanitize log content to remove sensitive information.
+        
+        Args:
+            log_content: List of log lines to sanitize
+            
+        Returns:
+            List of sanitized log lines
+        """
+        if not log_content:
+            return log_content
+            
+        sanitized_logs = []
+        redaction_count = 0
+        
+        for line in log_content:
+            if not line or not isinstance(line, str):
+                sanitized_logs.append(line)
+                continue
+                
+            sanitized_line = line
+            line_redactions = []
+            
+            # Apply each sanitization pattern
+            for pattern_info in self.sanitization_patterns:
+                pattern = pattern_info["pattern"]
+                replacement = pattern_info["replacement"]
+                description = pattern_info["description"]
+                
+                # Count matches before replacement
+                matches = pattern.findall(sanitized_line)
+                if matches:
+                    line_redactions.append(f"{len(matches)} {description}")
+                    redaction_count += len(matches)
+                    
+                # Apply sanitization
+                sanitized_line = pattern.sub(replacement, sanitized_line)
+            
+            sanitized_logs.append(sanitized_line)
+            
+            # Log redaction details (without the actual sensitive data)
+            if line_redactions:
+                logger.debug(
+                    "Log line sanitized",
+                    redactions=line_redactions,
+                    original_length=len(line),
+                    sanitized_length=len(sanitized_line)
+                )
+        
+        if redaction_count > 0:
+            # Count lines that were actually modified
+            modified_lines = sum(1 for i, (original, sanitized) in enumerate(zip(log_content, sanitized_logs)) if original != sanitized)
+            
+            logger.info(
+                "Log content sanitized",
+                total_redactions=redaction_count,
+                total_lines=len(log_content),
+                modified_lines=modified_lines
+            )
+        
+        return sanitized_logs
 
     def _build_error_response(
         self,
@@ -125,20 +268,24 @@ class LogTools:
             logs_str = logs_bytes.decode("utf-8", errors="replace")
             logs_data = logs_str.strip().split("\n") if logs_str.strip() else []
 
+            # Sanitize logs before returning
+            sanitized_logs = self._sanitize_log_content(logs_data)
+
             # Create logs response
             logs = ContainerLogs(
                 container_id=container_id,
                 host_id=host_id,
-                logs=logs_data,
+                logs=sanitized_logs,
                 timestamp=datetime.now(UTC),
-                truncated=len(logs_data) >= lines,
+                truncated=len(sanitized_logs) >= lines,
             )
 
             logger.info(
                 "Retrieved container logs",
                 host_id=host_id,
                 container_id=container_id,
-                lines_returned=len(logs_data),
+                lines_returned=len(sanitized_logs),
+                sanitization_applied=len(sanitized_logs) != len(logs_data) or any(s != o for s, o in zip(sanitized_logs, logs_data)),
             )
 
             return create_success_response(
@@ -294,19 +441,23 @@ class LogTools:
             if isinstance(result, dict) and "output" in result:
                 logs_data = result["output"].strip().split("\n")
 
+            # Sanitize service logs before returning
+            sanitized_logs = self._sanitize_log_content(logs_data)
+
             logger.info(
                 "Retrieved service logs",
                 host_id=host_id,
                 service_name=service_name,
-                lines_returned=len(logs_data),
+                lines_returned=len(sanitized_logs),
+                sanitization_applied=len(sanitized_logs) != len(logs_data) or any(s != o for s, o in zip(sanitized_logs, logs_data)),
             )
 
             return create_success_response(
                 data={
                     "service_name": service_name,
                     "host_id": host_id,
-                    "logs": logs_data,
-                    "truncated": len(logs_data) >= lines,
+                    "logs": sanitized_logs,
+                    "truncated": len(sanitized_logs) >= lines,
                 },
                 context={
                     "host_id": host_id,

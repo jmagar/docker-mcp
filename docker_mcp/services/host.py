@@ -367,7 +367,7 @@ class HostService:
 
             ssh_cmd.append(f"{host.user}@{host.hostname}")
             ssh_cmd.append(
-                "echo 'connection_test_ok' && docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'docker_not_available'"
+                "echo 'connection_test_ok' && docker version --format '{{.Server.Version}}' 2>/dev/null && docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 && echo 'docker_daemon_ok' || echo 'docker_daemon_error'"
             )
 
             # Execute SSH test
@@ -380,17 +380,28 @@ class HostService:
             error_output = stderr.decode().strip()
 
             if process.returncode == 0 and "connection_test_ok" in output:
-                # Check if Docker is available
-                docker_available = "docker_not_available" not in output
+                # Enhanced Docker availability and daemon checks
                 docker_version = None
+                docker_daemon_accessible = "docker_daemon_ok" in output
+                docker_version_available = "docker_daemon_error" not in output
+                
+                # Extract Docker version if available
+                lines = output.split("\n")
+                for line in lines:
+                    if line and line not in ["connection_test_ok", "docker_daemon_ok", "docker_daemon_error"]:
+                        docker_version = line.strip()
+                        break
 
-                if docker_available:
-                    # Extract Docker version if available
-                    lines = output.split("\n")
-                    for line in lines:
-                        if line and line != "connection_test_ok" and line != "docker_not_available":
-                            docker_version = line.strip()
-                            break
+                # Determine overall Docker status
+                if docker_daemon_accessible and docker_version:
+                    docker_status = "fully_available"
+                    docker_message = "Docker daemon is running and accessible"
+                elif docker_version_available and docker_version:
+                    docker_status = "version_only"
+                    docker_message = "Docker installed but daemon may not be accessible"
+                else:
+                    docker_status = "not_available"
+                    docker_message = "Docker not found or not accessible"
 
                 return {
                     "success": True,
@@ -398,14 +409,20 @@ class HostService:
                     HOST_ID: host_id,
                     "hostname": host.hostname,
                     "port": host.port,
-                    "docker_available": docker_available,
+                    "docker_available": docker_version is not None,
+                    "docker_daemon_accessible": docker_daemon_accessible,
                     "docker_version": docker_version,
+                    "docker_status": docker_status,
+                    "docker_message": docker_message,
                 }
             else:
-                error_msg = error_output if error_output else "SSH connection failed"
+                # Enhanced SSH error handling with specific guidance
+                detailed_error = self._analyze_ssh_error(error_output, process.returncode, host)
                 return {
                     "success": False,
-                    "error": f"SSH connection failed: {error_msg}",
+                    "error": detailed_error["error"],
+                    "error_type": detailed_error["error_type"],
+                    "troubleshooting_guidance": detailed_error["guidance"],
                     HOST_ID: host_id,
                     "hostname": host.hostname,
                     "port": host.port,
@@ -1054,6 +1071,113 @@ class HostService:
 
         # Final fallback
         return paths[0]
+
+    def _analyze_ssh_error(self, error_output: str, return_code: int, host: DockerHost) -> dict[str, Any]:
+        """Analyze SSH error output and provide specific troubleshooting guidance."""
+        error_lower = error_output.lower()
+        
+        # Authentication failures
+        if "permission denied" in error_lower or "authentication failed" in error_lower:
+            if "publickey" in error_lower:
+                return {
+                    "error": "SSH key authentication failed",
+                    "error_type": "key_authentication_failure",
+                    "guidance": [
+                        f"Verify SSH key exists: {host.identity_file or '~/.ssh/id_rsa'}",
+                        f"Check key permissions: chmod 600 {host.identity_file or '~/.ssh/id_rsa'}",
+                        f"Ensure key is added to {host.user}@{host.hostname}:~/.ssh/authorized_keys",
+                        "Test manually: ssh -i /path/to/key user@host"
+                    ]
+                }
+            else:
+                return {
+                    "error": "SSH authentication failed",
+                    "error_type": "general_authentication_failure", 
+                    "guidance": [
+                        "Check username and password/key credentials",
+                        "Verify user account exists on remote host",
+                        "Check if SSH key is configured correctly",
+                        f"Test connection manually: ssh {host.user}@{host.hostname}"
+                    ]
+                }
+        
+        # Connection refused
+        elif "connection refused" in error_lower:
+            return {
+                "error": f"Connection refused to {host.hostname}:{host.port}",
+                "error_type": "connection_refused",
+                "guidance": [
+                    f"Check if SSH service is running on {host.hostname}",
+                    f"Verify port {host.port} is correct for SSH",
+                    f"Check firewall rules allowing port {host.port}",
+                    "Ensure host is reachable: ping " + host.hostname
+                ]
+            }
+        
+        # Host key verification
+        elif "host key verification failed" in error_lower or "known_hosts" in error_lower:
+            return {
+                "error": "Host key verification failed",
+                "error_type": "host_key_verification_failure",
+                "guidance": [
+                    "Remove old host key: ssh-keygen -R " + host.hostname,
+                    "Accept new host key manually: ssh " + f"{host.user}@{host.hostname}",
+                    "Or disable host key checking (less secure): StrictHostKeyChecking=no",
+                    "Verify you're connecting to the correct host"
+                ]
+            }
+        
+        # Network timeouts
+        elif "timeout" in error_lower or "timed out" in error_lower:
+            return {
+                "error": f"Connection timeout to {host.hostname}",
+                "error_type": "connection_timeout",
+                "guidance": [
+                    f"Check if {host.hostname} is reachable: ping {host.hostname}",
+                    "Verify network connectivity and routing",
+                    "Check if there are firewalls blocking the connection",
+                    f"Try increasing timeout or using different port than {host.port}"
+                ]
+            }
+        
+        # Name resolution
+        elif "not known" in error_lower or "name resolution" in error_lower:
+            return {
+                "error": f"Hostname resolution failed for {host.hostname}",
+                "error_type": "name_resolution_failure",
+                "guidance": [
+                    f"Check if hostname {host.hostname} is correct",
+                    "Verify DNS resolution: nslookup " + host.hostname,
+                    "Try using IP address instead of hostname",
+                    "Check /etc/hosts file for local hostname entries"
+                ]
+            }
+        
+        # Key file issues
+        elif "no such file" in error_lower and "identity" in error_lower:
+            return {
+                "error": f"SSH key file not found: {host.identity_file}",
+                "error_type": "key_file_not_found",
+                "guidance": [
+                    f"Verify key file exists: ls -la {host.identity_file}",
+                    "Generate new SSH key: ssh-keygen -t rsa -b 4096",
+                    "Copy key to remote host: ssh-copy-id " + f"{host.user}@{host.hostname}",
+                    "Check file path is absolute and correct"
+                ]
+            }
+        
+        # Generic SSH errors
+        else:
+            return {
+                "error": f"SSH connection failed: {error_output}",
+                "error_type": "unknown_ssh_error",
+                "guidance": [
+                    f"Check SSH service status on {host.hostname}",
+                    f"Verify connection details: {host.user}@{host.hostname}:{host.port}",
+                    "Test with verbose SSH: ssh -v " + f"{host.user}@{host.hostname}",
+                    "Check system logs for more details"
+                ]
+            }
 
     async def handle_action(self, action, **params) -> dict[str, Any]:
         """Unified action handler for all host operations.

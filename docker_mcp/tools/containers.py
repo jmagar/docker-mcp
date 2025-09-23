@@ -67,11 +67,14 @@ class ContainerTools:
             # Get Docker client and list containers using Docker SDK
             client = await self.context_manager.get_client(host_id)
             if client is None:
-                error_response = self._build_error_response(
-                    host_id, "list_containers", f"Could not connect to Docker on host {host_id}"
+                # Return top-level error structure compatible with ContainerService expectations
+                error_response = DockerMCPErrorResponse.docker_context_error(
+                    host_id=host_id,
+                    operation="list_containers",
+                    cause=f"Could not connect to Docker on host {host_id}"
                 )
-                # Add container-specific fields to error response under "data" key
-                error_response["data"] = {
+                # Add containers and pagination at top level for compatibility
+                error_response.update({
                     "containers": [],
                     "pagination": {
                         "total": 0,
@@ -81,7 +84,7 @@ class ContainerTools:
                         "has_next": False,
                         "has_prev": offset > 0,
                     },
-                }
+                })
                 return error_response
 
             docker_containers = await asyncio.to_thread(client.containers.list, all=all_containers)
@@ -115,8 +118,8 @@ class ContainerTools:
                     networks = list(network_settings.get("Networks", {}).keys())
 
                     # Extract compose information
-                    compose_project = labels.get("com.docker.compose.project", "")
-                    compose_file = labels.get("com.docker.compose.config-files", "")
+                    compose_project = labels.get(DOCKER_COMPOSE_PROJECT, "")
+                    compose_file = labels.get(DOCKER_COMPOSE_CONFIG_FILES, "")
 
                     # Extract ports from container attributes
                     ports_dict = network_settings.get("Ports", {})
@@ -155,42 +158,46 @@ class ContainerTools:
                 limit=limit,
             )
 
-            return create_success_response(
-                data={
-                    "containers": paginated_containers,
-                    "pagination": {
-                        "total": total_count,
-                        "limit": limit,
-                        "offset": offset,
-                        "returned": len(paginated_containers),
-                        "has_next": (offset + limit) < total_count,
-                        "has_prev": offset > 0,
-                    },
+            # Return top-level containers and pagination as expected by ContainerService
+            return {
+                "success": True,
+                "containers": paginated_containers,
+                "pagination": {
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": len(paginated_containers),
+                    "has_next": (offset + limit) < total_count,
+                    "has_prev": offset > 0,
                 },
-                context={"host_id": host_id, "operation": "list_containers"},
-            )
+                "host_id": host_id,
+                "operation": "list_containers",
+                "timestamp": create_success_response()["timestamp"],
+            }
 
         except (DockerCommandError, DockerContextError) as e:
             logger.error("Failed to list containers", host_id=host_id, error=str(e))
-            return DockerMCPErrorResponse.generic_error(
+            # Return top-level error structure compatible with ContainerService expectations
+            error_response = DockerMCPErrorResponse.generic_error(
                 str(e),
                 {
                     "host_id": host_id,
                     "operation": "list_containers",
-                    "data": {
-                        "containers": [],
-                        "total": 0,
-                        "pagination": {
-                            "total": 0,
-                            "limit": limit,
-                            "offset": offset,
-                            "returned": 0,
-                            "has_next": False,
-                            "has_prev": offset > 0,
-                        },
-                    },
                 },
             )
+            # Add containers and pagination at top level for compatibility
+            error_response.update({
+                "containers": [],
+                "pagination": {
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": 0,
+                    "has_next": False,
+                    "has_prev": offset > 0,
+                },
+            })
+            return error_response
 
     async def get_container_info(self, host_id: str, container_id: str) -> dict[str, Any]:
         """Get detailed information about a specific container.
@@ -622,13 +629,11 @@ class ContainerTools:
                 container_id=container_id,
                 error=str(e),
             )
-            return DockerMCPErrorResponse.generic_error(
-                f"Failed to get stats: {str(e)}",
-                {
-                    "host_id": host_id,
-                    "operation": "get_container_stats",
-                    "container_id": container_id,
-                },
+            return DockerMCPErrorResponse.docker_command_error(
+                host_id,
+                f"stats {container_id}",
+                getattr(e, "response", {}).get("status_code", 500),
+                str(e),
             )
         except (DockerCommandError, DockerContextError) as e:
             logger.error(
@@ -871,14 +876,17 @@ class ContainerTools:
                 f"Failed to {action} container {container_id}: {str(e)}",
                 container_id,
             )
-            error_response.update(
+            return DockerMCPErrorResponse.generic_error(
+                f"Failed to {action} container {container_id}: {str(e)}",
                 {
+                    "host_id": host_id,
+                    "operation": "manage_container",
+                    "container_id": container_id,
                     "action": action,
                     "force": force,
                     "timeout": timeout if action in ["stop", "restart"] else None,
                 }
             )
-            return error_response
 
     async def pull_image(self, host_id: str, image_name: str) -> dict[str, Any]:
         """Pull a Docker image on a remote host.

@@ -9,7 +9,8 @@ import asyncio
 import shlex
 import subprocess
 import tempfile
-from typing import Any, cast
+from datetime import datetime
+from typing import Any, Callable, cast
 
 import structlog
 
@@ -80,6 +81,169 @@ class StackMigrationExecutor:
                 stack_name=stack_name,
             )
             return False, "", ""
+
+    async def validate_host_compatibility(
+        self, source_host: DockerHost, target_host: DockerHost, stack_name: str
+    ) -> tuple[bool, dict[str, Any]]:
+        """Validate source and target host compatibility for migration.
+        
+        Args:
+            source_host: Source host configuration
+            target_host: Target host configuration
+            stack_name: Stack name for migration
+            
+        Returns:
+            Tuple of (success: bool, validation_results: dict)
+        """
+        validation_results = {
+            "compatibility_checks": {},
+            "warnings": [],
+            "errors": []
+        }
+        
+        try:
+            # Check Docker version compatibility
+            source_ssh = build_ssh_command(source_host)
+            target_ssh = build_ssh_command(target_host)
+            
+            # Get Docker version from both hosts
+            source_version_cmd = source_ssh + ["docker", "version", "--format", "json"]
+            target_version_cmd = target_ssh + ["docker", "version", "--format", "json"]
+            
+            try:
+                source_result = await asyncio.to_thread(
+                    subprocess.run, source_version_cmd, capture_output=True, text=True, check=False, timeout=30
+                )
+                target_result = await asyncio.to_thread(
+                    subprocess.run, target_version_cmd, capture_output=True, text=True, check=False, timeout=30
+                )
+                
+                if source_result.returncode == 0 and target_result.returncode == 0:
+                    validation_results["compatibility_checks"]["docker_version"] = {
+                        "source_accessible": True,
+                        "target_accessible": True,
+                        "status": "compatible"
+                    }
+                else:
+                    validation_results["errors"].append("Failed to verify Docker version compatibility")
+                    validation_results["compatibility_checks"]["docker_version"] = {
+                        "source_accessible": source_result.returncode == 0,
+                        "target_accessible": target_result.returncode == 0,
+                        "status": "failed"
+                    }
+            except subprocess.TimeoutExpired:
+                validation_results["errors"].append("Docker version check timed out")
+                validation_results["compatibility_checks"]["docker_version"] = {"status": "timeout"}
+            
+            # Check available storage on target
+            target_appdata = target_host.appdata_path or "/opt/docker-appdata"
+            storage_check_cmd = target_ssh + ["df", "-h", target_appdata]
+            
+            try:
+                storage_result = await asyncio.to_thread(
+                    subprocess.run, storage_check_cmd, capture_output=True, text=True, check=False, timeout=30
+                )
+                
+                if storage_result.returncode == 0:
+                    validation_results["compatibility_checks"]["storage"] = {
+                        "target_path_accessible": True,
+                        "status": "available"
+                    }
+                else:
+                    validation_results["errors"].append(f"Target storage path {target_appdata} not accessible")
+                    validation_results["compatibility_checks"]["storage"] = {
+                        "target_path_accessible": False,
+                        "status": "failed"
+                    }
+            except subprocess.TimeoutExpired:
+                validation_results["warnings"].append("Storage check timed out, continuing with migration")
+                validation_results["compatibility_checks"]["storage"] = {"status": "timeout"}
+            
+            # Check network accessibility between hosts
+            network_check_cmd = source_ssh + ["ping", "-c", "1", "-W", "5", target_host.hostname]
+            
+            try:
+                network_result = await asyncio.to_thread(
+                    subprocess.run, network_check_cmd, capture_output=True, text=True, check=False, timeout=30
+                )
+                
+                validation_results["compatibility_checks"]["network"] = {
+                    "accessible": network_result.returncode == 0,
+                    "status": "reachable" if network_result.returncode == 0 else "unreachable"
+                }
+                
+                if network_result.returncode != 0:
+                    validation_results["warnings"].append("Network connectivity test failed, but migration may still work")
+            except subprocess.TimeoutExpired:
+                validation_results["warnings"].append("Network check timed out")
+                validation_results["compatibility_checks"]["network"] = {"status": "timeout"}
+            
+            # Verify required directories and permissions on target
+            target_stack_path = f"{target_appdata}/{stack_name}"
+            mkdir_cmd = target_ssh + ["mkdir", "-p", target_stack_path]
+            
+            try:
+                mkdir_result = await asyncio.to_thread(
+                    subprocess.run, mkdir_cmd, capture_output=True, text=True, check=False, timeout=30
+                )
+                
+                if mkdir_result.returncode == 0:
+                    validation_results["compatibility_checks"]["permissions"] = {
+                        "directory_creation": True,
+                        "status": "writable"
+                    }
+                else:
+                    validation_results["errors"].append(f"Cannot create target directory {target_stack_path}")
+                    validation_results["compatibility_checks"]["permissions"] = {
+                        "directory_creation": False,
+                        "status": "failed"
+                    }
+            except subprocess.TimeoutExpired:
+                validation_results["errors"].append("Directory creation check timed out")
+                validation_results["compatibility_checks"]["permissions"] = {"status": "timeout"}
+            
+            # Determine overall compatibility
+            has_errors = len(validation_results["errors"]) > 0
+            critical_failures = any(
+                check.get("status") == "failed" 
+                for check in validation_results["compatibility_checks"].values() 
+                if isinstance(check, dict)
+            )
+            
+            overall_success = not has_errors and not critical_failures
+            validation_results["overall_compatible"] = overall_success
+            
+            if overall_success:
+                self.logger.info(
+                    "Host compatibility validation passed",
+                    source_host=source_host.hostname,
+                    target_host=target_host.hostname,
+                    stack_name=stack_name,
+                    warnings=len(validation_results["warnings"])
+                )
+            else:
+                self.logger.error(
+                    "Host compatibility validation failed",
+                    source_host=source_host.hostname,
+                    target_host=target_host.hostname,
+                    stack_name=stack_name,
+                    errors=validation_results["errors"]
+                )
+            
+            return overall_success, validation_results
+            
+        except Exception as e:
+            validation_results["errors"].append(f"Compatibility validation failed: {str(e)}")
+            validation_results["overall_compatible"] = False
+            
+            self.logger.error(
+                "Host compatibility validation error",
+                source_host=source_host.hostname,
+                target_host=target_host.hostname,
+                error=str(e)
+            )
+            
+            return False, validation_results
 
     async def create_backup_archive(
         self,
@@ -156,6 +320,195 @@ class StackMigrationExecutor:
                 stack_name=stack_name,
             )
             return False, "", {"success": False, "error": str(e)}
+
+    async def execute_migration_with_progress(
+        self,
+        source_host: DockerHost,
+        target_host: DockerHost,
+        stack_name: str,
+        volume_paths: list[str],
+        compose_content: str,
+        dry_run: bool = False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None
+    ) -> tuple[bool, dict[str, Any]]:
+        """Execute migration with detailed progress reporting.
+        
+        Args:
+            source_host: Source host configuration
+            target_host: Target host configuration
+            stack_name: Stack name to migrate
+            volume_paths: List of volume paths to transfer
+            compose_content: Updated compose file content
+            dry_run: Whether this is a dry run
+            progress_callback: Optional callback for progress updates
+            
+        Returns:
+            Tuple of (success: bool, migration_results: dict)
+        """
+        migration_steps = [
+            {"name": "validate_compatibility", "description": "Validating host compatibility"},
+            {"name": "stop_source", "description": "Stopping source stack"},
+            {"name": "create_backup", "description": "Creating backup of target data"},
+            {"name": "transfer_data", "description": "Transferring stack data"},
+            {"name": "deploy_target", "description": "Deploying stack on target"},
+            {"name": "verify_deployment", "description": "Verifying deployment success"}
+        ]
+        
+        results = {
+            "migration_id": f"{source_host.hostname}_{target_host.hostname}_{stack_name}",
+            "total_steps": len(migration_steps),
+            "completed_steps": 0,
+            "current_step": None,
+            "step_results": {},
+            "overall_success": False,
+            "start_time": datetime.now().isoformat(),
+            "end_time": None,
+            "errors": [],
+            "warnings": []
+        }
+        
+        def update_progress(step_name: str, status: str, details: dict | None = None):
+            """Update progress and call callback if provided."""
+            results["current_step"] = {"name": step_name, "status": status}
+            if details:
+                results["step_results"][step_name] = details
+            
+            if status == "completed":
+                results["completed_steps"] += 1
+            
+            # Log progress
+            self.logger.info(
+                "Migration progress update",
+                migration_id=results["migration_id"],
+                step=step_name,
+                status=status,
+                progress=f"{results['completed_steps']}/{results['total_steps']}"
+            )
+            
+            # Call progress callback if provided
+            if progress_callback:
+                try:
+                    progress_callback(results.copy())
+                except Exception as e:
+                    self.logger.warning("Progress callback failed", error=str(e))
+        
+        try:
+            # Step 1: Validate compatibility
+            update_progress("validate_compatibility", "in_progress")
+            compat_success, compat_results = await self.validate_host_compatibility(
+                source_host, target_host, stack_name
+            )
+            
+            if not compat_success and not dry_run:
+                update_progress("validate_compatibility", "failed", compat_results)
+                results["errors"].append("Host compatibility validation failed")
+                results["overall_success"] = False
+                return False, results
+            
+            update_progress("validate_compatibility", "completed", compat_results)
+            
+            # Step 2: Stop source stack
+            update_progress("stop_source", "in_progress")
+            if not dry_run:
+                stop_result = await self.stack_tools.manage_stack(
+                    source_host.hostname.replace(".", "_"), stack_name, "down"
+                )
+                if not stop_result.get("success", False):
+                    update_progress("stop_source", "failed", stop_result)
+                    results["errors"].append(f"Failed to stop source stack: {stop_result.get('error')}")
+                    results["overall_success"] = False
+                    return False, results
+            else:
+                stop_result = {"success": True, "dry_run": True}
+            
+            update_progress("stop_source", "completed", stop_result)
+            
+            # Step 3: Create backup
+            update_progress("create_backup", "in_progress")
+            target_appdata = target_host.appdata_path or "/opt/docker-appdata"
+            target_path = f"{target_appdata}/{stack_name}"
+            
+            backup_success, backup_info = await self.create_backup(
+                target_host, target_path, stack_name, dry_run
+            )
+            
+            backup_results = backup_info if isinstance(backup_info, dict) else {"backup_path": backup_info}
+            if not backup_success and not dry_run:
+                results["warnings"].append("Backup creation failed, continuing with migration")
+            
+            update_progress("create_backup", "completed", backup_results)
+            
+            # Step 4: Transfer data
+            update_progress("transfer_data", "in_progress")
+            transfer_success, transfer_results = await self.transfer_data(
+                source_host, target_host, volume_paths, stack_name, dry_run
+            )
+            
+            if not transfer_success:
+                update_progress("transfer_data", "failed", transfer_results)
+                results["errors"].append(f"Data transfer failed: {transfer_results.get('error')}")
+                results["overall_success"] = False
+                return False, results
+            
+            update_progress("transfer_data", "completed", transfer_results)
+            
+            # Step 5: Deploy on target
+            update_progress("deploy_target", "in_progress")
+            deploy_success, deploy_results = await self.deploy_stack_on_target(
+                target_host.hostname.replace(".", "_"), stack_name, compose_content, True, dry_run
+            )
+            
+            if not deploy_success:
+                update_progress("deploy_target", "failed", deploy_results)
+                results["errors"].append(f"Target deployment failed: {deploy_results.get('error')}")
+                results["overall_success"] = False
+                return False, results
+            
+            update_progress("deploy_target", "completed", deploy_results)
+            
+            # Step 6: Verify deployment
+            update_progress("verify_deployment", "in_progress")
+            verify_success, verify_results = await self.verify_deployment(
+                target_host.hostname.replace(".", "_"), stack_name, volume_paths, None, dry_run
+            )
+            
+            if not verify_success:
+                update_progress("verify_deployment", "failed", verify_results)
+                results["warnings"].append(f"Deployment verification failed: {verify_results.get('error')}")
+            else:
+                update_progress("verify_deployment", "completed", verify_results)
+            
+            # Migration completed
+            results["overall_success"] = True
+            results["end_time"] = datetime.now().isoformat()
+            results["current_step"] = {"name": "completed", "status": "success"}
+            
+            self.logger.info(
+                "Migration completed successfully",
+                migration_id=results["migration_id"],
+                duration_steps=results["completed_steps"],
+                warnings=len(results["warnings"])
+            )
+            
+            return True, results
+            
+        except Exception as e:
+            # Handle unexpected errors
+            current_step = results.get("current_step", {}).get("name", "unknown")
+            update_progress(current_step, "failed", {"error": str(e)})
+            
+            results["errors"].append(f"Migration failed at step {current_step}: {str(e)}")
+            results["overall_success"] = False
+            results["end_time"] = datetime.now().isoformat()
+            
+            self.logger.error(
+                "Migration failed with exception",
+                migration_id=results["migration_id"],
+                step=current_step,
+                error=str(e)
+            )
+            
+            return False, results
 
     async def transfer_data(
         self,

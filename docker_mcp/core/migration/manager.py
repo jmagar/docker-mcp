@@ -40,7 +40,7 @@ class MigrationManager:
     async def choose_transfer_method(
         self, source_host: DockerHost, target_host: DockerHost
     ) -> tuple[str, Any]:
-        """Choose the optimal transfer method based on host capabilities.
+        """Choose transfer method - uses rsync for universal compatibility.
 
         Args:
             source_host: Source host configuration
@@ -49,8 +49,7 @@ class MigrationManager:
         Returns:
             Tuple of (transfer_type: str, transfer_instance)
         """
-        # Use rsync transfer as the only transfer method
-        self.logger.info("Using rsync transfer")
+        self.logger.info("Using rsync transfer for universal compatibility")
         return "rsync", self.rsync_transfer
 
     async def verify_containers_stopped(
