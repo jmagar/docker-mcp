@@ -31,16 +31,6 @@ class DockerHost(BaseModel):
     enabled: bool = True
 
 
-class CleanupSchedule(BaseModel):
-    """Cleanup schedule configuration."""
-
-    host_id: str
-    cleanup_type: Literal["safe", "moderate"]  # Only safe and moderate for scheduling
-    frequency: Literal["daily", "weekly", "monthly", "custom"]
-    time: str  # HH:MM (24h)
-    enabled: bool = True
-    log_path: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ServerConfig(BaseModel):
@@ -58,7 +48,6 @@ class DockerMCPConfig(BaseSettings):
     """Main configuration for Docker MCP server."""
 
     hosts: dict[str, DockerHost] = Field(default_factory=dict)
-    cleanup_schedules: dict[str, CleanupSchedule] = Field(default_factory=dict)
     server: ServerConfig = Field(default_factory=ServerConfig)
     config_file: str = Field(default="config/hosts.yml", alias="DOCKER_HOSTS_CONFIG")
 
@@ -138,7 +127,6 @@ async def _load_config_file(config: DockerMCPConfig, config_path: Path) -> None:
     yaml_config = await _load_yaml_config(config_path)
     _apply_host_config(config, yaml_config)
     _apply_server_config(config, yaml_config)
-    _apply_cleanup_schedules(config, yaml_config)
 
 
 def _apply_host_config(config: DockerMCPConfig, yaml_config: dict[str, Any]) -> None:
@@ -156,14 +144,6 @@ def _apply_server_config(config: DockerMCPConfig, yaml_config: dict[str, Any]) -
                 setattr(config.server, key, value)
 
 
-def _apply_cleanup_schedules(config: DockerMCPConfig, yaml_config: dict[str, Any]) -> None:
-    """Apply cleanup schedules from YAML data."""
-    schedules = yaml_config.get("cleanup_schedules")
-    if not schedules:
-        return
-    config.cleanup_schedules = {
-        schedule_id: CleanupSchedule(**sched_data) for schedule_id, sched_data in schedules.items()
-    }
 
 
 def _apply_env_overrides(config: DockerMCPConfig) -> None:
@@ -270,7 +250,6 @@ def save_config(config: DockerMCPConfig, config_path: str | None = None) -> None
         with open(config_path, "w", encoding="utf-8") as f:
             _write_yaml_header(f)
             _write_hosts_section(f, yaml_data["hosts"])
-            _write_cleanup_schedules_section(f, yaml_data["cleanup_schedules"])
 
         logger.info("Configuration saved", path=str(config_path), hosts=len(config.hosts))
 
@@ -281,17 +260,10 @@ def save_config(config: DockerMCPConfig, config_path: str | None = None) -> None
 
 def _build_yaml_data(config: DockerMCPConfig) -> dict[str, Any]:
     """Build YAML data structure from configuration."""
-    yaml_data: dict[str, Any] = {"hosts": {}, "cleanup_schedules": {}}
+    yaml_data: dict[str, Any] = {"hosts": {}}
 
     for host_id, host_config in config.hosts.items():
         yaml_data["hosts"][host_id] = _build_host_data(host_config)
-
-    # Persist schedules as plain dicts
-    if getattr(config, "cleanup_schedules", None):
-        for sched_id, sched in config.cleanup_schedules.items():
-            yaml_data["cleanup_schedules"][sched_id] = (
-                sched.model_dump() if hasattr(sched, "model_dump") else dict(sched)
-            )
 
     return yaml_data
 
@@ -343,17 +315,6 @@ def _write_hosts_section(f, hosts_data: dict[str, Any]) -> None:
         f.write("\n")
 
 
-def _write_cleanup_schedules_section(f, schedules: dict[str, Any]) -> None:
-    """Write cleanup_schedules section to YAML file."""
-    f.write("cleanup_schedules:\n")
-    if not schedules:
-        f.write("  {}\n")
-        return
-    # Use safe_dump for nested mapping serialization
-    dumped = yaml.safe_dump(schedules, default_flow_style=False, sort_keys=False, indent=2)
-    # Indent by two spaces under the section key
-    indented = "".join(f"  {line}" for line in dumped.splitlines(True))
-    f.write(indented)
 
 
 def _write_yaml_value(f, key: str, value: Any) -> None:

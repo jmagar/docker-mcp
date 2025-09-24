@@ -387,44 +387,49 @@ class DockerMCPServer:
             logging="dual output (console + files)",
         )
 
-        # Add diagnostic auth-protected tools (if auth enabled)
-        try:
-            from fastmcp.server.dependencies import get_access_token
+        # OAuth diagnostic tools disabled (OAuth authentication is disabled)
+        self.logger.info("OAuth diagnostic tools disabled (whoami, get_user_info)")
 
-            @self.app.tool
-            async def whoami() -> dict[str, Any]:
-                """Return identity claims for the authenticated user."""
-                token = get_access_token()
-                if token is None:
-                    return {}
-                # token.claims should contain standard OIDC-style claims
-                return {
-                    "iss": token.claims.get("iss"),
-                    "sub": token.claims.get("sub"),
-                    "email": token.claims.get("email"),
-                    "name": token.claims.get("name"),
-                    "picture": token.claims.get("picture"),
-                }
-
-            @self.app.tool
-            async def get_user_info() -> dict[str, Any]:
-                """Return simplified user info for authenticated Google user."""
-                token = get_access_token()
-                if token is None:
-                    return {}
-                return {
-                    "google_id": token.claims.get("sub"),
-                    "email": token.claims.get("email"),
-                    "name": token.claims.get("name"),
-                    "picture": token.claims.get("picture"),
-                }
-        except Exception:
-            # If dependencies are unavailable (e.g., auth not enabled), skip these helpers
-            # Log at debug level to avoid noisy errors when auth isn't configured
-            self.logger.debug(
-                "Auth helpers unavailable; skipping whoami/get_user_info tools",
-                exc_info=True,
-            )
+        # Add diagnostic auth-protected tools (DISABLED - OAuth not enabled)
+        # Uncomment the following block when OAuth is re-enabled:
+        #
+        # try:
+        #     from fastmcp.server.dependencies import get_access_token
+        #
+        #     @self.app.tool
+        #     async def whoami() -> dict[str, Any]:
+        #         """Return identity claims for the authenticated user."""
+        #         token = get_access_token()
+        #         if token is None:
+        #             return {}
+        #         # token.claims should contain standard OIDC-style claims
+        #         return {
+        #             "iss": token.claims.get("iss"),
+        #             "sub": token.claims.get("sub"),
+        #             "email": token.claims.get("email"),
+        #             "name": token.claims.get("name"),
+        #             "picture": token.claims.get("picture"),
+        #         }
+        #
+        #     @self.app.tool
+        #     async def get_user_info() -> dict[str, Any]:
+        #         """Return simplified user info for authenticated Google user."""
+        #         token = get_access_token()
+        #         if token is None:
+        #             return {}
+        #         return {
+        #             "google_id": token.claims.get("sub"),
+        #             "email": token.claims.get("email"),
+        #             "name": token.claims.get("name"),
+        #             "picture": token.claims.get("picture"),
+        #         }
+        # except Exception:
+        #     # If dependencies are unavailable (e.g., auth not enabled), skip these helpers
+        #     # Log at debug level to avoid noisy errors when auth isn't configured
+        #     self.logger.debug(
+        #         "Auth helpers unavailable; skipping whoami/get_user_info tools",
+        #         exc_info=True,
+        #     )
 
         # Register consolidated tools (3 tools replace 13 individual tools)
         self.app.tool(
@@ -480,18 +485,53 @@ class DockerMCPServer:
                 result = getter()
                 if inspect.iscoroutine(result):
                     import asyncio
+                    from concurrent.futures import ThreadPoolExecutor
 
                     try:
-                        # Prefer asyncio.run when not already in a running loop
-                        return asyncio.run(result)
+                        # If no loop is currently running in this thread, run directly
+                        asyncio.get_running_loop()
                     except RuntimeError:
-                        # If a loop is running (unlikely in sync tests), try a fresh loop
-                        loop = asyncio.new_event_loop()
-                        try:
-                            return loop.run_until_complete(result)
-                        finally:
-                            loop.close()
-                return result
+                        result = asyncio.run(result)
+                    else:
+                        # When a loop is already active (pytest-asyncio, etc.), execute the
+                        # coroutine in a helper thread to avoid re-entry issues.
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            future = executor.submit(asyncio.run, result)
+                            result = future.result()
+
+                if result is None:
+                    return []
+
+                if isinstance(result, dict):
+                    tools_iterable = result.values()
+                else:
+                    tools_iterable = result or []
+
+                from types import SimpleNamespace
+                from copy import deepcopy
+
+                tools_list = list(tools_iterable)
+
+                compat_tools = []
+                for tool in tools_list:
+                    input_schema = getattr(tool, "input_schema", None)
+                    if input_schema is None:
+                        input_schema = getattr(tool, "parameters", None)
+
+                    if isinstance(input_schema, (dict, list)):
+                        schema_copy = deepcopy(input_schema)
+                    else:
+                        schema_copy = input_schema
+
+                    compat_tools.append(
+                        SimpleNamespace(
+                            name=getattr(tool, "name", ""),
+                            description=getattr(tool, "description", ""),
+                            inputSchema=schema_copy,
+                            raw_tool=tool,
+                        )
+                    )
+                return compat_tools
 
             # Attach wrapper only if list_tools is absent
             if not hasattr(self.app, "list_tools"):
@@ -792,13 +832,6 @@ class DockerMCPServer:
             Literal["check", "safe", "moderate", "aggressive"] | None,
             Field(default=None, description="Type of cleanup to perform"),
         ] = None,
-        frequency: Annotated[
-            Literal["daily", "weekly", "monthly", "custom"] | None,
-            Field(default=None, description="Cleanup schedule frequency"),
-        ] = None,
-        time: Annotated[
-            str, Field(default="", description="Cleanup schedule time in HH:MM format")
-        ] = "",
         port: Annotated[
             int, Field(default=0, ge=0, le=65535, description="Port number to check availability")
         ] = 0,
@@ -821,12 +854,9 @@ class DockerMCPServer:
           - Required: none
           - Optional: ssh_config_path, selected_hosts
 
-        • cleanup: Docker system cleanup with integrated schedule management
+        • cleanup: Docker system cleanup
           - Required: host_id, cleanup_type
           - Valid cleanup_type: "check" | "safe" | "moderate" | "aggressive"
-          - For scheduling: cleanup_type, frequency, time
-          - Valid frequency: "daily" | "weekly" | "monthly" | "custom"
-          - Valid time: HH:MM format (24-hour, e.g., "02:00", "14:30")
 
         • test_connection: Test host connectivity (also runs discover)
           - Required: host_id
@@ -869,8 +899,6 @@ class DockerMCPServer:
                 enabled=enabled,
                 port=port,
                 cleanup_type=cleanup_type,
-                frequency=frequency,
-                time=time if time else None,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,
             )
@@ -884,9 +912,25 @@ class DockerMCPServer:
             }
 
         # Delegate to service layer for business logic
-        return await self.host_service.handle_action(
+        service_result = await self.host_service.handle_action(
             action, **params.model_dump(exclude={"action"})
         )
+
+        # Check if service returned formatted output and convert to ToolResult
+        # This preserves the token-efficient formatting created by ContainerService
+        if isinstance(service_result, dict) and "formatted_output" in service_result:
+            from mcp.types import TextContent
+            from fastmcp.tools.tool import ToolResult
+
+            formatted_text = service_result.get("formatted_output", "")
+            if formatted_text:
+                return ToolResult(
+                    content=[TextContent(type="text", text=formatted_text)],
+                    structured_content=service_result
+                )
+
+        # Return service result as-is (dict for unformatted actions)
+        return service_result
 
     async def docker_container(
         self,
@@ -1019,6 +1063,10 @@ class DockerMCPServer:
           - Optional: environment, pull_images, recreate
 
         • up/down/restart/build: Manage stack lifecycle
+          - Required: host_id, stack_name
+          - Optional: options
+
+        • ps: List services in a stack
           - Required: host_id, stack_name
           - Optional: options
 

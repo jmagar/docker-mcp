@@ -450,10 +450,11 @@ class StackService:
             ComposeAction.RESTART: self._handle_lifecycle_action,
             ComposeAction.BUILD: self._handle_lifecycle_action,
             ComposeAction.PULL: self._handle_lifecycle_action,
+            ComposeAction.PS: self._handle_manage_action,
         }
 
         # Handle string actions that map to manage action
-        if normalized_action in ["up", "down", "restart", "build", "pull"]:
+        if normalized_action in ["up", "down", "restart", "build", "pull", "ps"]:
             return await self._handle_manage_action(normalized_action, **params)
 
         # Dispatch to appropriate handler
@@ -461,7 +462,7 @@ class StackService:
             handler = dispatch_map.get(normalized_action)
             if handler:
                 if normalized_action in [ComposeAction.UP, ComposeAction.DOWN, ComposeAction.RESTART,
-                                       ComposeAction.BUILD, ComposeAction.PULL]:
+                                       ComposeAction.BUILD, ComposeAction.PULL, ComposeAction.PS]:
                     return await handler(normalized_action, **params)
                 return await handler(**params)
 

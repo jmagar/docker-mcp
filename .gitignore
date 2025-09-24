@@ -25,6 +25,7 @@ element_clones
 
 # Temporary PR analysis files
 docs/docker-mcp-pr*
+.serena
 
 # PyInstaller
 *.manifest

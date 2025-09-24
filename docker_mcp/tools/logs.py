@@ -262,11 +262,33 @@ class LogTools:
                     logs_kwargs["since"] = since  # fallback
 
             # Get logs using Docker SDK
-            logs_bytes = await asyncio.to_thread(container.logs, **logs_kwargs)
+            try:
+                logs_bytes = await asyncio.to_thread(container.logs, **logs_kwargs)
+                # Parse logs (logs_bytes is bytes, need to decode)
+                logs_str = logs_bytes.decode("utf-8", errors="replace")
+                logs_data = logs_str.strip().split("\n") if logs_str.strip() else []
+            except Exception as sdk_error:
+                logger.warning(
+                    "Docker SDK logs failed, will use fallback",
+                    error=str(sdk_error),
+                    host_id=host_id,
+                    container_id=container_id
+                )
+                logs_data = []
 
-            # Parse logs (logs_bytes is bytes, need to decode)
-            logs_str = logs_bytes.decode("utf-8", errors="replace")
-            logs_data = logs_str.strip().split("\n") if logs_str.strip() else []
+            # Fallback: If no logs from SDK, try direct docker command
+            if not logs_data or (len(logs_data) == 1 and not logs_data[0]):
+                logger.debug(
+                    "No logs from Docker SDK, trying direct command",
+                    host_id=host_id,
+                    container_id=container_id
+                )
+                # Try using docker logs command directly via context
+                logs_cmd = f"logs --tail {lines} {container_id}"
+                cmd_result = await self.context_manager.execute_docker_command(host_id, logs_cmd)
+                if cmd_result and "output" in cmd_result:
+                    logs_str = cmd_result["output"]
+                    logs_data = logs_str.strip().split("\n") if logs_str.strip() else []
 
             # Sanitize logs before returning
             sanitized_logs = self._sanitize_log_content(logs_data)

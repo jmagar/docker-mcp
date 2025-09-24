@@ -1355,10 +1355,28 @@ class HostService:
 
         if port > 0:
             result = await container_service.check_port_availability(host_id, port)
+            # For specific port checks, return structured content (no complex formatting needed)
             return cast(dict[str, Any], result.structured_content)
         else:
             result = await container_service.list_host_ports(host_id)
-            return cast(dict[str, Any], result.structured_content)
+            # CRITICAL: Preserve the formatted content from ContainerService.list_host_ports()
+            # The ContainerService creates beautiful token-efficient formatting like:
+            # "Port Usage on tootie\nFound 136 ports across 67 containers\nPORT MAPPINGS:\n  container [project]: 8080→80/tcp"
+            # But we were stripping this and returning only raw JSON, losing the user-friendly formatting
+            # The structured_content is still available but we need to include the formatted text too
+
+            # Extract the formatted content and include it in the response
+            formatted_content = ""
+            if hasattr(result, 'content') and result.content:
+                formatted_content = result.content[0].text if result.content[0].text else ""
+
+            # Get the structured content
+            structured_data = cast(dict[str, Any], result.structured_content)
+
+            # Add the formatted output to the structured data so FastMCP can display it
+            structured_data["formatted_output"] = formatted_content
+
+            return structured_data
 
     async def _handle_import_ssh_action(self, **params) -> dict[str, Any]:
         """Handle IMPORT_SSH action."""
@@ -1439,44 +1457,21 @@ class HostService:
 
         host_id = params.get("host_id", "")
         cleanup_type = params.get("cleanup_type")
-        frequency = params.get("frequency")
-        time = params.get("time")
 
         cleanup_service = CleanupService(self.config)
 
-        # Handle schedule operations
-        if frequency and time:
-            if not host_id or not cleanup_type:
-                return {
-                    "success": False,
-                    "error": "host_id and cleanup_type required for scheduling",
-                }
-            if cleanup_type not in ["safe", "moderate"]:
-                return {
-                    "success": False,
-                    "error": "Only 'safe' and 'moderate' cleanup types can be scheduled",
-                }
-            return await cleanup_service.add_schedule(host_id, cleanup_type, frequency, time)
-
-        # Handle schedule list/remove
-        elif not host_id and not frequency and not cleanup_type:
-            return await cleanup_service.list_schedules()
-        elif host_id and not frequency and not cleanup_type:
-            return await cleanup_service.remove_schedule(host_id)
-
         # Handle cleanup operations
-        else:
-            if not host_id:
-                return {"success": False, "error": "host_id is required for cleanup action"}
-            if not cleanup_type:
-                return {"success": False, "error": "cleanup_type is required for cleanup action"}
-            if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
-                return {
-                    "success": False,
-                    "error": "cleanup_type must be one of: check, safe, moderate, aggressive",
-                }
+        if not host_id:
+            return {"success": False, "error": "host_id is required for cleanup action"}
+        if not cleanup_type:
+            return {"success": False, "error": "cleanup_type is required for cleanup action"}
+        if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
+            return {
+                "success": False,
+                "error": "cleanup_type must be one of: check, safe, moderate, aggressive",
+            }
 
-            return await cleanup_service.docker_cleanup(host_id, cleanup_type)
+        return await cleanup_service.docker_cleanup(host_id, cleanup_type)
 
     def _format_discover_result(self, result: dict[str, Any], host_id: str) -> dict[str, Any]:
         """Format discovery result for single host."""

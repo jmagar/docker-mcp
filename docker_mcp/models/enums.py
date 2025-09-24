@@ -47,6 +47,7 @@ class ComposeAction(Enum):
     RESTART = "restart"
     BUILD = "build"
     LOGS = "logs"
+    PS = "ps"
     MIGRATE = "migrate"
     PULL = "pull"
 

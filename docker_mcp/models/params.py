@@ -10,7 +10,6 @@ from .container import MCPModel
 from .enums import ComposeAction, ContainerAction, HostAction
 
 # Type aliases for string constraints
-TimeStr = Annotated[str, StringConstraints(pattern=r"^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$")]
 DNSName = Annotated[
     str, StringConstraints(max_length=63, pattern=r"^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 ]
@@ -59,10 +58,6 @@ class DockerHostsParams(MCPModel):
     cleanup_type: Literal["check", "safe", "moderate", "aggressive"] | None = Field(
         default=None, description="Type of cleanup to perform"
     )
-    frequency: Literal["daily", "weekly", "monthly", "custom"] | None = Field(
-        default=None, description="Cleanup schedule frequency"
-    )
-    time: TimeStr | None = Field(default=None, description="Cleanup schedule time in HH:MM (24h)")
 
     # Port check parameter (only for ports check sub-action)
     port: int = Field(

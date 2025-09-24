@@ -55,12 +55,9 @@ Simplified Docker hosts management tool.
   - Required: none
   - Optional: ssh_config_path, selected_hosts
 
-• **cleanup**: Docker system cleanup with integrated schedule management
+• **cleanup**: Docker system cleanup operations
   - Required: host_id, cleanup_type
   - Valid cleanup_type: "check" | "safe" | "moderate" | "aggressive"
-  - For scheduling: cleanup_type, frequency, time
-  - Valid frequency: "daily" | "weekly" | "monthly" | "custom"
-  - Valid time: HH:MM format (24-hour, e.g., "02:00", "14:30")
 
 • **test_connection**: Test host connectivity (also runs discover)
   - Required: host_id
@@ -89,7 +86,6 @@ Simplified Docker hosts management tool.
 "Check what ports are being used on production-1"
 "Import hosts from my SSH config"
 "Clean up Docker on production-1 using safe mode"
-"Set up daily cleanup at 2 AM for production-1"
 "Test connection to staging-server"
 "Discover capabilities on all hosts"
 "Update the compose path for production-1 to /opt/stacks"

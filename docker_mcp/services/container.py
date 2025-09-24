@@ -523,6 +523,9 @@ class ContainerService:
             # Use container tools to get port information (always include stopped containers)
             result = await self.container_tools.list_host_ports(host_id)
 
+            # Extract data from the response structure
+            data = result.get("data", {})
+
             summary_lines = self._format_port_usage_summary(result, host_id)
 
             return ToolResult(
@@ -530,11 +533,11 @@ class ContainerService:
                 structured_content={
                     "success": True,
                     HOST_ID: host_id,
-                    "total_ports": result["total_ports"],
-                    "total_containers": result["total_containers"],
-                    "port_mappings": result["port_mappings"],
-                    "conflicts": result["conflicts"],
-                    "summary": result["summary"],
+                    "total_ports": data.get("total_ports", 0),
+                    "total_containers": data.get("total_containers", 0),
+                    "port_mappings": data.get("port_mappings", []),
+                    "conflicts": data.get("conflicts", []),
+                    "summary": data.get("summary", {}),
                     "cached": result.get("cached", False),
                     "timestamp": result.get("timestamp"),
                 },
@@ -549,13 +552,14 @@ class ContainerService:
 
     def _format_port_usage_summary(self, result: dict[str, Any], host_id: str) -> list[str]:
         """Format comprehensive port usage summary."""
-        port_mappings = result["port_mappings"]
-        conflicts = result["conflicts"]
-        summary = result["summary"]
+        data = result.get("data", {})
+        port_mappings = data.get("port_mappings", [])
+        conflicts = data.get("conflicts", [])
+        summary = data.get("summary", {})
 
         summary_lines = [
             f"Port Usage on {host_id}",
-            f"Found {result['total_ports']} exposed ports across {result['total_containers']} containers",
+            f"Found {data.get('total_ports', 0)} exposed ports across {data.get('total_containers', 0)} containers",
             "",
         ]
 
@@ -893,13 +897,23 @@ class ContainerService:
                 timestamps=False,
             )
 
-            # Extract logs array from ContainerLogs model for cleaner API
-            if isinstance(logs_result, dict) and "logs" in logs_result:
-                logs = logs_result["logs"]
-                truncated = logs_result.get("truncated", False)
-            else:
+            logs: list[str] = []
+            truncated = False
+
+            if isinstance(logs_result, dict):
+                # Preferred shape: success response with payload under "data"
+                if isinstance(logs_result.get("data"), dict):
+                    data = logs_result["data"]
+                    logs = data.get("logs", []) or []
+                    truncated = data.get("truncated", False)
+                # Legacy shape: logs returned at the top level
+                elif "logs" in logs_result:
+                    logs = logs_result.get("logs", []) or []
+                    truncated = logs_result.get("truncated", False)
+
+            # Ensure we always return a list even if upstream gave us something unexpected
+            if not isinstance(logs, list):
                 logs = []
-                truncated = False
 
             return {
                 "success": True,
