@@ -6,6 +6,7 @@ Business logic for Docker host management operations.
 
 import asyncio
 import shlex
+import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -63,6 +64,8 @@ class HostService:
         Returns:
             Operation result
         """
+        tags = tags or []
+
         try:
             host_config = DockerHost(
                 hostname=ssh_host,
@@ -70,7 +73,7 @@ class HostService:
                 port=ssh_port,
                 identity_file=ssh_key_path,
                 description=description,
-                tags=tags or [],
+                tags=tags,
                 compose_path=compose_path,
                 enabled=enabled,
             )
@@ -81,13 +84,23 @@ class HostService:
             )
 
             if not connection_tested:
-                return {
+                error_message = (
+                    f"SSH connection test failed for {ssh_user}@{ssh_host}:{ssh_port}"
+                )
+                result = {
                     "success": False,
-                    "error": f"SSH connection test failed for {ssh_user}@{ssh_host}:{ssh_port}",
+                    "error": error_message,
                     HOST_ID: host_id,
                     "hostname": ssh_host,
+                    "user": ssh_user,
+                    "port": ssh_port,
                     "connection_tested": False,
                 }
+                result["formatted_output"] = self._format_error_output(
+                    f"Host add failed ({host_id})",
+                    error_message,
+                )
+                return result
 
             # Add to configuration
             self.config.hosts[host_id] = host_config
@@ -100,17 +113,44 @@ class HostService:
                 "Docker host added", host_id=host_id, hostname=ssh_host, tested=connection_tested
             )
 
-            return {
+            result = {
                 "success": True,
                 "message": f"Host {host_id} added successfully (SSH connection verified)",
                 HOST_ID: host_id,
                 "hostname": ssh_host,
+                "user": ssh_user,
+                "port": ssh_port,
+                "description": description,
+                "tags": tags,
+                "compose_path": compose_path,
+                "enabled": enabled,
                 "connection_tested": connection_tested,
             }
+            if ssh_key_path:
+                result["identity_file"] = ssh_key_path
+
+            result["formatted_output"] = self._format_add_host_output(
+                host_id,
+                ssh_host,
+                ssh_user,
+                ssh_port,
+                connection_tested,
+                tags,
+                compose_path,
+                description,
+                enabled,
+            )
+
+            return result
 
         except Exception as e:
-            self.logger.error("Failed to add host", host_id=host_id, error=str(e))
-            return {"success": False, "error": str(e), HOST_ID: host_id}
+            error_message = str(e)
+            self.logger.error("Failed to add host", host_id=host_id, error=error_message)
+            result = {"success": False, "error": error_message, HOST_ID: host_id}
+            result["formatted_output"] = self._format_error_output(
+                f"Host add failed ({host_id})", error_message
+            )
+            return result
 
     async def list_docker_hosts(self) -> dict[str, Any]:
         """List all configured Docker hosts.
@@ -119,48 +159,36 @@ class HostService:
             List of host configurations
         """
         try:
-            hosts = []
-            for host_id, host_config in self.config.hosts.items():
-                hosts.append(
-                    {
-                        HOST_ID: host_id,
-                        "id": host_id,  # Backward-compatible alias used by some tests/tools
-                        "hostname": host_config.hostname,
-                        "user": host_config.user,
-                        "port": host_config.port,
-                        "description": host_config.description,
-                        "tags": host_config.tags,
-                        "enabled": host_config.enabled,
-                        COMPOSE_PATH: host_config.compose_path,
-                        APPDATA_PATH: host_config.appdata_path,
-                    }
-                )
+            hosts: list[dict[str, Any]] = []
+            enabled_hosts = 0
 
-            # Create human-readable summary for efficient display
-            summary_lines = [
-                f"Docker Hosts ({len(hosts)} configured)",
-                f"{'Host':<12} {'Address':<20}",
-                f"{'-' * 12:<12} {'-' * 20:<20}",
-            ]
+            for host_id, host_config in sorted(self.config.hosts.items()):
+                host_data = self._serialize_host_config(host_id, host_config)
+                if host_config.enabled:
+                    enabled_hosts += 1
+                hosts.append(host_data)
 
-            for host_data in hosts:
-                host_data = cast(dict[str, Any], host_data)  # Type hint for mypy
-                address = f"{host_data['hostname']}:{host_data['port']}"
-
-                summary_lines.append(
-                    f"{host_data.get(HOST_ID, 'unknown'):<12} {address:<20}"
-                )
+            summary_lines = self._format_host_list_output(hosts, enabled_hosts)
+            formatted_output = "\n".join(summary_lines)
 
             return {
+                "formatted_output": formatted_output,
                 "success": True,
                 "hosts": hosts,
                 "count": len(hosts),
-                "summary": "\n".join(summary_lines),
+                "enabled": enabled_hosts,
             }
 
         except Exception as e:
             self.logger.error("Failed to list hosts", error=str(e))
-            return {"success": False, "error": str(e)}
+            error_message = str(e)
+            return {
+                "formatted_output": self._format_error_output(
+                    "Host list failed", error_message
+                ),
+                "success": False,
+                "error": error_message,
+            }
 
     def validate_host_exists(self, host_id: str) -> tuple[bool, str]:
         """Validate that a host exists in configuration.
@@ -217,14 +245,19 @@ class HostService:
             Operation result
         """
         try:
-            # Check if host exists
             if host_id not in self.config.hosts:
-                return {"success": False, "error": f"Host '{host_id}' not found", HOST_ID: host_id}
+                error_message = f"Host '{host_id}' not found"
+                return {
+                    "success": False,
+                    "error": error_message,
+                    HOST_ID: host_id,
+                    "formatted_output": self._format_error_output(
+                        "Host edit failed", error_message
+                    ),
+                }
 
-            # Get current configuration
             current_host = self.config.hosts[host_id]
 
-            # Update only provided values (treat empty strings as None)
             updated_config: dict[str, Any] = {
                 "hostname": ssh_host
                 if ssh_host is not None and ssh_host != ""
@@ -247,52 +280,71 @@ class HostService:
                 "enabled": enabled if enabled is not None else current_host.enabled,
             }
 
-            # Create and validate the new host configuration before updating
             try:
                 new_host_config = DockerHost(**updated_config)
             except Exception as validation_error:
+                error_message = f"Configuration validation failed: {validation_error}"
                 return {
                     "success": False,
-                    "error": f"Configuration validation failed: {validation_error}",
+                    "error": error_message,
                     HOST_ID: host_id,
+                    "formatted_output": self._format_error_output(
+                        "Host edit failed", error_message
+                    ),
                 }
 
-            # Update the in-memory host configuration only after validation succeeds
+            changes = self._calculate_host_changes(current_host, new_host_config)
+
             self.config.hosts[host_id] = new_host_config
 
-            # Save configuration changes to disk
             try:
                 await asyncio.to_thread(
                     save_config, self.config, getattr(self.config, "config_file", None)
                 )
             except Exception as save_error:
-                # Rollback the in-memory change if save fails
                 self.config.hosts[host_id] = current_host
+                error_message = f"Failed to save configuration: {save_error}"
                 return {
                     "success": False,
-                    "error": f"Failed to save configuration: {save_error}",
+                    "error": error_message,
                     HOST_ID: host_id,
+                    "formatted_output": self._format_error_output(
+                        "Host edit failed", error_message
+                    ),
                 }
 
             self.logger.info("Docker host updated", host_id=host_id)
 
-            return {
+            host_snapshot = self._serialize_host_config(host_id, new_host_config)
+            message = "Host {host_id} updated successfully" if changes else "Host {host_id} unchanged"
+            message = message.format(host_id=host_id)
+
+            result = {
                 "success": True,
-                "message": f"Host {host_id} updated successfully",
+                "message": message,
                 HOST_ID: host_id,
-                "updated_fields": [
-                    k
-                    for k, v in locals().items()
-                    if k.startswith(
-                        ("ssh_", "description", "tags", "compose_", "appdata_", "enabled")
-                    )
-                    and v is not None
-                ],
+                "changes": changes,
+                "updated_fields": list(changes.keys()),
+                "host": host_snapshot,
             }
 
+            result["formatted_output"] = self._format_edit_host_output(
+                host_id, new_host_config, changes
+            )
+
+            return result
+
         except Exception as e:
-            self.logger.error("Failed to edit host", host_id=host_id, error=str(e))
-            return {"success": False, "error": str(e), HOST_ID: host_id}
+            error_message = str(e)
+            self.logger.error("Failed to edit host", host_id=host_id, error=error_message)
+            return {
+                "success": False,
+                "error": error_message,
+                HOST_ID: host_id,
+                "formatted_output": self._format_error_output(
+                    "Host edit failed", error_message
+                ),
+            }
 
     async def remove_docker_host(self, host_id: str) -> dict[str, Any]:
         """Remove a Docker host from configuration.
@@ -304,33 +356,50 @@ class HostService:
             Operation result
         """
         try:
-            # Check if host exists
             if host_id not in self.config.hosts:
-                return {"success": False, "error": f"Host '{host_id}' not found", HOST_ID: host_id}
+                error_message = f"Host '{host_id}' not found"
+                return {
+                    "success": False,
+                    "error": error_message,
+                    HOST_ID: host_id,
+                    "formatted_output": self._format_error_output(
+                        "Host remove failed", error_message
+                    ),
+                }
 
-            # Store host info for response
-            hostname = self.config.hosts[host_id].hostname
+            host_config = self.config.hosts[host_id]
+            hostname = host_config.hostname
 
-            # Remove the host
             del self.config.hosts[host_id]
 
-            # Always save configuration changes to disk
             await asyncio.to_thread(
                 save_config, self.config, getattr(self.config, "config_file", None)
             )
 
             self.logger.info("Docker host removed", host_id=host_id, hostname=hostname)
 
-            return {
+            result = {
                 "success": True,
                 "message": f"Host {host_id} ({hostname}) removed successfully",
                 HOST_ID: host_id,
                 "hostname": hostname,
             }
 
+            result["formatted_output"] = self._format_remove_host_output(host_id, hostname)
+
+            return result
+
         except Exception as e:
-            self.logger.error("Failed to remove host", host_id=host_id, error=str(e))
-            return {"success": False, "error": str(e), HOST_ID: host_id}
+            error_message = str(e)
+            self.logger.error("Failed to remove host", host_id=host_id, error=error_message)
+            return {
+                "success": False,
+                "error": error_message,
+                HOST_ID: host_id,
+                "formatted_output": self._format_error_output(
+                    "Host remove failed", error_message
+                ),
+            }
 
     async def test_connection(self, host_id: str) -> dict[str, Any]:
         """Test SSH connection to a Docker host.
@@ -342,9 +411,16 @@ class HostService:
             Connection test result
         """
         try:
-            # Check if host exists
             if host_id not in self.config.hosts:
-                return {"success": False, "error": f"Host '{host_id}' not found", HOST_ID: host_id}
+                error_message = f"Host '{host_id}' not found"
+                return {
+                    "success": False,
+                    "error": error_message,
+                    HOST_ID: host_id,
+                    "formatted_output": self._format_error_output(
+                        "Connection test failed", error_message
+                    ),
+                }
 
             host = self.config.hosts[host_id]
 
@@ -403,7 +479,7 @@ class HostService:
                     docker_status = "not_available"
                     docker_message = "Docker not found or not accessible"
 
-                return {
+                result = {
                     "success": True,
                     "message": "SSH connection successful",
                     HOST_ID: host_id,
@@ -415,24 +491,44 @@ class HostService:
                     "docker_status": docker_status,
                     "docker_message": docker_message,
                 }
+                result["formatted_output"] = self._format_test_connection_output(
+                    host_id,
+                    host.hostname,
+                    host.port,
+                    docker_status,
+                    docker_version,
+                    docker_message,
+                )
+                return result
             else:
                 # Enhanced SSH error handling with specific guidance
                 detailed_error = self._analyze_ssh_error(error_output, process.returncode, host)
-                return {
+                error_message = detailed_error["error"]
+                result = {
                     "success": False,
-                    "error": detailed_error["error"],
+                    "error": error_message,
                     "error_type": detailed_error["error_type"],
                     "troubleshooting_guidance": detailed_error["guidance"],
                     HOST_ID: host_id,
                     "hostname": host.hostname,
                     "port": host.port,
                 }
+                result["formatted_output"] = self._format_error_output(
+                    "Connection test failed",
+                    error_message,
+                    detailed_error.get("guidance"),
+                )
+                return result
 
         except Exception as e:
+            error_message = f"Connection test failed: {str(e)}"
             return {
                 "success": False,
-                "error": f"Connection test failed: {str(e)}",
+                "error": error_message,
                 HOST_ID: host_id,
+                "formatted_output": self._format_error_output(
+                    "Connection test failed", error_message
+                ),
             }
 
     async def discover_host_capabilities(self, host_id: str) -> dict[str, Any]:
@@ -1262,15 +1358,40 @@ class HostService:
         enabled = params.get("enabled", True)
 
         if not host_id:
-            return {"success": False, "error": "host_id is required for add action"}
+            error_message = "host_id is required for add action"
+            return {
+                "success": False,
+                "error": error_message,
+                "formatted_output": self._format_error_output(
+                    "Host add failed", error_message
+                ),
+            }
         if not ssh_host:
-            return {"success": False, "error": "ssh_host is required for add action"}
+            error_message = "ssh_host is required for add action"
+            return {
+                "success": False,
+                "error": error_message,
+                "formatted_output": self._format_error_output(
+                    "Host add failed", error_message
+                ),
+            }
         if not ssh_user:
-            return {"success": False, "error": "ssh_user is required for add action"}
+            error_message = "ssh_user is required for add action"
+            return {
+                "success": False,
+                "error": error_message,
+                "formatted_output": self._format_error_output(
+                    "Host add failed", error_message
+                ),
+            }
         if not (1 <= ssh_port <= 65535):
             return {
                 "success": False,
                 "error": f"ssh_port must be between 1 and 65535, got {ssh_port}",
+                "formatted_output": self._format_error_output(
+                    "Host add failed",
+                    f"ssh_port must be between 1 and 65535, got {ssh_port}",
+                ),
             }
 
         result = await self.add_docker_host(
@@ -1291,6 +1412,14 @@ class HostService:
             if discovery_result.get("success") and discovery_result.get("recommendations"):
                 result["discovery"] = discovery_result
                 result["message"] += " (Discovery completed - check recommendations)"
+                if result.get("formatted_output"):
+                    result["formatted_output"] += self._format_discovery_appendix(
+                        host_id, discovery_result
+                    )
+                else:
+                    result["formatted_output"] = self._format_discovery_appendix(
+                        host_id, discovery_result
+                    ).strip()
 
         return result
 
@@ -1298,7 +1427,14 @@ class HostService:
         """Handle EDIT action."""
         host_id = params.get("host_id", "")
         if not host_id:
-            return {"success": False, "error": "host_id is required for edit action"}
+            error_message = "host_id is required for edit action"
+            return {
+                "success": False,
+                "error": error_message,
+                "formatted_output": self._format_error_output(
+                    "Host edit failed", error_message
+                ),
+            }
 
         return await self.edit_docker_host(
             host_id,
@@ -1317,14 +1453,28 @@ class HostService:
         """Handle REMOVE action."""
         host_id = params.get("host_id", "")
         if not host_id:
-            return {"success": False, "error": "host_id is required for remove action"}
+            error_message = "host_id is required for remove action"
+            return {
+                "success": False,
+                "error": error_message,
+                "formatted_output": self._format_error_output(
+                    "Host remove failed", error_message
+                ),
+            }
         return await self.remove_docker_host(host_id)
 
     async def _handle_test_connection_action(self, **params) -> dict[str, Any]:
         """Handle TEST_CONNECTION action."""
         host_id = params.get("host_id", "")
         if not host_id:
-            return {"success": False, "error": "host_id is required for test_connection action"}
+            error_message = "host_id is required for test_connection action"
+            return {
+                "success": False,
+                "error": error_message,
+                "formatted_output": self._format_error_output(
+                    "Connection test failed", error_message
+                ),
+            }
         return await self.test_connection(host_id)
 
     async def _handle_discover_action(self, **params) -> dict[str, Any]:
@@ -1391,11 +1541,14 @@ class HostService:
             ssh_config_path, selected_hosts, config_path
         )
 
+        formatted_text = ""
+
         if hasattr(result, "structured_content"):
             if result.structured_content:
                 import_result = result.structured_content
+                if hasattr(result, "content") and result.content:
+                    formatted_text = getattr(result.content[0], "text", "") or ""
             else:
-                # Missing or falsy structured_content is an error condition
                 self.logger.error(
                     "import_ssh_config returned invalid/missing structured_content",
                     ssh_config_path=ssh_config_path,
@@ -1414,6 +1567,9 @@ class HostService:
                 }
         else:
             import_result = result
+
+        if formatted_text:
+            import_result["formatted_output"] = formatted_text
 
         # Auto-run discovery on imported hosts if import was successful
         if import_result.get("success") and import_result.get("imported_hosts"):
@@ -1449,6 +1605,14 @@ class HostService:
                 import_result.get("message", "") + " (Auto-discovery completed for imported hosts)"
             )
 
+            summary_text = self._format_import_result_output(import_result)
+            existing = import_result.get("formatted_output", "").strip()
+            import_result["formatted_output"] = (
+                f"{existing}\n\n{summary_text}" if existing else summary_text
+            )
+        elif "formatted_output" not in import_result:
+            import_result["formatted_output"] = self._format_import_result_output(import_result)
+
         return import_result
 
     async def _handle_cleanup_action(self, **params) -> dict[str, Any]:
@@ -1462,20 +1626,49 @@ class HostService:
 
         # Handle cleanup operations
         if not host_id:
-            return {"success": False, "error": "host_id is required for cleanup action"}
+            error_message = "host_id is required for cleanup action"
+            return {
+                "success": False,
+                "error": error_message,
+                "formatted_output": self._format_error_output(
+                    "Cleanup failed", error_message
+                ),
+            }
         if not cleanup_type:
-            return {"success": False, "error": "cleanup_type is required for cleanup action"}
+            error_message = "cleanup_type is required for cleanup action"
+            return {
+                "success": False,
+                "error": error_message,
+                "formatted_output": self._format_error_output(
+                    "Cleanup failed", error_message
+                ),
+            }
         if cleanup_type not in ["check", "safe", "moderate", "aggressive"]:
             return {
                 "success": False,
                 "error": "cleanup_type must be one of: check, safe, moderate, aggressive",
+                "formatted_output": self._format_error_output(
+                    "Cleanup failed",
+                    "cleanup_type must be one of: check, safe, moderate, aggressive",
+                ),
             }
 
-        return await cleanup_service.docker_cleanup(host_id, cleanup_type)
+        result = await cleanup_service.docker_cleanup(host_id, cleanup_type)
+        if result.get("success") and "formatted_output" not in result:
+            result["formatted_output"] = self._format_cleanup_output(result)
+        elif not result.get("success") and "formatted_output" not in result:
+            result["formatted_output"] = self._format_error_output(
+                "Cleanup failed", result.get("error", "Unknown error")
+            )
+        return result
 
     def _format_discover_result(self, result: dict[str, Any], host_id: str) -> dict[str, Any]:
         """Format discovery result for single host."""
         if not result.get("success"):
+            if "formatted_output" not in result:
+                result["formatted_output"] = self._format_error_output(
+                    f"Discovery failed for {host_id}", result.get("error", "Unknown error")
+                )
             return result
 
         # Add discovery summary information
@@ -1507,11 +1700,17 @@ class HostService:
         if guidance_messages:
             result["helpful_guidance"] = "\n\n".join(guidance_messages)
 
+        result["formatted_output"] = self._format_discover_single_output(host_id, result)
+
         return result
 
     def _format_discover_all_result(self, result: dict[str, Any]) -> dict[str, Any]:
         """Format discovery result for all hosts."""
         if not result.get("success"):
+            if "formatted_output" not in result:
+                result["formatted_output"] = self._format_error_output(
+                    "Discovery failed", result.get("error", "Unknown error")
+                )
             return result
 
         # Add summary statistics
@@ -1533,7 +1732,524 @@ class HostService:
             "total_paths_found": total_paths,
         }
 
+        result["formatted_output"] = self._format_discover_all_output(result)
+
         return result
+
+    def _format_host_list_output(
+        self, hosts: list[dict[str, Any]], enabled_hosts: int
+    ) -> list[str]:
+        total_hosts = len(hosts)
+
+        lines = [f"Docker Hosts ({total_hosts} configured)"]
+
+        if total_hosts == 0:
+            lines.append("No hosts configured. Use `docker_hosts add` to register a host.")
+            return lines
+
+        lines.append(f"Enabled: {enabled_hosts}/{total_hosts}")
+        lines.append("")
+
+        header = f"{'Host':<12} {'Address':<22} {'Status':<3} {'Details'}"
+        separator = f"{'-' * 12:<12} {'-' * 22:<22} {'-' * 3:<3} {'-' * 48}"
+        lines.extend([header, separator])
+
+        for host in hosts:
+            host_id = cast(str, host.get(HOST_ID, "unknown"))
+            hostname = str(host.get("hostname", "-")) or "-"
+            port = host.get("port")
+            port_display = str(port) if port not in (None, "", 0) else "-"
+            address = f"{hostname}:{port_display}" if port_display != "-" else hostname
+
+            status_icon = "✓" if host.get("enabled", True) else "✗"
+
+            address_lines = self._wrap_value(address, 22)
+            detail_lines = self._host_detail_lines(host)
+            row_count = max(len(address_lines), len(detail_lines))
+
+            for index in range(row_count):
+                host_column = host_id if index == 0 else ""
+                address_column = address_lines[index] if index < len(address_lines) else ""
+                status_column = status_icon if index == 0 else ""
+                detail_column = detail_lines[index] if index < len(detail_lines) else ""
+                lines.append(
+                    f"{host_column:<12} {address_column:<22} {status_column:<3} {detail_column}"
+                )
+
+        return lines
+
+    def _host_detail_lines(self, host: dict[str, Any]) -> list[str]:
+        tags = host.get("tags") or []
+        details: list[str] = []
+
+        tag_line = "/".join(str(tag) for tag in tags if str(tag).strip())
+        if tag_line:
+            details.append(tag_line)
+
+        description = host.get("description")
+        if description:
+            details.extend(self._wrap_value(str(description), 48))
+
+        compose_path = host.get(COMPOSE_PATH)
+        if compose_path:
+            details.extend(self._wrap_labelled_value("Compose", str(compose_path), 48))
+
+        appdata_path = host.get(APPDATA_PATH)
+        if appdata_path:
+            details.extend(self._wrap_labelled_value("Appdata", str(appdata_path), 48))
+
+        return details or ["-"]
+
+    def _format_detail_entries(
+        self, entries: list[tuple[str, str]], width: int = 48
+    ) -> list[str]:
+        if not entries:
+            return ["-"]
+
+        lines: list[str] = []
+        for label, value in entries:
+            if value is None or value == "":
+                continue
+            lines.extend(self._wrap_labelled_value(label, value, width))
+
+        return lines or ["-"]
+
+    def _wrap_labelled_value(self, label: str, value: str, width: int) -> list[str]:
+        available_width = max(width - len(label) - 2, 12)
+        wrapped_value = self._wrap_value(
+            value,
+            available_width,
+            prefer_path=label.lower() in {"compose", "appdata"},
+        )
+
+        formatted_lines = [f"{label}: {wrapped_value[0]}"]
+        indent = " " * (len(label) + 2)
+        for continuation in wrapped_value[1:]:
+            formatted_lines.append(f"{indent}{continuation}")
+
+        return formatted_lines
+
+    def _wrap_value(self, value: str, width: int, prefer_path: bool = False) -> list[str]:
+        if width <= 0 or len(value) <= width:
+            return [value]
+
+        if prefer_path or "/" in value:
+            spaced = value.replace("/", "/ ")
+            wrapped = textwrap.wrap(
+                spaced,
+                width=width,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            cleaned = [line.replace("/ ", "/").strip() for line in wrapped if line.strip()]
+            return cleaned or [value]
+
+        wrapped = textwrap.wrap(
+            value,
+            width=width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        return wrapped or [value]
+
+    def _format_error_output(
+        self, prefix: str, message: str, guidance: list[str] | None = None
+    ) -> str:
+        lines = [f"❌ {prefix}: {message}"]
+        if guidance:
+            lines.append("Guidance:")
+            for item in guidance:
+                lines.append(f"  • {item}")
+        return "\n".join(lines)
+
+    def _format_add_host_output(
+        self,
+        host_id: str,
+        hostname: str,
+        user: str,
+        port: int,
+        connection_tested: bool,
+        tags: list[str] | None,
+        compose_path: str | None,
+        description: str,
+        enabled: bool,
+    ) -> str:
+        """Format host addition output with enhanced visual structure."""
+        connection_status = "✅ Connected" if connection_tested else "⚠️ Not tested"
+        enabled_status = "✅ Enabled" if enabled else "❌ Disabled"
+
+        lines = []
+
+        # Header with visual separator
+        lines.append("═" * 60)
+        lines.append("🚀 New Docker Host Added Successfully")
+        lines.append("═" * 60)
+
+        # Host information section
+        lines.append("")
+        lines.append("📋 Host Configuration:")
+        lines.append(f"   Host ID: {host_id}")
+        lines.append(f"   Address: {hostname}:{port}")
+        lines.append(f"   SSH User: {user}")
+
+        # Status section
+        lines.append("")
+        lines.append("📊 Status:")
+        lines.append(f"   Connection: {connection_status}")
+        lines.append(f"   State: {enabled_status}")
+
+        # Optional details section
+        if compose_path or description or tags:
+            lines.append("")
+            lines.append("🔧 Additional Configuration:")
+            if compose_path:
+                lines.extend(self._wrap_labelled_value("   Compose Path", compose_path, 70))
+            if description:
+                lines.extend(self._wrap_labelled_value("   Description", description, 70))
+            if tags:
+                lines.extend(self._wrap_labelled_value("   Tags", ", ".join(tags), 70))
+
+        # Next steps
+        lines.append("")
+        lines.append("💡 Next Steps:")
+        lines.append("   • Run 'docker_hosts test_connection' to verify connectivity")
+        lines.append("   • Run 'docker_hosts discover' to find compose paths")
+        lines.append("   • Deploy stacks with 'docker_compose deploy'")
+
+        lines.append("─" * 60)
+
+        return "\n".join(lines)
+
+    def _format_discovery_appendix(
+        self, host_id: str, discovery_result: dict[str, Any]
+    ) -> str:
+        compose_paths = discovery_result.get("compose_discovery", {}).get("paths", [])
+        appdata_paths = discovery_result.get("appdata_discovery", {}).get("paths", [])
+        recommendations = discovery_result.get("recommendations", [])
+
+        return (
+            "\n"
+            + f"Discovery summary for {host_id}: "
+            + f"compose {len(compose_paths)}, appdata {len(appdata_paths)}, "
+            + f"recommendations {len(recommendations)}"
+        )
+
+    def _serialize_host_config(self, host_id: str, host_config: DockerHost) -> dict[str, Any]:
+        return {
+            HOST_ID: host_id,
+            "id": host_id,
+            "hostname": host_config.hostname,
+            "user": host_config.user,
+            "port": host_config.port,
+            "identity_file": host_config.identity_file,
+            "description": host_config.description,
+            "tags": host_config.tags,
+            "enabled": host_config.enabled,
+            COMPOSE_PATH: host_config.compose_path,
+            APPDATA_PATH: host_config.appdata_path,
+        }
+
+    def _calculate_host_changes(
+        self, current: DockerHost, new: DockerHost
+    ) -> dict[str, dict[str, Any]]:
+        changes: dict[str, dict[str, Any]] = {}
+        mapping = {
+            "hostname": "hostname",
+            "user": "user",
+            "port": "port",
+            "identity_file": "identity_file",
+            "description": "description",
+            "tags": "tags",
+            "compose_path": "compose_path",
+            "appdata_path": "appdata_path",
+            "enabled": "enabled",
+        }
+
+        for attr, key in mapping.items():
+            old_value = getattr(current, attr)
+            new_value = getattr(new, attr)
+            if old_value != new_value:
+                changes[key] = {"old": old_value, "new": new_value}
+
+        return changes
+
+    def _format_edit_host_output(
+        self, host_id: str, host: DockerHost, changes: dict[str, dict[str, Any]]
+    ) -> str:
+        """Format host edit output with enhanced visual structure and change details."""
+        lines = []
+
+        # Header with visual separator
+        lines.append("═" * 60)
+        lines.append("✏️  Docker Host Configuration Updated")
+        lines.append("═" * 60)
+
+        # Host identification
+        lines.append("")
+        lines.append(f"📋 Host: {host_id}")
+        lines.append(f"   Address: {host.hostname}:{host.port}")
+        lines.append(f"   Status: {'✅ Enabled' if host.enabled else '❌ Disabled'}")
+
+        # Changes section
+        lines.append("")
+        if changes:
+            lines.append(f"🔄 Modified Fields ({len(changes)}):")
+            for field, values in sorted(changes.items()):
+                old_val = values.get("old", "")
+                new_val = values.get("new", "")
+                # Format the change with before/after
+                lines.append(f"   • {field}:")
+                lines.append(f"      Before: {old_val if old_val else '(none)'}")
+                lines.append(f"      After:  {new_val if new_val else '(none)'}")
+        else:
+            lines.append("ℹ️  No changes detected (configuration already up to date)")
+
+        # Current configuration section
+        lines.append("")
+        lines.append("🔧 Current Configuration:")
+        lines.append(f"   SSH User: {host.user}")
+        if host.compose_path:
+            lines.extend(self._wrap_labelled_value("   Compose Path", host.compose_path, 70))
+        if host.appdata_path:
+            lines.extend(self._wrap_labelled_value("   Appdata Path", host.appdata_path, 70))
+        if host.tags:
+            lines.extend(self._wrap_labelled_value("   Tags", ", ".join(host.tags), 70))
+        if host.description:
+            lines.extend(self._wrap_labelled_value("   Description", host.description, 70))
+
+        # Next steps
+        lines.append("")
+        lines.append("💡 Next Steps:")
+        lines.append("   • Run 'docker_hosts test_connection' to verify changes")
+        lines.append("   • Run 'docker_hosts list' to see updated configuration")
+
+        lines.append("─" * 60)
+
+        return "\n".join(lines)
+
+    def _format_remove_host_output(self, host_id: str, hostname: str) -> str:
+        """Format enhanced host removal output with context and visual structure."""
+        lines = []
+
+        # Header with visual separator
+        lines.append("═" * 50)
+        lines.append("🗑️  Host Removal Complete")
+        lines.append("═" * 50)
+
+        # Host details
+        lines.append(f"✅ Host ID: {host_id}")
+        lines.append(f"   Hostname: {hostname}")
+
+        # Get host details if available from config before removal
+        if self.config and hasattr(self.config, "hosts"):
+            # Try to get additional context from other sources
+            lines.append("")
+            lines.append("📝 Removal Summary:")
+            lines.append(f"   • Configuration entries cleaned")
+            lines.append(f"   • Docker context removed (if exists)")
+            lines.append(f"   • Hot-reload triggered")
+
+        lines.append("")
+        lines.append("💡 Next Steps:")
+        lines.append(f"   • Run 'docker_hosts list' to verify removal")
+        lines.append(f"   • Add new host with 'docker_hosts add' if needed")
+
+        lines.append("─" * 50)
+
+        return "\n".join(lines)
+
+    def _format_test_connection_output(
+        self,
+        host_id: str,
+        hostname: str,
+        port: int,
+        docker_status: str,
+        docker_version: str | None,
+        docker_message: str,
+    ) -> str:
+        status_icon = {
+            "fully_available": "✓",
+            "version_only": "◐",
+            "not_available": "✗",
+        }.get(docker_status, "?")
+
+        lines = [f"SSH OK: {host_id} {hostname}:{port}"]
+        lines.append(f"Docker: {status_icon} {docker_message}")
+        if docker_version:
+            lines.append(f"Version: {docker_version}")
+        return "\n".join(lines)
+
+    def _format_discover_single_output(
+        self, host_id: str, discovery: dict[str, Any]
+    ) -> str:
+        compose_paths = discovery.get("compose_discovery", {}).get("paths", [])
+        appdata_paths = discovery.get("appdata_discovery", {}).get("paths", [])
+        recommendations = discovery.get("recommendations", [])
+
+        lines = [
+            f"Host Discovery on {host_id}",
+            (
+                f"Compose paths: {len(compose_paths)} | "
+                f"Appdata paths: {len(appdata_paths)} | "
+                f"Recommendations: {len(recommendations)}"
+            ),
+            "",
+        ]
+
+        if compose_paths:
+            lines.append("Compose paths:")
+            for path in compose_paths:
+                for wrapped in self._wrap_value(path, 72, prefer_path=True):
+                    lines.append(f"  {wrapped}")
+        else:
+            lines.append("Compose paths: none detected")
+
+        lines.append("")
+
+        if appdata_paths:
+            lines.append("Appdata paths:")
+            for path in appdata_paths:
+                for wrapped in self._wrap_value(path, 72, prefer_path=True):
+                    lines.append(f"  {wrapped}")
+        else:
+            lines.append("Appdata paths: none detected")
+
+        if recommendations:
+            lines.append("")
+            lines.append("Recommendations:")
+            for recommendation in recommendations:
+                message = (
+                    recommendation.get("message")
+                    if isinstance(recommendation, dict)
+                    else str(recommendation)
+                )
+                for wrapped in self._wrap_value(message, 72):
+                    lines.append(f"  • {wrapped}")
+
+        if discovery.get("helpful_guidance"):
+            lines.append("")
+            for wrapped in self._wrap_value(discovery["helpful_guidance"], 72):
+                lines.append(wrapped)
+
+        return "\n".join(lines).strip()
+
+    def _format_discover_all_output(self, result: dict[str, Any]) -> str:
+        discoveries = result.get("discoveries", {})
+        total_hosts = result.get("total_hosts", len(discoveries))
+        successful = result.get("successful_discoveries", 0)
+        summary = result.get("discovery_summary", {})
+        total_paths = summary.get("total_paths_found", 0)
+        total_recommendations = summary.get("total_recommendations", 0)
+
+        lines = [
+            "Host Discovery (all)",
+            (
+                f"Hosts: {total_hosts} | Successful: {successful} | "
+                f"Paths: {total_paths} | Recommendations: {total_recommendations}"
+            ),
+            "",
+        ]
+
+        header = f"{'Host':<14} {'OK':<3} {'Compose':<7} {'Appdata':<7} {'Recs':<4} {'Notes'}"
+        separator = f"{'-' * 14:<14} {'-' * 3:<3} {'-' * 7:<7} {'-' * 7:<7} {'-' * 4:<4} {'-' * 32}"
+        lines.extend([header, separator])
+
+        for host_id in sorted(discoveries):
+            discovery = discoveries[host_id]
+            compose_count = len(discovery.get("compose_discovery", {}).get("paths", []))
+            appdata_count = len(discovery.get("appdata_discovery", {}).get("paths", []))
+            rec_count = len(discovery.get("recommendations", []))
+            ok_icon = "✓" if discovery.get("success") else "✗"
+            note = discovery.get("error", "")
+
+            lines.append(
+                f"{host_id:<14} {ok_icon:<3} {compose_count:<7} {appdata_count:<7} {rec_count:<4} {note}"
+            )
+
+            if note:
+                for wrapped in self._wrap_value(note, 48):
+                    lines.append(f"{'':<14} {'':<3} {'':<7} {'':<7} {'':<4} {wrapped}")
+
+        return "\n".join(lines)
+
+    def _format_import_result_output(self, import_result: dict[str, Any]) -> str:
+        if not import_result.get("success", False):
+            return self._format_error_output(
+                "SSH import failed", import_result.get("error", "Unknown error")
+            )
+
+        if import_result.get("action") == "selection_required":
+            available = len(import_result.get("importable_hosts", []))
+            return f"SSH config parsed. {available} host(s) available for import. Provide `selected_hosts` to continue."
+
+        imported_hosts = import_result.get("imported_hosts", [])
+        host_lines = []
+        for host_info in imported_hosts:
+            host_lines.append(
+                f"  • {host_info.get(HOST_ID)} ({host_info.get('hostname')})"
+            )
+
+        summary = [
+            f"Imported {len(imported_hosts)} host(s) from SSH config",
+            *host_lines,
+        ]
+
+        if import_result.get("auto_discovery", {}).get("completed"):
+            summary.append(
+                f"Auto-discovery complete for {len(import_result['auto_discovery'].get('results', []))} host(s)"
+            )
+
+        return "\n".join(summary)
+
+    def _format_cleanup_output(self, result: dict[str, Any]) -> str:
+        host_id = result.get("host_id", "?")
+        cleanup_type = result.get("cleanup_type", result.get("mode", "unknown"))
+
+        lines = [f"Cleanup ({cleanup_type}) on {host_id}"]
+
+        if cleanup_type == "check":
+            reclaimable = result.get("total_reclaimable", "0B")
+            percentage = result.get("reclaimable_percentage", 0)
+            lines.append(f"Reclaimable: {reclaimable} ({percentage}%)")
+
+            summary = result.get("summary", {})
+            for resource, details in summary.items():
+                if not isinstance(details, dict):
+                    continue
+                parts = []
+                if "stopped" in details:
+                    parts.append(f"stopped {details.get('stopped')}")
+                if "unused" in details:
+                    parts.append(f"unused {details.get('unused')}")
+                if "reclaimable_space" in details:
+                    parts.append(f"reclaim {details.get('reclaimable_space')}")
+                if "size" in details:
+                    parts.append(f"size {details.get('size')}")
+                if parts:
+                    lines.append(f"{resource.title()}: {', '.join(parts)}")
+            if result.get("recommendations"):
+                lines.append("")
+                lines.append("Recommendations:")
+                for recommendation in result["recommendations"]:
+                    lines.append(f"  • {recommendation}")
+        else:
+            results = result.get("results", [])
+            for entry in results:
+                resource = entry.get("resource_type", "resource")
+                if entry.get("success"):
+                    lines.append(
+                        f"• {resource}: reclaimed {entry.get('space_reclaimed', '0B')}"
+                    )
+                else:
+                    lines.append(
+                        f"• {resource}: failed ({entry.get('error', 'unknown error')})"
+                    )
+
+        if result.get("message"):
+            lines.append("")
+            lines.append(result["message"])
+
+        return "\n".join(lines)
 
     async def _test_ssh_connection(
         self, hostname: str, user: str, port: int = 22, identity_file: str | None = None

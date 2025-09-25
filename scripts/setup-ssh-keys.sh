@@ -10,8 +10,10 @@ trap 'echo "[ERROR] Unexpected failure at line $LINENO (exit=$?): ${BASH_COMMAND
 
 # Configuration (matching install.sh conventions)
 DOCKER_MCP_DIR="${HOME}/.docker-mcp"
-SSH_KEY_NAME="id_ed25519"
+SSH_KEY_NAME="${DOCKER_MCP_SSH_KEY_NAME:-docker-mcp-key}"
 SSH_KEY_PATH="${DOCKER_MCP_DIR}/ssh/${SSH_KEY_NAME}"
+CONTAINER_SSH_KEY_PATH="${DOCKER_MCP_CONTAINER_SSH_KEY_PATH:-/home/dockermcp/.ssh/${SSH_KEY_NAME}}"
+ACTIVE_CONTAINER_SSH_KEY=""
 CONFIG_DIR="${DOCKER_MCP_DIR}/config"
 DATA_DIR="${DOCKER_MCP_DIR}/data"
 
@@ -470,12 +472,62 @@ generate_or_find_key() {
     local key_to_use=""
     
     if [ -n "$CUSTOM_KEY" ]; then
-        if [ -f "$CUSTOM_KEY" ]; then
-            key_to_use="$CUSTOM_KEY"
-            print_info "Using custom SSH key: $CUSTOM_KEY"
-        else
+        if [ ! -f "$CUSTOM_KEY" ]; then
             print_error "Custom key not found: $CUSTOM_KEY"
             return 1
+        fi
+
+        if [ "$CUSTOM_KEY" = "$SSH_KEY_PATH" ]; then
+            key_to_use="$SSH_KEY_PATH"
+            print_info "Using existing Docker MCP key: $SSH_KEY_PATH"
+        else
+            if [ "$DRY_RUN" = true ]; then
+                print_info "[DRY RUN] Would copy custom key $CUSTOM_KEY to $SSH_KEY_PATH"
+                key_to_use="$SSH_KEY_PATH"
+            else
+                print_info "Copying custom SSH key into Docker MCP directory..."
+
+                if ! mkdir -p "$(dirname "$SSH_KEY_PATH")" 2>/dev/null; then
+                    print_error "Failed to create SSH key directory: $(dirname "$SSH_KEY_PATH")"
+                    return 1
+                fi
+
+                if ! chmod 700 "$(dirname "$SSH_KEY_PATH")"; then
+                    print_error "Failed to set permissions on SSH key directory"
+                    return 1
+                fi
+
+                if ! cp "$CUSTOM_KEY" "$SSH_KEY_PATH"; then
+                    print_error "Failed to copy private key to $SSH_KEY_PATH"
+                    return 1
+                fi
+
+                if [ -f "${CUSTOM_KEY}.pub" ]; then
+                    if ! cp "${CUSTOM_KEY}.pub" "${SSH_KEY_PATH}.pub"; then
+                        print_error "Failed to copy public key to ${SSH_KEY_PATH}.pub"
+                        return 1
+                    fi
+                else
+                    print_warning "Public key not found alongside custom key; generating new public key"
+                    if ! ssh-keygen -y -f "$SSH_KEY_PATH" > "${SSH_KEY_PATH}.pub"; then
+                        print_error "Failed to generate public key from $CUSTOM_KEY"
+                        return 1
+                    fi
+                fi
+
+                if ! chmod 600 "$SSH_KEY_PATH"; then
+                    print_error "Failed to set permissions on private key"
+                    return 1
+                fi
+
+                if ! chmod 644 "${SSH_KEY_PATH}.pub"; then
+                    print_error "Failed to set permissions on public key"
+                    return 1
+                fi
+
+                key_to_use="$SSH_KEY_PATH"
+                print_success "Custom key copied to: $SSH_KEY_PATH"
+            fi
         fi
     elif [ -f "$SSH_KEY_PATH" ]; then
         key_to_use="$SSH_KEY_PATH"
@@ -546,6 +598,7 @@ generate_or_find_key() {
     
     # Export for use in distribution
     ACTIVE_SSH_KEY="$key_to_use"
+    ACTIVE_CONTAINER_SSH_KEY="$CONTAINER_SSH_KEY_PATH"
     echo
 }
 
@@ -656,7 +709,8 @@ scan_host_keys() {
 show_distribution_plan() {
     echo -e "${BLUE}Distribution Plan${NC}"
     echo "=================="
-    echo "SSH Key: $ACTIVE_SSH_KEY"
+    echo "SSH Key (host): $ACTIVE_SSH_KEY"
+    echo "SSH Key (container): $ACTIVE_CONTAINER_SSH_KEY"
     echo "Hosts to configure:"
     echo
     
@@ -749,6 +803,7 @@ distribute_keys_parallel() {
     export -f print_success
     export -f print_error
     export ACTIVE_SSH_KEY
+    export ACTIVE_CONTAINER_SSH_KEY
     export GREEN RED NC
     
     if [ "$HAS_PARALLEL" = true ]; then
@@ -864,7 +919,7 @@ EOF
         # Always quote hostname, user, and paths for safety
         safe_hostname="\"${hostname//\"/\\\"}\""
         safe_user="\"${user//\"/\\\"}\""
-        safe_identity_file="\"${ACTIVE_SSH_KEY//\"/\\\"}\""
+        safe_identity_file="\"${ACTIVE_CONTAINER_SSH_KEY//\"/\\\"}\""
         safe_description="\"Auto-imported from SSH config on $(date '+%Y-%m-%d %H:%M:%S')\""
         
         cat >> "$config_file" << EOF
@@ -997,7 +1052,8 @@ print_completion() {
     echo -e "${GREEN}========================================${NC}"
     echo
     echo "Summary:"
-    echo "  SSH Key: $ACTIVE_SSH_KEY"
+    echo "  SSH Key (host): $ACTIVE_SSH_KEY"
+    echo "  SSH Key (container): $ACTIVE_CONTAINER_SSH_KEY"
     echo "  Hosts configured: ${#SUCCESSFUL_HOSTS[@]}"
     echo "  Configuration: ${CONFIG_DIR}/hosts.yml"
     echo

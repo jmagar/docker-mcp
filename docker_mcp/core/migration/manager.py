@@ -1,13 +1,13 @@
 """Main migration orchestrator for Docker stack transfers."""
 
 import asyncio
+import json
 import shlex
 import subprocess
 from typing import Any
 
 import structlog
 
-from ...constants import DOCKER_COMPOSE_PROJECT
 from ..config_loader import DockerHost
 from ..exceptions import DockerMCPError
 from ..transfer import ArchiveUtils, RsyncTransfer
@@ -68,10 +68,13 @@ class MigrationManager:
         Returns:
             Tuple of (all_stopped, list_of_running_containers)
         """
-        # Check for running containers
-        check_cmd = ssh_cmd + [
-            f"docker ps --filter 'label={DOCKER_COMPOSE_PROJECT}={shlex.quote(stack_name)}' --format '{{{{.Names}}}}'"
-        ]
+        compose_cmd = (
+            "docker compose "
+            "--ansi never "
+            f"--project-name {shlex.quote(stack_name)} "
+            "ps --format json"
+        )
+        check_cmd = ssh_cmd + [compose_cmd]
 
         result = await asyncio.to_thread(
             subprocess.run,  # nosec B603
@@ -83,16 +86,34 @@ class MigrationManager:
         )
 
         if result.returncode != 0:
-            self.logger.warning(
-                "Failed to check container status",
+            error_message = result.stderr.strip() or result.stdout.strip() or "unknown error"
+            self.logger.error(
+                "docker compose ps verification failed",
                 stack=stack_name,
-                error=result.stderr,
+                error=error_message,
             )
-            return False, []
+            raise MigrationError(
+                f"docker compose ps failed while verifying shutdown: {error_message}"
+            )
 
-        running_containers = [
-            name.strip() for name in result.stdout.strip().split("\n") if name.strip()
-        ]
+        running_containers: list[str] = []
+        for line in result.stdout.splitlines():
+            payload = line.strip()
+            if not payload:
+                continue
+            try:
+                entry = json.loads(payload)
+            except json.JSONDecodeError:
+                self.logger.warning(
+                    "Failed to parse docker compose ps output line", line=payload
+                )
+                continue
+
+            state_value = str(entry.get("State") or entry.get("state") or "").lower()
+            if state_value.startswith("running") or state_value.startswith("up"):
+                name = entry.get("Name") or entry.get("name") or entry.get("ID")
+                if name:
+                    running_containers.append(str(name))
 
         if not running_containers:
             return True, []

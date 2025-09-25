@@ -252,7 +252,7 @@ environment: dict[str, str] = Field(default_factory=dict)
 
 ### Type Annotations
 ```python
-# Modern Python 3.10+ union syntax (PREFERRED)
+# Modern Python 3.11+ union syntax (PREFERRED)
 description: str | None = None
 memory_usage: int | None = None
 load_average: list[float] | None = None
@@ -532,7 +532,7 @@ async def create_validated_host(hostname: str, port: int = 22) -> AsyncValidated
     return host
 ```
 
-## Modern Type Features (Python 3.10+)
+## Modern Type Features (Python 3.11+)
 
 ### Generic Models with TypeVars
 ```python

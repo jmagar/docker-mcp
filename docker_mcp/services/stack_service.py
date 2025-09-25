@@ -52,11 +52,31 @@ class StackService:
 
     def _unwrap(self, result: ToolResult) -> dict[str, Any]:
         """Unwrap ToolResult for consistent structured content access."""
-        return (
-            result.structured_content
-            if hasattr(result, "structured_content") and result.structured_content is not None
-            else {"success": False, "error": "Invalid result format"}
-        )
+        if hasattr(result, "structured_content") and result.structured_content is not None:
+            structured = result.structured_content
+            if not isinstance(structured, dict):
+                structured = dict(structured)
+            else:
+                structured = dict(structured)
+
+            formatted_text = ""
+            if hasattr(result, "content") and result.content:
+                first_content = result.content[0]
+                formatted_text = getattr(first_content, "text", "") or ""
+            if formatted_text and "formatted_output" not in structured:
+                structured["formatted_output"] = formatted_text
+
+            if "formatted_output" in structured:
+                formatted_value = structured["formatted_output"]
+                ordered = {"formatted_output": formatted_value}
+                for key, value in structured.items():
+                    if key == "formatted_output":
+                        continue
+                    ordered[key] = value
+                return ordered
+
+            return structured
+        return {"success": False, "error": "Invalid result format"}
 
     # Core Operations - Delegate to StackOperations
 
@@ -181,6 +201,18 @@ class StackService:
         """Legacy method - delegate to operations module."""
         return self.operations._format_stacks_list(result, host_id)
 
+    def _format_deploy_result(self, result: dict[str, Any], stack_name: str, host_id: str) -> list[str]:
+        """Delegate to operations module for deployment result formatting."""
+        return self.operations._format_deploy_result(result, stack_name, host_id)
+
+    def _format_ps_result(self, result: dict[str, Any], stack_name: str) -> list[str]:
+        """Delegate to operations module for ps result formatting."""
+        return self.operations._format_ps_result(result, stack_name)
+
+    def _format_migrate_result(self, result: dict[str, Any], stack_name: str, source_host: str, target_host: str) -> list[str]:
+        """Delegate to operations module for migration result formatting."""
+        return self.operations._format_migrate_result(result, stack_name, source_host, target_host)
+
     # Utility methods that access specialized modules
 
     async def test_network_connectivity(
@@ -238,11 +270,12 @@ class StackService:
 
     async def _validate_compose_file_syntax(self, host_id: str, compose_content: str, environment: dict[str, str] | None = None) -> dict[str, Any]:
         """Validate compose file syntax using docker compose config."""
-        import tempfile
-        import os
         import asyncio
+        import os
+        import tempfile
+
         from ..utils import build_ssh_command
-        
+
         try:
             # Validate host exists
             is_valid, error_msg = self._validate_host(host_id)
@@ -252,29 +285,29 @@ class StackService:
                     "errors": [f"Host validation failed: {error_msg}"],
                     "details": {"host_error": error_msg}
                 }
-            
+
             host = self.config.hosts[host_id]
-            
+
             # Create temporary files for compose content and environment
             with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as compose_file:
                 compose_file.write(compose_content)
                 compose_file_path = compose_file.name
-            
+
             env_file_path = None
             if environment:
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.env', delete=False) as env_file:
                     for key, value in environment.items():
                         env_file.write(f"{key}={value}\n")
                     env_file_path = env_file.name
-            
+
             try:
                 # Build SSH command to validate compose file on remote host
                 ssh_cmd = build_ssh_command(host)
-                
+
                 # Transfer compose file to remote host for validation
                 remote_compose_path = f"/tmp/docker-mcp-validate-{os.path.basename(compose_file_path)}"
                 remote_env_path = f"/tmp/docker-mcp-validate-{os.path.basename(env_file_path)}" if env_file_path else None
-                
+
                 # Copy compose file to remote host
                 copy_cmd = ["scp"]
                 if host.port != 22:
@@ -282,19 +315,19 @@ class StackService:
                 if host.identity_file:
                     copy_cmd.extend(["-i", host.identity_file])
                 copy_cmd.extend([compose_file_path, f"{host.user}@{host.hostname}:{remote_compose_path}"])
-                
+
                 copy_process = await asyncio.create_subprocess_exec(
                     *copy_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
                 _, copy_stderr = await copy_process.communicate()
-                
+
                 if copy_process.returncode != 0:
                     return {
                         "valid": False,
                         "errors": [f"Failed to copy compose file to remote host: {copy_stderr.decode().strip()}"],
                         "details": {"copy_error": copy_stderr.decode().strip()}
                     }
-                
+
                 # Copy environment file if exists
                 if env_file_path and remote_env_path:
                     env_copy_cmd = ["scp"]
@@ -303,12 +336,12 @@ class StackService:
                     if host.identity_file:
                         env_copy_cmd.extend(["-i", host.identity_file])
                     env_copy_cmd.extend([env_file_path, f"{host.user}@{host.hostname}:{remote_env_path}"])
-                    
+
                     env_copy_process = await asyncio.create_subprocess_exec(
                         *env_copy_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                     )
                     await env_copy_process.communicate()
-                
+
                 # Run docker compose config validation on remote host
                 validate_cmd = ssh_cmd + [
                     f"cd /tmp && docker compose -f {remote_compose_path}"
@@ -316,23 +349,23 @@ class StackService:
                 if remote_env_path:
                     validate_cmd.extend(["--env-file", remote_env_path])
                 validate_cmd.extend(["config", "--quiet"])
-                
+
                 validate_process = await asyncio.create_subprocess_exec(
                     *validate_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
-                
+
                 stdout, stderr = await validate_process.communicate()
-                
+
                 # Clean up remote files
                 cleanup_cmd = ssh_cmd + [f"rm -f {remote_compose_path}"]
                 if remote_env_path:
                     cleanup_cmd.extend([f"; rm -f {remote_env_path}"])
-                
+
                 cleanup_process = await asyncio.create_subprocess_exec(
                     *cleanup_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
                 await cleanup_process.communicate()
-                
+
                 if validate_process.returncode == 0:
                     return {
                         "valid": True,
@@ -343,7 +376,7 @@ class StackService:
                     # Parse validation errors for user-friendly messages
                     error_output = stderr.decode().strip()
                     validation_errors = self._parse_compose_validation_errors(error_output)
-                    
+
                     return {
                         "valid": False,
                         "errors": validation_errors,
@@ -352,7 +385,7 @@ class StackService:
                             "docker_exit_code": validate_process.returncode
                         }
                     }
-                    
+
             finally:
                 # Clean up local temporary files
                 try:
@@ -361,7 +394,7 @@ class StackService:
                         os.unlink(env_file_path)
                 except OSError:
                     pass  # Files may have already been cleaned up
-                    
+
         except Exception as e:
             return {
                 "valid": False,
@@ -373,15 +406,15 @@ class StackService:
         """Parse docker compose validation errors into user-friendly messages."""
         if not error_output:
             return ["Unknown validation error"]
-        
+
         errors = []
         lines = error_output.split('\n')
-        
-        for line in lines:
-            line = line.strip()
+
+        for raw_line in lines:
+            line = raw_line.strip()
             if not line:
                 continue
-                
+
             # Common Docker Compose error patterns
             if "yaml:" in line.lower():
                 errors.append(f"YAML syntax error: {line}")
@@ -402,11 +435,11 @@ class StackService:
             else:
                 # Generic error
                 errors.append(f"Validation error: {line}")
-        
+
         # If no specific errors were parsed, return the original output
         if not errors:
             errors.append(f"Docker compose validation failed: {error_output}")
-            
+
         return errors
 
     async def handle_action(self, action: ComposeAction | str, **params) -> dict[str, Any]:
@@ -481,11 +514,21 @@ class StackService:
                 return action.lower().strip()
         return action
 
+    def _error_response(self, message: str, **extra: Any) -> dict[str, Any]:
+        formatted_text = f"❌ {message}"
+        response: dict[str, Any] = {
+            "success": False,
+            "error": message,
+            "formatted_output": formatted_text,
+        }
+        response.update(extra)
+        return response
+
     async def _handle_list_action(self, **params) -> dict[str, Any]:
         """Handle LIST action."""
         host_id = params.get("host_id", "")
         if not host_id:
-            return {"success": False, "error": "host_id is required for list action"}
+            return self._error_response("host_id is required for list action")
 
         result = await self.list_stacks(host_id)
         return self._unwrap(result)
@@ -496,9 +539,9 @@ class StackService:
         stack_name = params.get("stack_name", "")
 
         if not host_id:
-            return {"success": False, "error": "host_id is required for view action"}
+            return self._error_response("host_id is required for view action")
         if not stack_name:
-            return {"success": False, "error": "stack_name is required for view action"}
+            return self._error_response("stack_name is required for view action")
 
         result = await self.get_stack_compose_file(host_id, stack_name)
         return self._unwrap(result)
@@ -514,32 +557,25 @@ class StackService:
         recreate = params.get("recreate", False)
 
         if not host_id:
-            return {"success": False, "error": "host_id is required for deploy action"}
+            return self._error_response("host_id is required for deploy action")
         if not stack_name:
-            return {"success": False, "error": "stack_name is required for deploy action"}
+            return self._error_response("stack_name is required for deploy action")
         if not compose_content:
-            return {"success": False, "error": "compose_content is required for deploy action"}
+            return self._error_response("compose_content is required for deploy action")
 
         # Validate stack name format (allow underscores per IMPLEMENT_ME.md)
         if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$", stack_name):
-            return {
-                "success": False,
-                "error": "stack_name must contain only letters, numbers, underscores, and hyphens, starting with alphanumeric",
-            }
+            return self._error_response(
+                "stack_name must contain only letters, numbers, underscores, and hyphens, starting with alphanumeric"
+            )
 
         # Validate stack name length and reserved names
         if len(stack_name) > 63:
-            return {
-                "success": False,
-                "error": "stack_name must be 63 characters or fewer",
-            }
+            return self._error_response("stack_name must be 63 characters or fewer")
 
         reserved_names = {"docker", "compose", "system", "network", "volume"}
         if stack_name.lower() in reserved_names:
-            return {
-                "success": False,
-                "error": f"stack_name '{stack_name}' is reserved",
-            }
+            return self._error_response(f"stack_name '{stack_name}' is reserved")
 
         # Validate compose file syntax before deployment
         validation_result = await self._validate_compose_file_syntax(host_id, compose_content, environment)
@@ -548,7 +584,8 @@ class StackService:
                 "success": False,
                 "error": "Compose file validation failed",
                 "validation_errors": validation_result["errors"],
-                "validation_details": validation_result.get("details", {})
+                "validation_details": validation_result.get("details", {}),
+                "formatted_output": "❌ Compose file validation failed",
             }
 
         result = await self.deploy_stack(
@@ -566,9 +603,9 @@ class StackService:
         options = params.get("options", {})
 
         if not host_id:
-            return {"success": False, "error": f"host_id is required for {action_str} action"}
+            return self._error_response(f"host_id is required for {action_str} action")
         if not stack_name:
-            return {"success": False, "error": f"stack_name is required for {action_str} action"}
+            return self._error_response(f"stack_name is required for {action_str} action")
 
         result = await self.manage_stack(host_id, stack_name, action_str, options)
         return self._unwrap(result)
@@ -581,11 +618,11 @@ class StackService:
         lines = params.get("lines", 100)
 
         if not host_id:
-            return {"success": False, "error": "host_id is required for logs action"}
+            return self._error_response("host_id is required for logs action")
         if not stack_name:
-            return {"success": False, "error": "stack_name is required for logs action"}
+            return self._error_response("stack_name is required for logs action")
         if lines < 1 or lines > 10000:
-            return {"success": False, "error": "lines must be between 1 and 10000"}
+            return self._error_response("lines must be between 1 and 10000")
 
         try:
             if host_id not in self.config.hosts:
@@ -598,6 +635,12 @@ class StackService:
             if logs_data.get("success", False):
                 if "output" in logs_data:
                     logs_lines = logs_data["output"].split("\n") if logs_data["output"] else []
+                    header = f"Stack Logs: {stack_name} on {host_id} ({len(logs_lines)} lines)"
+                    formatted_lines = [header]
+                    if logs_lines:
+                        formatted_lines.append("")
+                        formatted_lines.extend(logs_lines)
+                    formatted_text = "\n".join(formatted_lines)
                     return {
                         "success": True,
                         "host_id": host_id,
@@ -606,14 +649,16 @@ class StackService:
                         "lines_requested": lines,
                         "lines_returned": len(logs_lines),
                         "follow": follow,
+                        "formatted_output": formatted_text,
                     }
+                logs_data.setdefault("formatted_output", "❌ Failed to retrieve stack logs")
                 return logs_data
-            return {"success": False, "error": "Failed to retrieve stack logs"}
+            return self._error_response("Failed to retrieve stack logs")
         except Exception as e:
             self.logger.error(
                 "stack logs error", host_id=host_id, stack_name=stack_name, error=str(e)
             )
-            return {"success": False, "error": f"Failed to get stack logs: {str(e)}"}
+            return self._error_response(f"Failed to get stack logs: {str(e)}")
 
     async def _handle_discover_action(self, **params) -> dict[str, Any]:
         """Handle DISCOVER action."""

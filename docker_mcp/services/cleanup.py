@@ -204,6 +204,16 @@ class CleanupService:
             "reclaimable_percentage": summary.get("totals", {}).get("reclaimable_percentage", 0),
             "recommendations": disk_usage_data.get("recommendations", []),
             "message": "📊 Cleanup (check) analysis complete - no actual cleanup was performed",
+            "formatted_output": self._build_formatted_output(
+                host_id,
+                "check",
+                {
+                    "summary": cleanup_summary,
+                    "total_reclaimable": summary.get("totals", {}).get("total_reclaimable", "0B"),
+                    "reclaimable_percentage": summary.get("totals", {}).get("reclaimable_percentage", 0),
+                    "recommendations": disk_usage_data.get("recommendations", []),
+                },
+            ),
         }
 
     async def _safe_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -232,6 +242,11 @@ class CleanupService:
             "mode": "safe",
             "results": results,
             "message": "Safe cleanup completed - removed stopped containers, networks, and cleaned build cache",
+            "formatted_output": self._build_formatted_output(
+                host_id,
+                "safe",
+                {"results": results},
+            ),
         }
 
     async def _moderate_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -250,6 +265,11 @@ class CleanupService:
             "Moderate cleanup completed - removed unused containers, networks, build cache, and images"
         )
 
+        safe_result["formatted_output"] = self._build_formatted_output(
+            host_id,
+            "moderate",
+            {"results": safe_result["results"]},
+        )
         return safe_result
 
     async def _aggressive_cleanup(self, host: DockerHost, host_id: str) -> dict[str, Any]:
@@ -269,7 +289,59 @@ class CleanupService:
             "build cache, images, and volumes"
         )
 
+        moderate_result["formatted_output"] = self._build_formatted_output(
+            host_id,
+            "aggressive",
+            {"results": moderate_result["results"]},
+        )
         return moderate_result
+
+    def _build_formatted_output(
+        self, host_id: str, cleanup_type: str, payload: dict[str, Any]
+    ) -> str:
+        lines = [f"Cleanup ({cleanup_type}) on {host_id}"]
+
+        if cleanup_type == "check":
+            reclaimable = payload.get("total_reclaimable", "0B")
+            percentage = payload.get("reclaimable_percentage", 0)
+            lines.append(f"Reclaimable: {reclaimable} ({percentage}%)")
+
+            summary = payload.get("summary", {})
+            for resource, details in summary.items():
+                if not isinstance(details, dict):
+                    continue
+                parts: list[str] = []
+                if "stopped" in details:
+                    parts.append(f"stopped {details.get('stopped')}")
+                if "unused" in details:
+                    parts.append(f"unused {details.get('unused')}")
+                if "reclaimable_space" in details:
+                    parts.append(f"reclaim {details.get('reclaimable_space')}")
+                if "size" in details:
+                    parts.append(f"size {details.get('size')}")
+                if parts:
+                    lines.append(f"{resource.title()}: {', '.join(parts)}")
+
+            recommendations = payload.get("recommendations", [])
+            if recommendations:
+                lines.append("")
+                lines.append("Recommendations:")
+                for recommendation in recommendations:
+                    lines.append(f"  • {recommendation}")
+        else:
+            results = payload.get("results", [])
+            for entry in results:
+                resource = entry.get("resource_type", "resource")
+                if entry.get("success"):
+                    lines.append(
+                        f"• {resource}: reclaimed {entry.get('space_reclaimed', '0B')}"
+                    )
+                else:
+                    lines.append(
+                        f"• {resource}: failed ({entry.get('error', 'unknown error')})"
+                    )
+
+        return "\n".join(lines)
 
     async def _run_cleanup_command(self, cmd: list[str], resource_type: str) -> dict[str, Any]:
         """Run a cleanup command and parse results."""
@@ -963,4 +1035,3 @@ class CleanupService:
         }
 
         return formatted
-

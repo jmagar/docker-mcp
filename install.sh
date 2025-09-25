@@ -17,10 +17,12 @@ NC='\033[0m' # No Color
 DOCKER_MCP_DIR="${HOME}/.docker-mcp"
 SSH_KEY_NAME="docker-mcp-key"
 SSH_KEY_PATH="${DOCKER_MCP_DIR}/ssh/${SSH_KEY_NAME}"
+CONTAINER_SSH_KEY_PATH="/home/dockermcp/.ssh/${SSH_KEY_NAME}"
 CONFIG_DIR="${DOCKER_MCP_DIR}/config"
 DATA_DIR="${DOCKER_MCP_DIR}/data"
 COMPOSE_URL="https://raw.githubusercontent.com/jmagar/docker-mcp/main/docker-compose.yaml"
 EXAMPLE_CONFIG_URL="https://raw.githubusercontent.com/jmagar/docker-mcp/main/config/hosts.example.yml"
+AUTO_APPROVE="${AUTO_APPROVE:-true}"
 
 # Functions
 print_header() {
@@ -42,10 +44,128 @@ print_warning() {
     echo -e "${YELLOW}⚠${NC} $1"
 }
 
+
 print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
 }
 
+auto_confirm() {
+    case "${AUTO_APPROVE,,}" in
+        y|yes|true|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+should_skip_host() {
+    local alias="$1"
+    local hostname="$2"
+
+    [[ -z "$alias" ]] && return 0
+    [[ "$alias" == "*" ]] && return 0
+    [[ "$alias" == "?" ]] && return 0
+    [[ "$alias" == "localhost" ]] && return 0
+    [[ "$alias" == "127.0.0.1" ]] && return 0
+    [[ "$hostname" == "localhost" ]] && return 0
+    [[ "$hostname" == "127.0.0.1" ]] && return 0
+
+    case "$hostname" in
+        github.com|gitlab.com|bitbucket.org) return 0 ;;
+    esac
+    case "$alias" in
+        github.com|gitlab.com|bitbucket.org) return 0 ;;
+    esac
+
+    return 1
+}
+
+collect_host_entries() {
+    local ssh_config="${HOME}/.ssh/config"
+    if [ ! -f "$ssh_config" ]; then
+        return 1
+    fi
+
+    declare -A seen_alias
+    local entries=()
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line="${line%$'
+'}"
+        [[ -z "$line" ]] && continue
+        if [[ $line =~ ^[Hh]ost[[:space:]]+(.+)$ ]]; then
+            local hosts_line="${BASH_REMATCH[1]}"
+            for alias in $hosts_line; do
+                [[ -z "$alias" ]] && continue
+                if [[ "$alias" == "host" ]]; then
+                    continue
+                fi
+                if [[ "$alias" == "host" ]] || [[ "$alias" == "none" ]]; then
+                    continue
+                fi
+                if [[ "$alias" == !* ]] || [[ "$alias" == *"*"* ]] || [[ "$alias" == *"?"* ]]; then
+                    continue
+                fi
+                if [[ -n "${seen_alias[$alias]}" ]]; then
+                    continue
+                fi
+                seen_alias[$alias]=1
+                local config_output
+                if ! config_output=$(ssh -G "$alias" 2>/dev/null); then
+                    continue
+                fi
+                local hostname user port
+                hostname=$(echo "$config_output" | awk '/^hostname / {print $2; exit}')
+                user=$(echo "$config_output" | awk '/^user / {print $2; exit}')
+                port=$(echo "$config_output" | awk '/^port / {print $2; exit}')
+                user=${user:-$USER}
+                port=${port:-22}
+                if ! should_skip_host "$alias" "$hostname"; then
+                    entries+=("$alias|$hostname|$user|$port")
+                fi
+            done
+        fi
+    done < "$ssh_config"
+
+    if [ ${#entries[@]} -eq 0 ]; then
+        return 1
+    fi
+
+    printf '%s
+' "${entries[@]}"
+}
+
+ensure_known_hosts() {
+    local entries
+    mapfile -t entries < <(collect_host_entries) || entries=()
+    if [ ${#entries[@]} -eq 0 ]; then
+        return
+    fi
+
+    local known_hosts_file="${DOCKER_MCP_DIR}/ssh/known_hosts"
+    touch "$known_hosts_file"
+    chmod 600 "$known_hosts_file"
+
+    if ! command -v ssh-keyscan >/dev/null 2>&1; then
+        print_warning "ssh-keyscan not available; host authenticity prompts may appear on first connect"
+        return
+    fi
+
+    local tmp
+    tmp=$(mktemp)
+    for entry in "${entries[@]}"; do
+        IFS='|' read -r alias hostname user port <<< "$entry"
+        hostname=${hostname:-$alias}
+        port=${port:-22}
+        if output=$(ssh-keyscan -T 10 -p "$port" -H "$hostname" 2>/dev/null); then
+            echo "$output" >> "$tmp"
+        else
+            print_warning "Could not prefetch host key for $hostname"
+        fi
+    done
+    cat "$tmp" >> "$known_hosts_file"
+    rm -f "$tmp"
+    sort -u "$known_hosts_file" -o "$known_hosts_file"
+}
 check_command() {
     if command -v "$1" &> /dev/null; then
         print_success "$1 is installed"
@@ -122,6 +242,10 @@ generate_ssh_keys() {
     
     if [ -f "${SSH_KEY_PATH}" ]; then
         print_warning "SSH key already exists at ${SSH_KEY_PATH}"
+        if auto_confirm; then
+            print_info "Using existing SSH key"
+            return
+        fi
         read -p "Do you want to regenerate it? (y/N): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -138,242 +262,132 @@ generate_ssh_keys() {
     echo
 }
 
-parse_ssh_config() {
-    local ssh_config="${HOME}/.ssh/config"
-    local hosts=()
-    
-    if [ ! -f "$ssh_config" ]; then
-        print_warning "No SSH config file found at $ssh_config"
-        return 1
-    fi
-    
-    echo -e "${BLUE}Parsing SSH config for hosts...${NC}"
-    echo
-    
-    # Parse SSH config for Host entries
-    while IFS= read -r line; do
-        if [[ $line =~ ^Host[[:space:]]+(.+)$ ]]; then
-            host="${BASH_REMATCH[1]}"
-            # Skip wildcards and special entries
-            if [[ ! "$host" =~ [\*\?] ]] && [[ "$host" != "github.com" ]] && [[ "$host" != "gitlab.com" ]]; then
-                hosts+=("$host")
-            fi
-        fi
-    done < "$ssh_config"
-    
-    if [ ${#hosts[@]} -eq 0 ]; then
-        print_warning "No suitable hosts found in SSH config"
-        return 1
-    fi
-    
-    print_success "Found ${#hosts[@]} host(s) in SSH config"
-    echo
-    
-    echo "Hosts found:"
-    for host in "${hosts[@]}"; do
-        echo "  - $host"
-    done
-    echo
-    
-    echo "$hosts"
-}
 
 copy_ssh_keys() {
     echo -e "${BLUE}Distributing SSH keys to hosts...${NC}"
     echo
-    
+
     if [ ! -f "${SSH_KEY_PATH}.pub" ]; then
         print_error "SSH public key not found at ${SSH_KEY_PATH}.pub"
         return 1
     fi
-    
-    local ssh_config="${HOME}/.ssh/config"
-    local hosts=()
-    
-    # Parse SSH config for hosts
-    if [ -f "$ssh_config" ]; then
-        while IFS= read -r line; do
-            if [[ $line =~ ^Host[[:space:]]+(.+)$ ]]; then
-                host="${BASH_REMATCH[1]}"
-                # Skip wildcards, localhost, and VCS hosts
-                if [[ ! "$host" =~ [\*\?] ]] && \
-                   [[ "$host" != "localhost" ]] && \
-                   [[ "$host" != "127.0.0.1" ]] && \
-                   [[ "$host" != "github.com" ]] && \
-                   [[ "$host" != "gitlab.com" ]] && \
-                   [[ "$host" != "bitbucket.org" ]]; then
-                    hosts+=("$host")
-                fi
-            fi
-        done < "$ssh_config"
-    fi
-    
-    if [ ${#hosts[@]} -eq 0 ]; then
+
+    local entries
+    mapfile -t entries < <(collect_host_entries) || entries=()
+
+    if [ ${#entries[@]} -eq 0 ]; then
         print_warning "No suitable hosts found in SSH config for key distribution"
-        print_info "You'll need to manually copy the public key to your Docker hosts:"
-        echo
-        echo "Public key location: ${SSH_KEY_PATH}.pub"
-        echo "Public key content:"
-        cat "${SSH_KEY_PATH}.pub"
+        print_info "Public key is available at ${SSH_KEY_PATH}.pub if you need to copy it manually"
         echo
         return
     fi
-    
-    print_info "Found ${#hosts[@]} host(s) for SSH key distribution"
-    echo
-    
-    echo "The installer will now copy the Docker MCP SSH key to the following hosts:"
-    for host in "${hosts[@]}"; do
-        echo "  - $host"
+
+    print_info "Preparing to copy SSH key to ${#entries[@]} host(s)"
+    for entry in "${entries[@]}"; do
+        IFS='|' read -r alias hostname user port <<< "$entry"
+        echo "  - ${alias} (${user}@${hostname}:${port})"
     done
     echo
-    
-    read -p "Do you want to proceed with key distribution? (y/N): " -n 1 -r
-    echo
-    
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+
+    local REPLY
+    if auto_confirm; then
+        REPLY="y"
+    else
+        read -p "Proceed with key distribution? (Y/n): " -n 1 -r
+        echo
+    fi
+
+    if [[ ! ${REPLY,,} =~ ^(y|)$ ]]; then
         print_warning "Skipping SSH key distribution"
-        print_info "You can manually copy the key later using:"
-        echo "  ssh-copy-id -i ${SSH_KEY_PATH} user@host"
+        print_info "You can manually copy the key later using: ssh-copy-id -i ${SSH_KEY_PATH} user@host"
         echo
         return
     fi
-    
+
     local failed_hosts=()
-    
-    for host in "${hosts[@]}"; do
-        echo -n "Copying key to $host... "
-        if command -v ssh-copy-id &> /dev/null; then
-            if ssh-copy-id -i "${SSH_KEY_PATH}" "$host" 2>/dev/null; then
+    for entry in "${entries[@]}"; do
+        IFS='|' read -r alias hostname user port <<< "$entry"
+        echo -n "Copying key to ${alias}... "
+        if command -v ssh-copy-id >/dev/null 2>&1; then
+            if ssh-copy-id -i "${SSH_KEY_PATH}" "${alias}" >/dev/null 2>&1; then
                 print_success "Success"
             else
                 print_error "Failed"
-                failed_hosts+=("$host")
+                failed_hosts+=("${alias}")
             fi
         else
-            # Manual method if ssh-copy-id is not available
-            if cat "${SSH_KEY_PATH}.pub" | ssh "$host" "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" 2>/dev/null; then
+            if cat "${SSH_KEY_PATH}.pub" | ssh "${alias}" "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" >/dev/null 2>&1; then
                 print_success "Success"
             else
                 print_error "Failed"
-                failed_hosts+=("$host")
+                failed_hosts+=("${alias}")
             fi
         fi
     done
-    
+
     echo
-    
+
     if [ ${#failed_hosts[@]} -gt 0 ]; then
-        print_warning "Failed to copy keys to some hosts:"
+        print_warning "Failed to copy keys to the following hosts:"
         for host in "${failed_hosts[@]}"; do
-            echo "  - $host"
+            echo "  - ${host}"
         done
         echo
-        print_info "You can manually copy the key using:"
-        echo "  ssh-copy-id -i ${SSH_KEY_PATH} user@host"
+        print_info "You can manually copy the key using: ssh-copy-id -i ${SSH_KEY_PATH} user@host"
         echo
     else
-        print_success "Successfully distributed SSH keys to all hosts!"
+        print_success "Successfully distributed SSH keys to all hosts"
         echo
     fi
 }
 
+
+
+
 generate_hosts_config() {
     echo -e "${BLUE}Generating hosts configuration...${NC}"
     echo
-    
+
     local config_file="${CONFIG_DIR}/hosts.yml"
-    local ssh_config="${HOME}/.ssh/config"
-    
-    # Start with the header
+    local entries
+    mapfile -t entries < <(collect_host_entries) || entries=()
+
     cat > "$config_file" << 'EOF'
 # Docker Manager MCP Configuration
 # Auto-generated from SSH config
 
 hosts:
 EOF
-    
-    if [ -f "$ssh_config" ]; then
-        local current_host=""
-        local hostname=""
-        local user=""
-        local port="22"
-        local identity_file=""
-        
-        while IFS= read -r line; do
-            if [[ $line =~ ^Host[[:space:]]+(.+)$ ]]; then
-                # Process previous host if exists
-                if [ -n "$current_host" ] && [ -n "$hostname" ] && [ -n "$user" ]; then
-                    # Skip localhost and VCS hosts
-                    if [[ "$hostname" != "localhost" ]] && \
-                       [[ "$hostname" != "127.0.0.1" ]] && \
-                       [[ ! "$current_host" =~ (github|gitlab|bitbucket) ]]; then
-                        cat >> "$config_file" << EOF
-  ${current_host}:
-    hostname: ${hostname}
-    user: ${user}
-    port: ${port}
-    identity_file: ${SSH_KEY_PATH}
-    description: "Imported from SSH config"
-    tags: ["imported", "ssh-config"]
-    enabled: true
-    
-EOF
-                    fi
-                fi
-                
-                # Start new host
-                current_host="${BASH_REMATCH[1]}"
-                # Skip wildcards
-                if [[ "$current_host" =~ [\*\?] ]]; then
-                    current_host=""
-                fi
-                # Reset values
-                hostname=""
-                user=""
-                port="22"
-                identity_file="${SSH_KEY_PATH}"
-                
-            elif [[ $line =~ ^[[:space:]]*HostName[[:space:]]+(.+)$ ]]; then
-                hostname="${BASH_REMATCH[1]}"
-            elif [[ $line =~ ^[[:space:]]*User[[:space:]]+(.+)$ ]]; then
-                user="${BASH_REMATCH[1]}"
-            elif [[ $line =~ ^[[:space:]]*Port[[:space:]]+(.+)$ ]]; then
-                port="${BASH_REMATCH[1]}"
-            fi
-        done < "$ssh_config"
-        
-        # Process last host
-        if [ -n "$current_host" ] && [ -n "$hostname" ] && [ -n "$user" ]; then
-            if [[ "$hostname" != "localhost" ]] && \
-               [[ "$hostname" != "127.0.0.1" ]] && \
-               [[ ! "$current_host" =~ (github|gitlab|bitbucket) ]]; then
-                cat >> "$config_file" << EOF
-  ${current_host}:
-    hostname: ${hostname}
-    user: ${user}
-    port: ${port}
-    identity_file: ${SSH_KEY_PATH}
-    description: "Imported from SSH config"
-    tags: ["imported", "ssh-config"]
-    enabled: true
-EOF
-            fi
-        fi
-    fi
-    
-    # Check if any hosts were added
-    if [ $(wc -l < "$config_file") -le 4 ]; then
+
+    if [ ${#entries[@]} -eq 0 ]; then
         print_warning "No hosts were imported from SSH config"
         print_info "Downloading example configuration..."
         curl -sSL "$EXAMPLE_CONFIG_URL" -o "$config_file"
         print_info "Please edit ${config_file} to add your Docker hosts"
-    else
-        print_success "Generated hosts configuration at ${config_file}"
+        echo
+        return
     fi
-    
+
+    for entry in "${entries[@]}"; do
+        IFS='|' read -r alias hostname user port <<< "$entry"
+        cat >> "$config_file" << EOF
+  ${alias}:
+    hostname: ${hostname}
+    user: ${user}
+    port: ${port}
+    identity_file: ${CONTAINER_SSH_KEY_PATH}
+    description: "Imported from SSH config"
+    tags: ["imported", "ssh-config"]
+    enabled: true
+
+EOF
+    done
+
+    print_success "Generated hosts configuration at ${config_file}"
     echo
 }
+
+
 
 find_available_port() {
     local start_port="${1:-8000}"
@@ -416,10 +430,7 @@ download_compose_file() {
             
             if available_port=$(find_available_port $desired_port); then
                 print_success "Found available port: $available_port"
-                
-                
-                # Store the port for later use
-                echo "FASTMCP_PORT=${available_port}" > "${DOCKER_MCP_DIR}/.env"
+
                 desired_port=$available_port
             else
                 print_error "Could not find an available port in range 8000-8100"
@@ -428,8 +439,12 @@ download_compose_file() {
             fi
         else
             print_success "Port $desired_port is available"
-            echo "FASTMCP_PORT=${desired_port}" > "${DOCKER_MCP_DIR}/.env"
         fi
+        
+        cat > "${DOCKER_MCP_DIR}/.env" << EOF
+FASTMCP_PORT=${desired_port}
+SSH_KEYS_HOST_PATH=${DOCKER_MCP_DIR}/ssh
+EOF
         
         # Export for use in other functions
         export FASTMCP_PORT=$desired_port
@@ -519,7 +534,10 @@ setup_ssh_with_standalone_script() {
     if [ -f "$script_path" ]; then
         print_info "Using standalone SSH setup script"
         # Use bash to invoke script (no dependency on executable bit)
-        if bash "$script_path" --batch; then
+        if DOCKER_MCP_SSH_KEY_NAME="$SSH_KEY_NAME" \
+           DOCKER_MCP_CONTAINER_SSH_KEY_PATH="$CONTAINER_SSH_KEY_PATH" \
+           DOCKER_MCP_DIR="$DOCKER_MCP_DIR" \
+           bash "$script_path" --batch; then
             print_success "SSH key distribution completed successfully"
         else
             print_warning "SSH setup script encountered issues, falling back to embedded functions"
@@ -530,6 +548,7 @@ setup_ssh_with_standalone_script() {
     else
         print_info "Standalone script not found, using embedded SSH setup"
         generate_ssh_keys
+        ensure_known_hosts
         copy_ssh_keys
         generate_hosts_config
     fi
@@ -542,6 +561,7 @@ main() {
     check_prerequisites
     create_directories
     setup_ssh_with_standalone_script
+    ensure_known_hosts
     download_compose_file
     start_services
     print_completion

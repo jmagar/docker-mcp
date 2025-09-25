@@ -357,10 +357,10 @@ async def test_list_containers(client: Client, test_host_id: str):
 
 ## Code Standards
 
-### Modern Type Hinting (Python 3.10+)
+### Modern Type Hinting (Python 3.11+)
 
 ```python
-# CORRECT: Modern Python 3.10+ union syntax
+# CORRECT: Modern Python 3.11+ union syntax
 config: dict[str, Any] | None = None
 result: list[ContainerInfo] | None = None
 hosts: dict[str, DockerHost] = {}
@@ -390,13 +390,13 @@ class OperationResult(BaseModel, Generic[T]):
 container_result: OperationResult[ContainerInfo] = await get_container_info(host_id, container_id)
 stack_list: list[StackInfo] = await list_stacks(host_id)
 
-# AVOID: Legacy Union syntax (pre-Python 3.10)
+# AVOID: Legacy Union syntax (pre-Python 3.11)
 from typing import Union, Optional  # Don't use these anymore
 config: Union[dict, None] = None  # Use dict | None instead
 result: Optional[list] = None     # Use list | None instead
 ```
 
-- **Type Hints**: Mandatory Python 3.10+ union syntax (`str | None` not `Optional[str]`)
+- **Type Hints**: Mandatory Python 3.11+ union syntax (`str | None` not `Optional[str]`)
 - **Type Aliases**: Use `TypeAlias` for complex recurring types (Python 3.12+)
 - **Pydantic Models**: All data structures with `Field(default_factory=list)`
 - **Generic Types**: Use modern `Generic[T]` syntax with union types

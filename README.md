@@ -2,7 +2,7 @@
 
 [![Docker Image](https://img.shields.io/badge/docker-ghcr.io%2Fjmagar%2Fdocker--mcp-blue)](https://github.com/jmagar/docker-mcp/pkgs/container/docker-mcp)
 [![Build Status](https://github.com/jmagar/docker-mcp/actions/workflows/docker-build.yml/badge.svg)](https://github.com/jmagar/docker-mcp/actions/workflows/docker-build.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-2.11.3%2B-green)](https://github.com/jamesturk/fastmcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -115,33 +115,28 @@ Consolidated Docker container management tool.
   - Required: host_id, container_id
   - Optional: force, timeout
 
-• **build**: Build/rebuild a container
+• **remove**: Remove a container
   - Required: host_id, container_id
-  - Optional: force, timeout
+  - Optional: force
 
 • **logs**: Get container logs
   - Required: host_id, container_id
   - Optional: follow, lines
 
-• **stats**: One-shot resource usage snapshot
-  - Required: host_id, container_id
-
-• **ports**: Show exposed host bindings for a container
-  - Required: host_id, container_id
+• **pull**: Pull a container image onto a host
+  - Required: host_id, image_name
 
 **Natural language examples:**
 ```
 "List all containers on production-1"
-"Show all containers including stopped ones on staging"
-"Get info about the nginx container on production-1"
+"Include stopped containers on staging"
+"Show info for the nginx container on production-1"
 "Start the wordpress container on production-1"
-"Stop the mysql database on staging"
+"Force stop the mysql database on staging with a 30 second timeout"
 "Restart the web server container on production-1"
-"Force stop the stuck container on production-1 with 30 second timeout"
-"Build the app container on staging"
-"Show logs for nginx on production-1"
-"Stream live logs from the api container on production-1"
-"Show last 500 lines from the database logs on staging"
+"Remove the old cache container from staging"
+"Tail the last 200 lines of logs for api-server on production-1"
+"Pull the latest nginx image on production-1"
 ```
 
 ### Tool 3: `docker_compose`
@@ -151,13 +146,19 @@ Consolidated Docker Compose stack management tool.
 • **list**: List stacks on a host
   - Required: host_id
 
+• **view**: View the compose file for a stack
+  - Required: host_id, stack_name
+
 • **deploy**: Deploy a stack
   - Required: host_id, stack_name, compose_content
   - Optional: environment, pull_images, recreate
 
-• **up/down/restart/build**: Manage stack lifecycle
+• **up/down/restart/build/pull**: Manage stack lifecycle
   - Required: host_id, stack_name
   - Optional: options
+
+• **ps**: Show stack services (status and ports)
+  - Required: host_id, stack_name
 
 • **discover**: Discover compose paths on a host
   - Required: host_id
@@ -169,9 +170,6 @@ Consolidated Docker Compose stack management tool.
 • **migrate**: Migrate stack between hosts
   - Required: host_id, target_host_id, stack_name
   - Optional: remove_source, skip_stop_source, start_target, dry_run
-
-• **ps**: Show stack services (status and ports)
-  - Required: host_id, stack_name
 
 **Natural language examples:**
 ```

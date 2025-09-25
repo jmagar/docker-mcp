@@ -53,6 +53,10 @@ class ContainerService:
             error=str(error),
             error_type=type(error).__name__,
         )
+        error_text = str(error) if error else ""
+        formatted_message = f"❌ {message}"
+        if error_text and error_text not in message:
+            formatted_message = f"{formatted_message}\nDetails: {error_text}"
         return {
             "success": False,
             "message": message,
@@ -62,6 +66,7 @@ class ContainerService:
             "error": str(error),
             "error_type": type(error).__name__,
             "timestamp": datetime.now(UTC).isoformat(),
+            "formatted_output": formatted_message,
         }
 
     def _validate_container_safety(self, container_id: str) -> tuple[bool, str]:
@@ -112,12 +117,12 @@ class ContainerService:
         """Check if a container exists on the host before performing operations."""
         try:
             # Use container tools to get container info (which checks existence)
-            container_info = await self.container_tools.get_container_info(host_id, container_id)
-            
-            if "error" in container_info:
+            container_result = await self.container_tools.get_container_info(host_id, container_id)
+
+            if "error" in container_result:
                 # Try to provide helpful suggestions
                 suggestion = ""
-                if "not found" in container_info["error"].lower():
+                if "not found" in container_result["error"].lower():
                     # Get list of available containers to suggest alternatives
                     containers_result = await self.container_tools.list_containers(host_id, all_containers=True, limit=10, offset=0)
                     if containers_result.get("success") and containers_result.get("containers"):
@@ -128,15 +133,17 @@ class ContainerService:
                             suggestion = f"Did you mean one of: {', '.join(similar_names[:3])}?"
                         else:
                             suggestion = f"Available containers: {', '.join(container_names[:5])}"
-                
+
                 return {
                     "exists": False,
-                    "error": container_info["error"],
+                    "error": container_result["error"],
                     "suggestion": suggestion
                 }
-            
+
+            # Container exists, extract info from result
+            container_info = container_result.get("info", container_result)
             return {"exists": True, "info": container_info}
-            
+
         except Exception as e:
             return {
                 "exists": False,
@@ -147,9 +154,9 @@ class ContainerService:
     def _enhance_operation_result(self, result: dict[str, Any], host_id: str, container_id: str, action: str) -> dict[str, Any]:
         """Enhance operation result with context and user-friendly messaging."""
         from datetime import UTC, datetime
-        
+
         enhanced = result.copy()
-        
+
         # Add operation context
         enhanced["operation_context"] = {
             "host_id": host_id,
@@ -158,7 +165,7 @@ class ContainerService:
             "timestamp": datetime.now(UTC).isoformat(),
             "operation_type": "container_management"
         }
-        
+
         # Create user-friendly messages
         if result.get("success"):
             action_messages = {
@@ -170,7 +177,7 @@ class ContainerService:
                 "unpause": f"Container '{container_id}' unpaused successfully on {host_id}"
             }
             enhanced["user_message"] = action_messages.get(action, f"Container operation '{action}' completed successfully")
-            
+
             # Add helpful next steps
             if action == "start":
                 enhanced["next_steps"] = [
@@ -185,22 +192,22 @@ class ContainerService:
         else:
             error_message = result.get("message", result.get("error", "Unknown error"))
             enhanced["user_message"] = f"Failed to {action} container '{container_id}' on {host_id}: {error_message}"
-            
+
             # Add troubleshooting hints
             enhanced["troubleshooting_hints"] = [
                 "Verify the container name is correct",
                 "Check if you have sufficient permissions",
                 "Ensure the container is in the correct state for this operation"
             ]
-            
+
             if "permission denied" in error_message.lower():
                 enhanced["troubleshooting_hints"].insert(0, "Check Docker daemon permissions and user group membership")
             elif "already" in error_message.lower():
                 enhanced["troubleshooting_hints"].insert(0, "Container may already be in the target state")
-        
+
         # Preserve original message in raw_message for debugging
         enhanced["raw_message"] = result.get("message", "")
-        
+
         return enhanced
 
     async def list_containers(
@@ -228,8 +235,6 @@ class ContainerService:
                 f"Docker Containers on {host_id}",
                 f"Showing {pagination['returned']} of {pagination['total']} containers",
                 "",
-                f"{'':1} {'Container':<25} {'Ports':<20} {'Project':<15}",
-                f"{'':1} {'-' * 25:<25} {'-' * 20:<20} {'-' * 15:<15}",
             ]
 
             for container in containers:
@@ -240,48 +245,85 @@ class ContainerService:
                     f"\nNext page: Use offset={pagination['offset'] + pagination['limit']}"
                 )
 
+            formatted_text = "\n".join(summary_lines)
             return ToolResult(
-                content=[TextContent(type="text", text="\n".join(summary_lines))],
+                content=[TextContent(type="text", text=formatted_text)],
                 structured_content={
                     "success": True,
                     HOST_ID: host_id,
                     "containers": containers,
                     "pagination": pagination,
+                    "formatted_output": formatted_text,
                 },
             )
 
         except Exception as e:
             self.logger.error("Failed to list containers", host_id=host_id, error=str(e))
+            formatted_text = f"❌ Failed to list containers: {str(e)}"
             return ToolResult(
-                content=[TextContent(type="text", text=f"❌ Failed to list containers: {str(e)}")],
-                structured_content={"success": False, "error": str(e), HOST_ID: host_id},
+                content=[TextContent(type="text", text=formatted_text)],
+                structured_content={
+                    "success": False,
+                    "error": str(e),
+                    HOST_ID: host_id,
+                    "formatted_output": formatted_text,
+                },
             )
 
     def _format_container_summary(self, container: dict[str, Any]) -> list[str]:
-        """Format container information for display - compact single line format."""
-        status_indicator = "●" if container["state"] == "running" else "○"
+        """Format container information for display - enhanced detailed format with full information."""
+        # Enhanced status indicators with more states
+        state = container.get("state", "unknown")
+        status_indicators = {
+            "running": "●",
+            "exited": "○",
+            "stopped": "○",
+            "paused": "⏸",
+            "restarting": "◐",
+            "created": "◯",
+            "dead": "✗",
+            "removing": "⊗"
+        }
+        status_indicator = status_indicators.get(state, "?")
 
-        # Extract first 3 host ports for compact display
+        # Show ALL ports without truncation
         ports = container.get("ports", [])
         if ports:
-            # Extract host ports from format like "0.0.0.0:8012→8000/tcp"
-            host_ports = []
-            for port in ports[:3]:  # Show max 3 ports
+            # Extract all port mappings without data loss
+            port_mappings: list[str] = []
+            for port in ports:
                 if ":" in port and "→" in port:
-                    host_port = port.split(":")[1].split("→")[0]
-                    host_ports.append(host_port)
-            ports_display = ",".join(host_ports)
-            if len(ports) > 3:
-                ports_display += f" +{len(ports) - 3} more"
+                    # Extract host port from format like "0.0.0.0:8080→80/tcp"
+                    host_part = port.split(":", 1)[1].split("→", 1)[0]
+                    container_part = port.split("→", 1)[1] if "→" in port else ""
+                    port_mappings.append(f"{host_part}→{container_part}" if container_part else host_part)
+                else:
+                    # Handle other port formats
+                    port_mappings.append(port)
+            ports_display = ", ".join(port_mappings)
         else:
             ports_display = "-"
 
-        # Truncate names for alignment
-        name = container["name"][:25]
-        project = container.get("compose_project", "-")[:15]
+        # Show full names without truncation
+        name = container["name"]
+        project = container.get("compose_project") or "-"
 
-        # Safe formatting without alignment to debug format string error
-        return [f"{status_indicator} {name} | {ports_display} | {project}"]
+        # Add network information if available
+        networks = container.get("networks", [])
+        networks_display = ", ".join(networks) if networks else "-"
+
+        # Enhanced multi-line format for better structure and readability
+        container_info = [
+            f"{status_indicator} {name}",
+            f"    Project: {project}",
+            f"    Ports: {ports_display}",
+        ]
+
+        # Add networks only if available to avoid clutter
+        if networks:
+            container_info.append(f"    Networks: {networks_display}")
+
+        return container_info
 
     async def get_container_info(self, host_id: str, container_id: str) -> ToolResult:
         """Get detailed information about a specific container."""
@@ -294,28 +336,34 @@ class ContainerService:
                 )
 
             # Use container tools to get container info
-            container_info = await self.container_tools.get_container_info(host_id, container_id)
+            container_result = await self.container_tools.get_container_info(host_id, container_id)
 
-            if "error" in container_info:
+            if "error" in container_result:
                 return ToolResult(
-                    content=[TextContent(type="text", text=f"Error: {container_info['error']}")],
+                    content=[TextContent(type="text", text=f"Error: {container_result['error']}")],
                     structured_content={
                         "success": False,
-                        "error": container_info["error"],
+                        "error": container_result["error"],
                         HOST_ID: host_id,
                         CONTAINER_ID: container_id,
                     },
                 )
 
+            info_payload = container_result.get("data")
+            container_info = info_payload if isinstance(info_payload, dict) else container_result
+
             summary_lines = self._format_container_details(container_info, container_id)
+            formatted_text = "\n".join(summary_lines)
 
             return ToolResult(
-                content=[TextContent(type="text", text="\n".join(summary_lines))],
+                content=[TextContent(type="text", text=formatted_text)],
                 structured_content={
                     "success": True,
                     HOST_ID: host_id,
                     CONTAINER_ID: container_id,
                     "info": container_info,
+                    "timestamp": container_result.get("timestamp"),
+                    "formatted_output": formatted_text,
                 },
             )
 
@@ -326,64 +374,169 @@ class ContainerService:
                 container_id=container_id,
                 error=str(e),
             )
+            formatted_text = f"❌ Failed to get container info: {str(e)}"
             return ToolResult(
-                content=[
-                    TextContent(type="text", text=f"❌ Failed to get container info: {str(e)}")
-                ],
+                content=[TextContent(type="text", text=formatted_text)],
                 structured_content={
                     "success": False,
                     "error": str(e),
                     HOST_ID: host_id,
                     CONTAINER_ID: container_id,
+                    "formatted_output": formatted_text,
                 },
             )
 
-    def _format_container_details(
-        self, container_info: dict[str, Any], container_id: str
-    ) -> list[str]:
-        """Format detailed container information for display."""
+    def _format_container_info(self, container_info: dict[str, Any], container_id: str) -> list[str]:
+        """Format comprehensive container information with ALL details in clean, structured format."""
         name = container_info.get("name", container_id)
-        status = container_info.get("status", "unknown")
+        state = container_info.get("state", "unknown")
         image = container_info.get("image", "unknown")
+        created = container_info.get("created", "unknown")
+
+        # Enhanced status indicators
+        status_indicators = {
+            "running": "● Running",
+            "exited": "○ Exited",
+            "stopped": "○ Stopped",
+            "paused": "⏸ Paused",
+            "restarting": "◐ Restarting",
+            "created": "◯ Created",
+            "dead": "✗ Dead",
+            "removing": "⊗ Removing"
+        }
+        status_display = status_indicators.get(state, f"? {state.title()}")
 
         summary_lines = [
-            f"Container: {name} ({container_id[:12]})",
+            f"━━━ Container Details: {name} ━━━",
+            f"Container ID: {container_id}",
+            f"Short ID: {container_id[:12]}",
+            f"Status: {status_display}",
             f"Image: {image}",
-            f"Status: {status}",
-            "",
+            f"Created: {created}",
+            ""
         ]
 
-        # Add volume information
-        volumes = container_info.get("volumes", [])
-        if volumes:
-            summary_lines.append("Volume Mounts:")
-            for volume in volumes[:10]:  # Show up to 10
-                summary_lines.append(f"  {volume}")
-            if len(volumes) > 10:
-                summary_lines.append(f"  ... and {len(volumes) - 10} more volumes")
+        # Runtime information
+        runtime_info = []
+        if container_info.get("command"):
+            runtime_info.append(f"Command: {container_info['command']}")
+        if container_info.get("args"):
+            runtime_info.append(f"Args: {', '.join(container_info['args'])}")
+        if container_info.get("working_dir"):
+            runtime_info.append(f"Working Dir: {container_info['working_dir']}")
+        if container_info.get("user"):
+            runtime_info.append(f"User: {container_info['user']}")
+
+        if runtime_info:
+            summary_lines.extend(["Runtime Configuration:"] + [f"  {info}" for info in runtime_info] + [""])
+
+        # Resource limits and usage (if available)
+        if container_info.get("memory_limit") or container_info.get("cpu_limit"):
+            summary_lines.append("Resource Limits:")
+            if container_info.get("memory_limit"):
+                summary_lines.append(f"  Memory: {container_info['memory_limit']}")
+            if container_info.get("cpu_limit"):
+                summary_lines.append(f"  CPU: {container_info['cpu_limit']}")
             summary_lines.append("")
 
-        # Add network information
+        # Network information - show ALL networks without truncation
         networks = container_info.get("networks", [])
         if networks:
-            summary_lines.append(f"Networks: {', '.join(networks)}")
+            summary_lines.append("Networks:")
+            for network in networks:
+                if isinstance(network, dict):
+                    network_name = network.get("name", "unknown")
+                    network_ip = network.get("ip", "")
+                    summary_lines.append(f"  • {network_name}" + (f" ({network_ip})" if network_ip else ""))
+                else:
+                    summary_lines.append(f"  • {network}")
             summary_lines.append("")
 
-        # Add compose information
-        compose_project = container_info.get("compose_project", "")
-        if compose_project:
-            summary_lines.append(f"Compose Project: {compose_project}")
-            compose_file = container_info.get("compose_file", "")
-            if compose_file:
-                summary_lines.append(f"Compose File: {compose_file}")
-            summary_lines.append("")
-
-        # Add port information
+        # Port information - show ALL ports with detailed mapping
         ports = container_info.get("ports", {})
         if ports:
             summary_lines.extend(self._format_port_mappings(ports))
 
+        # Volume information - show ALL volumes without truncation
+        volumes = container_info.get("volumes", [])
+        mounts = container_info.get("mounts", [])
+        all_mounts = volumes + mounts
+
+        if all_mounts:
+            summary_lines.append("Volume Mounts:")
+            for mount in all_mounts:
+                if isinstance(mount, dict):
+                    source = mount.get("source", mount.get("Source", ""))
+                    target = mount.get("target", mount.get("Destination", ""))
+                    mount_type = mount.get("type", mount.get("Type", "bind"))
+                    mode = mount.get("mode", mount.get("Mode", "rw"))
+                    summary_lines.append(f"  • {source} → {target} ({mount_type}, {mode})")
+                else:
+                    summary_lines.append(f"  • {mount}")
+            summary_lines.append("")
+
+        # Environment variables (if available and not sensitive)
+        env_vars = container_info.get("environment", [])
+        if env_vars and len(env_vars) <= 20:  # Only show if reasonable number
+            summary_lines.append("Environment Variables:")
+            for env_var in env_vars[:15]:  # Show up to 15
+                # Skip potentially sensitive variables
+                if any(sensitive in env_var.upper() for sensitive in ["PASSWORD", "SECRET", "TOKEN", "KEY", "PRIVATE"]):
+                    var_name = env_var.split("=")[0] if "=" in env_var else env_var
+                    summary_lines.append(f"  • {var_name}=[REDACTED]")
+                else:
+                    summary_lines.append(f"  • {env_var}")
+            if len(env_vars) > 15:
+                summary_lines.append(f"  • ... and {len(env_vars) - 15} more variables")
+            summary_lines.append("")
+
+        # Compose information
+        compose_project = container_info.get("compose_project", "")
+        if compose_project:
+            summary_lines.append("Docker Compose:")
+            summary_lines.append(f"  • Project: {compose_project}")
+            compose_file = container_info.get("compose_file", "")
+            if compose_file:
+                summary_lines.append(f"  • File: {compose_file}")
+            compose_service = container_info.get("compose_service", "")
+            if compose_service:
+                summary_lines.append(f"  • Service: {compose_service}")
+            summary_lines.append("")
+
+        # Labels (if available)
+        labels = container_info.get("labels", {})
+        if labels:
+            summary_lines.append("Labels:")
+            # Show important Docker/Compose labels first
+            important_labels = []
+            other_labels = []
+
+            for key, value in labels.items():
+                if any(prefix in key for prefix in ["com.docker.compose", "traefik", "org.label-schema"]):
+                    important_labels.append((key, value))
+                else:
+                    other_labels.append((key, value))
+
+            # Show important labels first
+            for key, value in important_labels[:10]:
+                summary_lines.append(f"  • {key}: {value}")
+
+            # Show other labels (limited)
+            for key, value in other_labels[:5]:
+                summary_lines.append(f"  • {key}: {value}")
+
+            total_labels = len(important_labels) + len(other_labels)
+            if total_labels > 15:
+                summary_lines.append(f"  • ... and {total_labels - 15} more labels")
+            summary_lines.append("")
+
         return summary_lines
+
+    def _format_container_details(
+        self, container_info: dict[str, Any], container_id: str
+    ) -> list[str]:
+        """Format detailed container information for display (legacy method - delegates to _format_container_info)."""
+        return self._format_container_info(container_info, container_id)
 
     def _format_port_mappings(self, ports: dict[str, Any]) -> list[str]:
         """Format port mappings for display."""
@@ -397,6 +550,230 @@ class ContainerService:
             else:
                 lines.append(f"  {container_port} (not exposed)")
         return lines
+
+    def _format_pull_progress(self, image_name: str, host_id: str, phase: str) -> str:
+        """Format image pull progress with visual indicators."""
+        if phase == "starting":
+            return f"◐ Starting image pull: {image_name}\n  → Host: {host_id}\n  → Status: Initiating pull operation..."
+        return f"◐ Pulling {image_name} on {host_id}"
+
+    def _format_pull_success(self, result: dict[str, Any], image_name: str, host_id: str) -> str:
+        """Format successful image pull with detailed feedback."""
+        message = result.get("message", "Image pulled successfully")
+
+        # Extract useful information from result
+        size = result.get("size", "")
+        digest = result.get("digest", "")
+        layers = result.get("layers", 0)
+
+        formatted_lines = [
+            f"✅ Image pull completed: {image_name}",
+            f"  → Host: {host_id}",
+            f"  → Status: {message}"
+        ]
+
+        # Add additional details if available
+        if size:
+            formatted_lines.append(f"  → Size: {size}")
+        if layers and layers > 0:
+            formatted_lines.append(f"  → Layers: {layers}")
+        if digest:
+            formatted_lines.append(f"  → Digest: {digest[:16]}...")
+
+        formatted_lines.append("  ✓ Ready for use")
+
+        return "\n".join(formatted_lines)
+
+    def _format_pull_error(self, result: dict[str, Any], image_name: str, host_id: str) -> str:
+        """Format image pull error with helpful context."""
+        error_msg = result.get("message", result.get("error", "Unknown error"))
+
+        formatted_lines = [
+            f"❌ Image pull failed: {image_name}",
+            f"  → Host: {host_id}",
+            f"  → Error: {error_msg}"
+        ]
+
+        # Add troubleshooting hints based on error type
+        if "not found" in error_msg.lower():
+            formatted_lines.extend([
+                "",
+                "Troubleshooting:",
+                "  • Verify the image name and tag are correct",
+                "  • Check if the image exists in the registry",
+                "  • Ensure you have access to the registry"
+            ])
+        elif "permission" in error_msg.lower() or "unauthorized" in error_msg.lower():
+            formatted_lines.extend([
+                "",
+                "Troubleshooting:",
+                "  • Check Docker registry authentication",
+                "  • Verify access permissions for the image",
+                "  • Try logging in to the registry first"
+            ])
+        elif "network" in error_msg.lower() or "timeout" in error_msg.lower():
+            formatted_lines.extend([
+                "",
+                "Troubleshooting:",
+                "  • Check network connectivity to the registry",
+                "  • Verify DNS resolution",
+                "  • Try again - network issues may be temporary"
+            ])
+
+        return "\n".join(formatted_lines)
+
+    def _format_container_logs(self, logs: list[str], container_id: str, host_id: str, lines_requested: int, truncated: bool) -> str:
+        """Format container logs with enhanced structure and visual indicators."""
+        if not logs:
+            return f"📝 No logs found for {container_id} on {host_id}"
+
+        # Create header with status indicators
+        status_icon = "⚠️" if truncated else "📝"
+        header_lines = [
+            f"{status_icon} Container Logs: {container_id}",
+            f"  → Host: {host_id}",
+            f"  → Lines: {len(logs)}/{lines_requested}" + (" (truncated)" if truncated else " (complete)"),
+            "─" * 60
+        ]
+
+        # Process log lines with optional enhancements
+        processed_logs = []
+        for i, log_line in enumerate(logs):
+            # Add line numbers for better reference (optional, only for short logs)
+            if len(logs) <= 50:
+                processed_logs.append(f"{i+1:3d} | {log_line}")
+            else:
+                processed_logs.append(log_line)
+
+        # Add footer with additional information
+        footer_lines = [
+            "─" * 60
+        ]
+
+        if truncated:
+            footer_lines.append("⚠️  Logs were truncated - use a larger 'lines' parameter to see more")
+
+        footer_lines.append(f"🔍 Use 'docker_container logs {container_id} --lines <N>' for more control")
+
+        all_lines = header_lines + processed_logs + footer_lines
+        return "\n".join(all_lines)
+
+    def _format_operation_result(self, result: dict[str, Any], operation: str, context: dict[str, Any]) -> str:
+        """Format consistent operation results for start/stop/restart responses with visual indicators."""
+        host_id = context.get("host_id", "unknown")
+        container_id = context.get("container_id", "unknown")
+
+        if result.get("success"):
+            # Success formatting with operation-specific icons and messages
+            operation_details = {
+                "start": {
+                    "icon": "▶️",
+                    "action": "started",
+                    "next_steps": [
+                        "Check logs: docker_container logs",
+                        "Monitor status: docker_container info",
+                        "View ports: docker_hosts ports"
+                    ]
+                },
+                "stop": {
+                    "icon": "⏹️",
+                    "action": "stopped",
+                    "next_steps": [
+                        "Restart if needed: docker_container start",
+                        "Remove if done: docker_container remove"
+                    ]
+                },
+                "restart": {
+                    "icon": "🔄",
+                    "action": "restarted",
+                    "next_steps": [
+                        "Check logs: docker_container logs",
+                        "Verify functionality: docker_container info"
+                    ]
+                },
+                "pause": {
+                    "icon": "⏸️",
+                    "action": "paused",
+                    "next_steps": [
+                        "Resume with: docker_container unpause"
+                    ]
+                },
+                "unpause": {
+                    "icon": "▶️",
+                    "action": "resumed",
+                    "next_steps": [
+                        "Check status: docker_container info"
+                    ]
+                },
+                "remove": {
+                    "icon": "🗑️",
+                    "action": "removed",
+                    "next_steps": [
+                        "Deploy new instance if needed"
+                    ]
+                }
+            }
+
+            details = operation_details.get(operation, {
+                "icon": "✅",
+                "action": f"{operation}ped",
+                "next_steps": []
+            })
+
+            formatted_lines = [
+                f"{details['icon']} Container {details['action']}: {container_id}",
+                f"  → Host: {host_id}",
+                f"  → Operation: {operation.title()}",
+            ]
+
+            # Add timing information if available
+            if result.get("duration"):
+                formatted_lines.append(f"  → Duration: {result['duration']}s")
+
+            # Add next steps
+            if details["next_steps"]:
+                formatted_lines.extend(["", "Next steps:"] + [f"  • {step}" for step in details["next_steps"]])
+
+            return "\n".join(formatted_lines)
+
+        else:
+            # Error formatting with troubleshooting hints
+            error_msg = result.get("message", result.get("error", "Unknown error"))
+
+            formatted_lines = [
+                f"❌ Container {operation} failed: {container_id}",
+                f"  → Host: {host_id}",
+                f"  → Error: {error_msg}"
+            ]
+
+            # Add operation-specific troubleshooting
+            if operation == "start":
+                formatted_lines.extend([
+                    "",
+                    "Troubleshooting:",
+                    "  • Check if container is already running",
+                    "  • Verify port conflicts: docker_hosts ports",
+                    "  • Check container logs for errors",
+                    "  • Ensure sufficient resources (CPU, memory)"
+                ])
+            elif operation == "stop":
+                formatted_lines.extend([
+                    "",
+                    "Troubleshooting:",
+                    "  • Try with force flag if container is unresponsive",
+                    "  • Check if container is already stopped",
+                    "  • Verify container exists: docker_container info"
+                ])
+            elif operation == "restart":
+                formatted_lines.extend([
+                    "",
+                    "Troubleshooting:",
+                    "  • Try stop then start separately",
+                    "  • Check container health before restart",
+                    "  • Verify no resource conflicts"
+                ])
+
+            return "\n".join(formatted_lines)
 
     async def manage_container(
         self, host_id: str, container_id: str, action: str, force: bool = False, timeout: int = 10
@@ -436,17 +813,16 @@ class ContainerService:
 
             # Enhance response with operation context and user-friendly formatting
             enhanced_result = self._enhance_operation_result(result, host_id, container_id, action)
-            
-            if enhanced_result["success"]:
-                return ToolResult(
-                    content=[TextContent(type="text", text=f"✅ {enhanced_result['user_message']}")],
-                    structured_content=enhanced_result,
-                )
-            else:
-                return ToolResult(
-                    content=[TextContent(type="text", text=f"❌ {enhanced_result['user_message']}")],
-                    structured_content=enhanced_result,
-                )
+
+            # Use new _format_operation_result for consistent formatting
+            context = {"host_id": host_id, "container_id": container_id}
+            formatted_text = self._format_operation_result(enhanced_result, action, context)
+            enhanced_result["formatted_output"] = formatted_text
+
+            return ToolResult(
+                content=[TextContent(type="text", text=formatted_text)],
+                structured_content=enhanced_result,
+            )
 
         except Exception as e:
             self.logger.error(
@@ -456,21 +832,21 @@ class ContainerService:
                 action=action,
                 error=str(e),
             )
+            formatted_text = f"❌ Failed to {action} container: {str(e)}"
             return ToolResult(
-                content=[
-                    TextContent(type="text", text=f"❌ Failed to {action} container: {str(e)}")
-                ],
+                content=[TextContent(type="text", text=formatted_text)],
                 structured_content={
                     "success": False,
                     "error": str(e),
                     HOST_ID: host_id,
                     CONTAINER_ID: container_id,
                     "action": action,
+                    "formatted_output": formatted_text,
                 },
             )
 
     async def pull_image(self, host_id: str, image_name: str) -> ToolResult:
-        """Pull a Docker image on a remote host."""
+        """Pull a Docker image on a remote host with enhanced progress indicators."""
         try:
             is_valid, error_msg = validate_host(self.config, host_id)
             if not is_valid:
@@ -479,17 +855,26 @@ class ContainerService:
                     structured_content={"success": False, "error": error_msg},
                 )
 
+            # Enhanced formatting for pull operation with progress indicators
+            formatted_text = self._format_pull_progress(image_name, host_id, "starting")
+
             # Use container tools to pull image
             result = await self.container_tools.pull_image(host_id, image_name)
 
             if result["success"]:
+                formatted_text = self._format_pull_success(result, image_name, host_id)
+                result = dict(result)
+                result["formatted_output"] = formatted_text
                 return ToolResult(
-                    content=[TextContent(type="text", text=f"Success: {result['message']}")],
+                    content=[TextContent(type="text", text=formatted_text)],
                     structured_content=result,
                 )
             else:
+                formatted_text = self._format_pull_error(result, image_name, host_id)
+                result = dict(result)
+                result["formatted_output"] = formatted_text
                 return ToolResult(
-                    content=[TextContent(type="text", text=f"Error: {result['message']}")],
+                    content=[TextContent(type="text", text=formatted_text)],
                     structured_content=result,
                 )
 
@@ -500,13 +885,15 @@ class ContainerService:
                 image_name=image_name,
                 error=str(e),
             )
+            formatted_text = f"❌ Image pull failed: {image_name}\n  Host: {host_id}\n  Error: {str(e)}"
             return ToolResult(
-                content=[TextContent(type="text", text=f"❌ Failed to pull image: {str(e)}")],
+                content=[TextContent(type="text", text=formatted_text)],
                 structured_content={
                     "success": False,
                     "error": str(e),
                     HOST_ID: host_id,
                     "image_name": image_name,
+                    "formatted_output": formatted_text,
                 },
             )
 
@@ -527,9 +914,10 @@ class ContainerService:
             data = result.get("data", {})
 
             summary_lines = self._format_port_usage_summary(result, host_id)
+            formatted_text = "\n".join(summary_lines)
 
             return ToolResult(
-                content=[TextContent(type="text", text="\n".join(summary_lines))],
+                content=[TextContent(type="text", text=formatted_text)],
                 structured_content={
                     "success": True,
                     HOST_ID: host_id,
@@ -540,14 +928,21 @@ class ContainerService:
                     "summary": data.get("summary", {}),
                     "cached": result.get("cached", False),
                     "timestamp": result.get("timestamp"),
+                    "formatted_output": formatted_text,
                 },
             )
 
         except Exception as e:
             self.logger.error("Failed to list host ports", host_id=host_id, error=str(e))
+            formatted_text = f"❌ Failed to list host ports: {str(e)}"
             return ToolResult(
-                content=[TextContent(type="text", text=f"❌ Failed to list host ports: {str(e)}")],
-                structured_content={"success": False, "error": str(e), HOST_ID: host_id},
+                content=[TextContent(type="text", text=formatted_text)],
+                structured_content={
+                    "success": False,
+                    "error": str(e),
+                    HOST_ID: host_id,
+                    "formatted_output": formatted_text,
+                },
             )
 
     def _format_port_usage_summary(self, result: dict[str, Any], host_id: str) -> list[str]:
@@ -677,7 +1072,11 @@ class ContainerService:
         try:
             is_valid, error_msg = validate_host(self.config, host_id)
             if not is_valid:
-                return {"success": False, "error": error_msg}
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "formatted_output": f"❌ Port check failed: {error_msg}",
+                }
 
             # Get current port usage (always include stopped containers)
             result = await self.container_tools.list_host_ports(host_id)
@@ -702,7 +1101,7 @@ class ContainerService:
 
             is_available = len(conflicts) == 0
 
-            return {
+            response: dict[str, Any] = {
                 "success": True,
                 HOST_ID: host_id,
                 "port": port,
@@ -710,6 +1109,31 @@ class ContainerService:
                 "conflicts": conflicts,
                 "message": f"Port {port} is {'available' if is_available else 'in use'}",
             }
+
+            conflicts_preview = []
+            if conflicts:
+                for conflict in conflicts[:5]:
+                    name = conflict.get("container_name", "unknown")
+                    protocol = conflict.get("protocol", "tcp").upper()
+                    conflicts_preview.append(f"  • {name} ({protocol})")
+                remaining = len(conflicts) - len(conflicts_preview)
+                if remaining > 0:
+                    conflicts_preview.append(f"  • +{remaining} more")
+
+            if is_available:
+                response["formatted_output"] = (
+                    f"Port {port} is available on {host_id}"
+                )
+            else:
+                formatted_lines = [
+                    f"Port {port} is in use on {host_id}",
+                ]
+                if conflicts_preview:
+                    formatted_lines.append("Conflicts:")
+                    formatted_lines.extend(conflicts_preview)
+                response["formatted_output"] = "\n".join(formatted_lines)
+
+            return response
 
         except Exception as e:
             self.logger.error(
@@ -720,6 +1144,7 @@ class ContainerService:
                 "error": f"Port check failed: {str(e)}",
                 HOST_ID: host_id,
                 "port": port,
+                "formatted_output": f"❌ Port check failed: {str(e)}",
             }
 
     async def handle_action(self, action, **params) -> dict[str, Any]:
@@ -734,6 +1159,7 @@ class ContainerService:
             # Extract common parameters
             host_id = params.get("host_id", "")
             container_id = params.get("container_id", "")
+            image_name = params.get("image_name", "")
             all_containers = params.get("all_containers", False)
             limit = params.get("limit", 20)
             offset = params.get("offset", 0)
@@ -758,8 +1184,8 @@ class ContainerService:
                 )
             elif action == ContainerAction.LOGS:
                 return await self._handle_logs_action(host_id, container_id, lines, follow)
-            elif action == "pull":
-                return await self._handle_pull_action(host_id, container_id)
+            elif action == ContainerAction.PULL or (isinstance(action, str) and action == "pull"):
+                return await self._handle_pull_action(host_id, image_name or container_id)
             else:
                 return self._handle_unknown_action(action)
 
@@ -915,6 +1341,9 @@ class ContainerService:
             if not isinstance(logs, list):
                 logs = []
 
+            # Enhanced logs formatting with better structure and visual indicators
+            formatted_text = self._format_container_logs(logs, container_id, host_id, lines, truncated)
+
             return {
                 "success": True,
                 "host_id": host_id,
@@ -924,6 +1353,7 @@ class ContainerService:
                 "lines_returned": len(logs),
                 "truncated": truncated,
                 "follow": follow,
+                "formatted_output": formatted_text,
             }
 
         except Exception as e:
@@ -935,7 +1365,7 @@ class ContainerService:
                 message="Failed to get container logs",
             )
 
-    async def _handle_pull_action(self, host_id: str, container_id: str) -> dict[str, Any]:
+    async def _handle_pull_action(self, host_id: str, image_name: str) -> dict[str, Any]:
         """Handle image pull action."""
         if not host_id:
             return self._build_error_response(
@@ -945,21 +1375,21 @@ class ContainerService:
                 error=ValueError("host_id missing"),
                 message="host_id is required for pull action",
             )
-        if not container_id:
+        if not image_name:
             return self._build_error_response(
                 host_id=host_id,
                 container_id=None,
                 action="pull",
                 error=ValueError("image name missing"),
-                message="container_id is required for pull action (image name)",
+                message="image_name is required for pull action",
             )
 
-        # For pull, container_id is actually the image name
-        result = await self.pull_image(host_id, container_id)
+        result = await self.pull_image(host_id, image_name)
         return self._extract_structured_content(result)
 
     def _handle_unknown_action(self, action) -> dict[str, Any]:
         """Handle unknown action."""
+        formatted_text = f"❌ Unknown action: {action}"
         return {
             "success": False,
             "error": f"Unknown action: {action}",
@@ -969,15 +1399,37 @@ class ContainerService:
                 "start",
                 "stop",
                 "restart",
+                "remove",
                 "logs",
                 "pull",
             ],
+            "formatted_output": formatted_text,
         }
 
     def _extract_structured_content(self, result) -> dict[str, Any]:
         """Extract structured content from ToolResult."""
-        return (
-            result.structured_content
-            if hasattr(result, "structured_content") and result.structured_content is not None
-            else {"success": False, "error": "Invalid result format"}
-        )
+        if hasattr(result, "structured_content") and result.structured_content is not None:
+            structured = result.structured_content
+            if not isinstance(structured, dict):
+                structured = dict(structured)
+            else:
+                structured = dict(structured)
+
+            formatted_text = ""
+            if hasattr(result, "content") and result.content:
+                first_content = result.content[0]
+                formatted_text = getattr(first_content, "text", "") or ""
+            if formatted_text and "formatted_output" not in structured:
+                structured["formatted_output"] = formatted_text
+
+            if "formatted_output" in structured:
+                formatted_value = structured["formatted_output"]
+                ordered = {"formatted_output": formatted_value}
+                for key, value in structured.items():
+                    if key == "formatted_output":
+                        continue
+                    ordered[key] = value
+                return ordered
+
+            return structured
+        return {"success": False, "error": "Invalid result format"}

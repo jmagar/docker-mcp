@@ -87,6 +87,7 @@ class DockerContainerParams(MCPModel):
     action: ContainerAction = Field(..., description="Action to perform")
     host_id: str = Field(default="", description="Host identifier")
     container_id: str = Field(default="", description="Container identifier")
+    image_name: str = Field(default="", description="Image name to pull (for pull action)")
     all_containers: bool = Field(
         default=False, description="Include all containers (not just running ones)"
     )

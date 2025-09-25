@@ -2,7 +2,7 @@
 
 ## AI Prompt Template Architecture
 
-### Modern Type-Safe Prompt Templates (Python 3.10+)
+### Modern Type-Safe Prompt Templates (Python 3.11+)
 ```python
 from typing import Annotated, TypedDict, Literal, Any
 from pydantic import BaseModel, Field, validator

@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed duplicate DockerContextManager import in migration_orchestrator.py
 - Added missing newline in GitHub Actions workflow command
 - Type annotations for list and dict parameters
-- Python 3.10+ compatibility by modernizing asyncio patterns
+- Python 3.11+ compatibility by modernizing asyncio patterns
 - Async executor patterns for better performance and maintainability
 
 ### Removed

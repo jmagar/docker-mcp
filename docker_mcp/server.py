@@ -935,23 +935,24 @@ class DockerMCPServer:
     async def docker_container(
         self,
         action: Annotated[str | ContainerAction, Field(description="Action to perform")],
-        host_id: Annotated[str, Field(default="", description="Host identifier")],
-        container_id: Annotated[str, Field(default="", description="Container identifier")],
+        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
+        container_id: Annotated[str, Field(default="", description="Container identifier")] = "",
+        image_name: Annotated[str, Field(default="", description="Image name for pull action")] = "",
         all_containers: Annotated[
             bool, Field(default=False, description="Include all containers, not just running")
-        ],
+        ] = False,
         limit: Annotated[
             int, Field(default=20, ge=1, le=1000, description="Maximum number of results to return")
-        ],
-        offset: Annotated[int, Field(default=0, ge=0, description="Number of results to skip")],
-        follow: Annotated[bool, Field(default=False, description="Follow log output")],
+        ] = 20,
+        offset: Annotated[int, Field(default=0, ge=0, description="Number of results to skip")] = 0,
+        follow: Annotated[bool, Field(default=False, description="Follow log output")] = False,
         lines: Annotated[
             int, Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve")
-        ],
-        force: Annotated[bool, Field(default=False, description="Force the operation")],
+        ] = 100,
+        force: Annotated[bool, Field(default=False, description="Force the operation")] = False,
         timeout: Annotated[
             int, Field(default=10, ge=1, le=300, description="Operation timeout in seconds")
-        ],
+        ] = 10,
     ) -> ToolResult | dict[str, Any]:
         """Consolidated Docker container management tool.
 
@@ -975,9 +976,16 @@ class DockerMCPServer:
           - Required: host_id, container_id
           - Optional: force, timeout
 
+        • remove: Remove a container
+          - Required: host_id, container_id
+          - Optional: force
+
         • logs: Get container logs
           - Required: host_id, container_id
           - Optional: follow, lines
+
+        • pull: Pull a container image
+          - Required: host_id, image_name
         """
         # Parse and validate parameters using the parameter model
         try:
@@ -991,6 +999,7 @@ class DockerMCPServer:
                 action=action_enum,
                 host_id=host_id,
                 container_id=container_id,
+                image_name=image_name,
                 all_containers=all_containers,
                 limit=limit,
                 offset=offset,
@@ -1058,11 +1067,14 @@ class DockerMCPServer:
         • list: List stacks on a host
           - Required: host_id
 
+        • view: View the compose file for a stack
+          - Required: host_id, stack_name
+
         • deploy: Deploy a stack
           - Required: host_id, stack_name, compose_content
           - Optional: environment, pull_images, recreate
 
-        • up/down/restart/build: Manage stack lifecycle
+        • up/down/restart/build/pull: Manage stack lifecycle
           - Required: host_id, stack_name
           - Optional: options
 

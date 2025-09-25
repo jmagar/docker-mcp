@@ -43,7 +43,7 @@ class ContainerService:
 - **Services**: Business logic, validation, formatting, error handling, user experience
 - **Tools**: Direct Docker operations, raw data processing, technical implementation
 
-## Modern Validation Patterns (Python 3.10+)
+## Modern Validation Patterns (Python 3.11+)
 
 ### Pydantic v2 Input Validation
 ```python

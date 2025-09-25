@@ -5,18 +5,15 @@ import json
 import shlex
 import subprocess
 import time
-from collections import defaultdict
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import docker
 import structlog
 
-from ..constants import DOCKER_COMPOSE_PROJECT, DOCKER_COMPOSE_SERVICE
 from ..core.compose_manager import ComposeManager
-from ..core.config_loader import DockerMCPConfig
+from ..core.config_loader import DockerHost, DockerMCPConfig
 from ..core.docker_context import DockerContextManager
 from ..core.exceptions import DockerCommandError, DockerContextError
 from ..models.container import StackInfo
@@ -106,82 +103,89 @@ class StackTools:
             List of stacks
         """
         try:
-            client = await self.context_manager.get_client(host_id)
-            if client is None:
-                return {"success": False, "error": f"Could not connect to Docker on host {host_id}"}
+            host_config = self.config.hosts.get(host_id)
+            if not host_config:
+                return {
+                    "success": False,
+                    "error": f"Host '{host_id}' not found",
+                    "host_id": host_id,
+                    "timestamp": datetime.now().isoformat(),
+                }
 
-            # Get all containers and group by compose project using Docker SDK
-            containers = await asyncio.to_thread(client.containers.list, all=True)
+            compose_list_output = await self._run_ssh_command(
+                host_config,
+                "docker compose ls --all --format json",
+                timeout=30,
+            )
 
-            # Group containers by compose project
-            projects = defaultdict(list)
-            for container in containers:
-                labels = container.labels or {}
-                project_name = labels.get(DOCKER_COMPOSE_PROJECT)
-                if project_name:
-                    service_name = labels.get(DOCKER_COMPOSE_SERVICE, "")
-                    projects[project_name].append(
-                        {
-                            "container": container,
-                            "service": service_name,
-                            "status": container.status,
-                            "created": container.attrs.get("Created", ""),
-                        }
-                    )
+            if compose_list_output.returncode != 0:
+                error_msg = compose_list_output.stderr.strip() or compose_list_output.stdout.strip()
+                logger.error(
+                    "Failed to list compose projects",
+                    host_id=host_id,
+                    error=error_msg,
+                )
+                return {
+                    "success": False,
+                    "error": f"docker compose ls failed: {error_msg}",
+                    "host_id": host_id,
+                    "timestamp": datetime.now().isoformat(),
+                }
 
-            # Convert to StackInfo objects with resource usage
-            stacks = []
-            for project_name, project_containers in projects.items():
-                # Determine overall project status
-                statuses = [c["status"] for c in project_containers]
-                if all(s == "running" for s in statuses):
-                    project_status = "running"
-                elif any(s == "running" for s in statuses):
-                    project_status = "partial"
-                else:
-                    project_status = "stopped"
+            projects = self._parse_compose_ls(compose_list_output.stdout)
+            stacks: list[dict[str, Any]] = []
 
-                # Get unique services and timestamps
-                services = list(set(c["service"] for c in project_containers if c["service"]))
-                created_times = [c["created"] for c in project_containers if c["created"]]
+            for project in projects:
+                project_name = project.get("Name") or project.get("name")
+                if not project_name:
+                    continue
 
-                # Convert created times to datetime objects
-                created_datetimes = []
-                for created_str in created_times:
-                    if created_str and isinstance(created_str, str):
-                        try:
-                            # Parse ISO format timestamp (Docker API format)
-                            # Handle both with and without microseconds
-                            if "." in created_str:
-                                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                            else:
-                                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                            created_datetimes.append(created_dt)
-                        except (ValueError, TypeError):
-                            # Skip invalid timestamp formats
-                            continue
+                compose_files = project.get("ConfigFiles") or project.get("config_files") or ""
+                compose_file = compose_files.split(",")[0].strip() if compose_files else None
 
-                created = min(created_datetimes) if created_datetimes else None
-
-                # Collect resource usage information
-                resource_usage = await self._collect_stack_resource_usage(
-                    client, project_name, project_containers
+                ps_output = await self._run_ssh_command(
+                    host_config,
+                    self._build_compose_ps_command(project_name, compose_file),
+                    timeout=30,
                 )
 
-                # Create stack info with resource usage
-                stack_data = StackInfo(
+                if ps_output.returncode != 0:
+                    error_msg = ps_output.stderr.strip() or ps_output.stdout.strip()
+                    logger.debug(
+                        "docker compose ps failed",
+                        host_id=host_id,
+                        project=project_name,
+                        error=error_msg,
+                    )
+                    services_info: list[dict[str, Any]] = []
+                else:
+                    services_info = self._parse_compose_ps(ps_output.stdout)
+                service_names = sorted(
+                    {svc.get("Service") or svc.get("service") or svc.get("Name") for svc in services_info}
+                )
+                service_names = [name for name in service_names if name]
+
+                service_states = [
+                    (svc.get("State") or svc.get("state") or "").lower() for svc in services_info
+                ]
+                if service_states and all(state.startswith("running") or state.startswith("up") for state in service_states):
+                    aggregate_status = "running"
+                elif any(state.startswith("running") or state.startswith("up") for state in service_states):
+                    aggregate_status = "partial"
+                else:
+                    aggregate_status = (project.get("Status") or project.get("status") or "unknown").lower()
+
+                stack_info = StackInfo(
                     name=project_name,
                     host_id=host_id,
-                    services=services,
-                    status=project_status,
-                    created=created,
-                    updated=created,  # Docker SDK doesn't provide separate updated time
+                    services=service_names,
+                    status=aggregate_status,
+                    created=self._parse_datetime(project.get("CreatedAt") or project.get("created")),
+                    updated=self._parse_datetime(project.get("UpdatedAt") or project.get("updated")),
+                    compose_file=compose_file,
                 ).model_dump()
-                
-                # Add resource usage information
-                stack_data["resource_usage"] = resource_usage
-                
-                stacks.append(stack_data)
+
+                stacks.append(stack_info)
 
             logger.info("Listed stacks", host_id=host_id, count=len(stacks))
             return {
@@ -191,15 +195,7 @@ class StackTools:
                 "timestamp": datetime.now().isoformat(),
             }
 
-        except docker.errors.APIError as e:
-            logger.error("Docker API error listing stacks", host_id=host_id, error=str(e))
-            return {
-                "success": False,
-                "error": f"Docker API error: {str(e)}",
-                "host_id": host_id,
-                "timestamp": datetime.now().isoformat(),
-            }
-        except (DockerCommandError, DockerContextError) as e:
+        except Exception as e:
             logger.error("Failed to list stacks", host_id=host_id, error=str(e))
             return {
                 "success": False,
@@ -522,6 +518,96 @@ class StackTools:
         quoted_compose = " ".join(shlex.quote(arg) for arg in compose_cmd)
         return f"{quoted_cd} &&{env_prefix} {quoted_compose}"
 
+    async def _run_ssh_command(
+        self, host: DockerHost, command: str, timeout: int = 60
+    ) -> subprocess.CompletedProcess[str]:
+        ssh_cmd = build_ssh_command(host)
+        ssh_cmd.append(command)
+        return await asyncio.to_thread(
+            subprocess.run,  # nosec B603
+            ssh_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    def _parse_compose_ls(self, output: str) -> list[dict[str, Any]]:
+        if not output:
+            return []
+
+        text = output.strip()
+        if not text:
+            return []
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return [parsed]
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            entries: list[dict[str, Any]] = []
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.debug("Failed to parse docker compose ls line", line=line)
+            return entries
+
+        return []
+
+    def _build_compose_ps_command(self, project_name: str, compose_file: str | None) -> str:
+        command = ["docker", "compose", "--project-name", project_name]
+        if compose_file:
+            command.extend(["-f", compose_file])
+        command.extend(["ps", "--all", "--format", "json"])
+        return " ".join(shlex.quote(part) for part in command)
+
+    def _parse_compose_ps(self, output: str) -> list[dict[str, Any]]:
+        if not output:
+            return []
+
+        text = output.strip()
+        if not text:
+            return []
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return [parsed]
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            entries: list[dict[str, Any]] = []
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.debug("Failed to parse docker compose ps line", line=line)
+            return entries
+
+        return []
+
+    def _parse_datetime(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
     async def manage_stack(
         self, host_id: str, stack_name: str, action: str, options: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -707,8 +793,9 @@ class StackTools:
             args.append("--force-recreate")
         if options.get("build", False):
             args.append("--build")
-        if options.get("pull", True):
-            args.extend(["--pull", "always"])
+        if options.get("pull"):
+            pull_policy = options.get("pull_policy", "always")
+            args.extend(["--pull", pull_policy])
         return args
 
     def _add_service_filter(self, compose_args: list[str], options: dict[str, Any]) -> None:
@@ -917,179 +1004,6 @@ class StackTools:
             "action": action,
             "timestamp": datetime.now().isoformat(),
         }
-
-    async def _collect_stack_resource_usage(
-        self, client: docker.DockerClient, project_name: str, project_containers: list[dict]
-    ) -> dict[str, Any]:
-        """Collect resource usage statistics for a stack.
-        
-        Args:
-            client: Docker client instance
-            project_name: Name of the Docker Compose project
-            project_containers: List of containers in the project
-            
-        Returns:
-            Dictionary with resource usage information
-        """
-        resource_stats = {
-            "total_memory_usage": 0,
-            "total_memory_limit": 0,
-            "total_cpu_usage": 0.0,
-            "total_storage_usage": 0,
-            "container_count": len(project_containers),
-            "running_containers": 0,
-            "network_usage": {"rx_bytes": 0, "tx_bytes": 0},
-            "service_breakdown": [],
-            "collection_timestamp": datetime.now().isoformat(),
-            "collection_errors": []
-        }
-
-        try:
-            for container_info in project_containers:
-                container = container_info["container"]
-                service_name = container_info["service"]
-                
-                service_stats = {
-                    "service_name": service_name,
-                    "container_id": container.id[:12],
-                    "status": container.status,
-                    "memory_usage": 0,
-                    "memory_limit": 0,
-                    "cpu_percentage": 0.0,
-                    "storage_usage": 0,
-                    "network_rx": 0,
-                    "network_tx": 0,
-                    "collection_success": False
-                }
-
-                try:
-                    # Only collect stats for running containers
-                    if container.status == "running":
-                        resource_stats["running_containers"] += 1
-                        
-                        # Get container stats (non-blocking, single sample)
-                        stats_gen = await asyncio.to_thread(container.stats, stream=False)
-                        
-                        if stats_gen:
-                            # Memory usage
-                            memory_stats = stats_gen.get("memory_stats", {})
-                            if memory_stats:
-                                memory_usage = memory_stats.get("usage", 0)
-                                memory_limit = memory_stats.get("limit", 0)
-                                service_stats["memory_usage"] = memory_usage
-                                service_stats["memory_limit"] = memory_limit
-                                resource_stats["total_memory_usage"] += memory_usage
-                                resource_stats["total_memory_limit"] += memory_limit
-
-                            # CPU usage calculation
-                            cpu_stats = stats_gen.get("cpu_stats", {})
-                            precpu_stats = stats_gen.get("precpu_stats", {})
-                            
-                            if cpu_stats and precpu_stats:
-                                cpu_usage = self._calculate_cpu_percentage(cpu_stats, precpu_stats)
-                                service_stats["cpu_percentage"] = cpu_usage
-                                resource_stats["total_cpu_usage"] += cpu_usage
-
-                            # Network usage
-                            networks = stats_gen.get("networks", {})
-                            for network_name, network_stats in networks.items():
-                                rx_bytes = network_stats.get("rx_bytes", 0)
-                                tx_bytes = network_stats.get("tx_bytes", 0)
-                                service_stats["network_rx"] += rx_bytes
-                                service_stats["network_tx"] += tx_bytes
-                                resource_stats["network_usage"]["rx_bytes"] += rx_bytes
-                                resource_stats["network_usage"]["tx_bytes"] += tx_bytes
-
-                            service_stats["collection_success"] = True
-
-                    # Get container size information
-                    try:
-                        container_inspect = await asyncio.to_thread(client.api.inspect_container, container.id)
-                        size_info = container_inspect.get("SizeRw", 0) or 0
-                        service_stats["storage_usage"] = size_info
-                        resource_stats["total_storage_usage"] += size_info
-                    except Exception as size_error:
-                        logger.debug(
-                            "Failed to get container size",
-                            container_id=container.id[:12],
-                            error=str(size_error)
-                        )
-
-                except Exception as container_error:
-                    error_msg = f"Failed to collect stats for {service_name}: {str(container_error)}"
-                    resource_stats["collection_errors"].append(error_msg)
-                    logger.warning(
-                        "Container stats collection failed",
-                        service_name=service_name,
-                        container_id=container.id[:12],
-                        error=str(container_error)
-                    )
-
-                resource_stats["service_breakdown"].append(service_stats)
-
-            # Calculate averages and add summary information
-            if resource_stats["running_containers"] > 0:
-                resource_stats["average_cpu_per_container"] = (
-                    resource_stats["total_cpu_usage"] / resource_stats["running_containers"]
-                )
-                resource_stats["average_memory_per_container"] = (
-                    resource_stats["total_memory_usage"] / resource_stats["running_containers"]
-                )
-            else:
-                resource_stats["average_cpu_per_container"] = 0.0
-                resource_stats["average_memory_per_container"] = 0
-
-            # Convert bytes to human-readable format for summary
-            resource_stats["memory_usage_mb"] = resource_stats["total_memory_usage"] / (1024 * 1024)
-            resource_stats["memory_limit_mb"] = resource_stats["total_memory_limit"] / (1024 * 1024)
-            resource_stats["storage_usage_mb"] = resource_stats["total_storage_usage"] / (1024 * 1024)
-            resource_stats["network_rx_mb"] = resource_stats["network_usage"]["rx_bytes"] / (1024 * 1024)
-            resource_stats["network_tx_mb"] = resource_stats["network_usage"]["tx_bytes"] / (1024 * 1024)
-
-            logger.debug(
-                "Resource usage collected for stack",
-                project_name=project_name,
-                containers=resource_stats["container_count"],
-                running=resource_stats["running_containers"],
-                memory_mb=round(resource_stats["memory_usage_mb"], 2),
-                cpu_total=round(resource_stats["total_cpu_usage"], 2),
-                errors=len(resource_stats["collection_errors"])
-            )
-
-        except Exception as e:
-            error_msg = f"Failed to collect resource usage for stack {project_name}: {str(e)}"
-            resource_stats["collection_errors"].append(error_msg)
-            logger.error(
-                "Stack resource collection failed",
-                project_name=project_name,
-                error=str(e)
-            )
-
-        return resource_stats
-
-    def _calculate_cpu_percentage(self, cpu_stats: dict, precpu_stats: dict) -> float:
-        """Calculate CPU usage percentage from Docker stats.
-        
-        Args:
-            cpu_stats: Current CPU stats
-            precpu_stats: Previous CPU stats
-            
-        Returns:
-            CPU usage percentage
-        """
-        try:
-            cpu_delta = cpu_stats["cpu_usage"]["total_usage"] - precpu_stats["cpu_usage"]["total_usage"]
-            system_delta = cpu_stats["system_cpu_usage"] - precpu_stats["system_cpu_usage"]
-            
-            if system_delta > 0 and cpu_delta > 0:
-                cpu_count = len(cpu_stats["cpu_usage"].get("percpu_usage", [1]))
-                cpu_percentage = (cpu_delta / system_delta) * cpu_count * 100.0
-                return round(cpu_percentage, 2)
-            
-        except (KeyError, ZeroDivisionError, TypeError):
-            pass
-        
-        return 0.0
 
     def _validate_stack_name(self, stack_name: str) -> bool:
         """Validate stack name for security and Docker Compose compatibility."""

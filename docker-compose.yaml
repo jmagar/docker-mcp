@@ -1,6 +1,7 @@
 services:
   docker-mcp:
-    build: .
+    image: ghcr.io/jmagar/docker-mcp:latest
+    pull_policy: always
     container_name: docker-mcp
     restart: unless-stopped
     

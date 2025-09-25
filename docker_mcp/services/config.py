@@ -137,10 +137,10 @@ class ConfigService:
             self.logger.info("Discovering compose locations", host_id=host_id)
             return await self.compose_manager.discover_compose_locations(host_id)
 
-        # Run discovery operations concurrently with error handling (Python 3.10 compatible)
+        # Run discovery operations concurrently with error handling (Python 3.11 compatible)
         tasks = [asyncio.create_task(discover_single_host(host_id)) for host_id in enabled_hosts]
 
-        # Use asyncio.gather with return_exceptions for Python 3.10 compatibility
+        # Use asyncio.gather with return_exceptions for Python 3.11 compatibility
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Process results and handle exceptions

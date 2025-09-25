@@ -117,7 +117,7 @@ DEVELOPMENT_MODE=false                # Enable development features (default: fa
 HOT_RELOAD=true                       # Config file hot reload (default: true)
 ```
 
-### Modern Environment Variable Patterns (Python 3.10+)
+### Modern Environment Variable Patterns (Python 3.11+)
 ```python
 import os
 from typing import Annotated, Literal

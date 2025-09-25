@@ -36,12 +36,13 @@ def _validate_and_normalize_protocol(protocol: str | None) -> ProtocolLiteral | 
         return None
 
     protocol_lower = protocol.lower().strip()
-    if protocol_lower not in ("tcp", "udp", "sctp"):
+    allowed_protocols = get_args(ProtocolLiteral)
+    if protocol_lower not in allowed_protocols:
         raise ValueError(
-            f"Invalid protocol '{protocol}'. Must be one of: tcp, udp, sctp"
+            f"Invalid protocol '{protocol}'. Must be one of: {', '.join(allowed_protocols)}"
         )
 
-    return protocol_lower  # type: ignore[return-value]
+    return cast(ProtocolLiteral, protocol_lower)  # type: ignore[return-value]
 
 
 def _validate_host_ip(host_ip: str | None) -> str:
@@ -56,11 +57,8 @@ def _validate_host_ip(host_ip: str | None) -> str:
     Raises:
         ValueError: If host IP is invalid
     """
-    if host_ip is None:
-        raise ValueError("HostIp cannot be None")
-    
-    if host_ip == "":
-        # Empty string means all interfaces (equivalent to 0.0.0.0)
+    if host_ip in (None, ""):
+        # None or empty string means all interfaces (equivalent to 0.0.0.0)
         return "0.0.0.0"
     
     if host_ip == "0.0.0.0":
