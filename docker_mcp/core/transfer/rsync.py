@@ -139,7 +139,8 @@ class RsyncTransfer(BaseTransfer):
 
         self.logger.info(
             "Starting rsync transfer",
-            source=f"{source_host.hostname}:{source_path}",
+            source_host=source_host.hostname,
+            source_path=source_path,
             target=target_url,
             compress=compress,
             delete=delete,
@@ -174,7 +175,9 @@ class RsyncTransfer(BaseTransfer):
         return {
             "success": True,
             "transfer_type": "rsync",
-            "source": f"{source_host.hostname}:{source_path}",
+            "source": source_path,
+            "source_host": source_host.hostname,
+            "source_path": source_path,
             "target": target_url,
             "stats": stats,
             "dry_run": dry_run,

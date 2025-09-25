@@ -541,6 +541,46 @@ class StackValidation:
 
         return all_available, conflicting_ports, details
 
+    async def find_available_port(
+        self,
+        host: DockerHost,
+        starting_port: int,
+        avoid_ports: set[int] | None = None,
+        max_attempts: int = 50,
+    ) -> int:
+        """Find the next available host port on the target machine.
+
+        Args:
+            host: Host configuration to inspect
+            starting_port: Port number to start searching from (inclusive)
+            avoid_ports: Optional set of ports that should be skipped even if available
+            max_attempts: Maximum number of sequential ports to probe
+
+        Returns:
+            First available port number greater than or equal to ``starting_port``
+
+        Raises:
+            RuntimeError: If no available port is found within the attempt window
+        """
+
+        candidate = max(1, starting_port)
+        skip_ports = avoid_ports or set()
+
+        for _ in range(max_attempts):
+            if candidate in skip_ports:
+                candidate += 1
+                continue
+
+            available, _conflicts, _details = await self.check_port_conflicts(host, [candidate])
+            if available:
+                return candidate
+
+            candidate += 1
+
+        raise RuntimeError(
+            f"Unable to find available port after probing {max_attempts} candidates starting at {starting_port}"
+        )
+
     def extract_names_from_compose(self, compose_content: str) -> tuple[list[str], list[str]]:
         """Extract service and network names from compose file.
 

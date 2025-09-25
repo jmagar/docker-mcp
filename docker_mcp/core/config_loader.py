@@ -44,11 +44,27 @@ class ServerConfig(BaseModel):
     max_connections: int = 10
 
 
+class TransferConfig(BaseModel):
+    """Transfer configuration for migration operations."""
+
+    method: Literal["ssh", "containerized"] = Field(
+        default="ssh",
+        alias="DOCKER_MCP_TRANSFER_METHOD",
+        description="Transfer method: 'ssh' for SSH-based rsync, 'containerized' for Docker-based rsync"
+    )
+    docker_image: str = Field(
+        default="instrumentisto/rsync-ssh:latest",
+        alias="DOCKER_MCP_RSYNC_IMAGE",
+        description="Docker image to use for containerized rsync transfers"
+    )
+
+
 class DockerMCPConfig(BaseSettings):
     """Main configuration for Docker MCP server."""
 
     hosts: dict[str, DockerHost] = Field(default_factory=dict)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    transfer: TransferConfig = Field(default_factory=TransferConfig)
     config_file: str = Field(default="config/hosts.yml", alias="DOCKER_HOSTS_CONFIG")
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
@@ -127,6 +143,7 @@ async def _load_config_file(config: DockerMCPConfig, config_path: Path) -> None:
     yaml_config = await _load_yaml_config(config_path)
     _apply_host_config(config, yaml_config)
     _apply_server_config(config, yaml_config)
+    _apply_transfer_config(config, yaml_config)
 
 
 def _apply_host_config(config: DockerMCPConfig, yaml_config: dict[str, Any]) -> None:
@@ -144,6 +161,21 @@ def _apply_server_config(config: DockerMCPConfig, yaml_config: dict[str, Any]) -
                 setattr(config.server, key, value)
 
 
+def _apply_transfer_config(config: DockerMCPConfig, yaml_config: dict[str, Any]) -> None:
+    """Apply transfer configuration from YAML data."""
+    if "transfer" in yaml_config:
+        for key, value in yaml_config["transfer"].items():
+            if hasattr(config.transfer, key):
+                setattr(config.transfer, key, value)
+
+        # Validate Docker availability if containerized method is selected
+        if config.transfer.method == "containerized":
+            logger.info(
+                "Containerized transfer method selected, Docker validation required",
+                docker_image=config.transfer.docker_image
+            )
+
+
 
 
 def _apply_env_overrides(config: DockerMCPConfig) -> None:
@@ -154,6 +186,10 @@ def _apply_env_overrides(config: DockerMCPConfig) -> None:
         config.server.port = int(port_env)
     if os.getenv("LOG_LEVEL"):
         config.server.log_level = os.getenv("LOG_LEVEL", config.server.log_level)
+    if os.getenv("DOCKER_MCP_TRANSFER_METHOD"):
+        config.transfer.method = os.getenv("DOCKER_MCP_TRANSFER_METHOD", config.transfer.method)
+    if os.getenv("DOCKER_MCP_RSYNC_IMAGE"):
+        config.transfer.docker_image = os.getenv("DOCKER_MCP_RSYNC_IMAGE", config.transfer.docker_image)
 
 
 async def _load_yaml_config(config_path: Path) -> dict[str, Any]:
@@ -184,6 +220,8 @@ def _expand_yaml_config(content: str) -> str:
         "XDG_DATA_HOME",
         "DOCKER_HOSTS_CONFIG",
         "DOCKER_MCP_CONFIG_DIR",
+        "DOCKER_MCP_TRANSFER_METHOD",
+        "DOCKER_MCP_RSYNC_IMAGE",
         "FASTMCP_HOST",
         "FASTMCP_PORT",
         "LOG_LEVEL",

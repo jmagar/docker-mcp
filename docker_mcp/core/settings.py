@@ -35,6 +35,14 @@ class DockerTimeoutSettings(BaseSettings):
         300, alias="BACKUP_TIMEOUT", description="Backup operations timeout in seconds"
     )
 
+    container_pull_timeout: int = Field(
+        300, alias="CONTAINER_PULL_TIMEOUT", description="Container image pull timeout in seconds"
+    )
+
+    container_run_timeout: int = Field(
+        900, alias="CONTAINER_RUN_TIMEOUT", description="Container execution timeout in seconds"
+    )
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
@@ -48,3 +56,5 @@ SUBPROCESS_TIMEOUT: int = timeout_settings.subprocess_timeout
 ARCHIVE_TIMEOUT: int = timeout_settings.archive_timeout
 RSYNC_TIMEOUT: int = timeout_settings.rsync_timeout
 BACKUP_TIMEOUT: int = timeout_settings.backup_timeout
+CONTAINER_PULL_TIMEOUT: int = timeout_settings.container_pull_timeout
+CONTAINER_RUN_TIMEOUT: int = timeout_settings.container_run_timeout

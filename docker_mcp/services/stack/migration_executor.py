@@ -29,7 +29,10 @@ class StackMigrationExecutor:
         self.config = config
         self.context_manager = context_manager
         self.stack_tools = StackTools(config, context_manager)
-        self.migration_manager = MigrationManager()
+        self.migration_manager = MigrationManager(
+            transfer_method=config.transfer.method,
+            docker_image=config.transfer.docker_image
+        )
         self.backup_manager = BackupManager()
         self.logger = structlog.get_logger()
 
@@ -516,6 +519,7 @@ class StackMigrationExecutor:
         target_host: DockerHost,
         volume_paths: list[str],
         stack_name: str,
+        path_mappings: dict[str, str] | None = None,
         dry_run: bool = False,
     ) -> tuple[bool, dict]:
         """Transfer volume data directly between hosts (no archiving).
@@ -526,8 +530,9 @@ class StackMigrationExecutor:
             source_host: Source host configuration
             target_host: Target host configuration
             volume_paths: List of volume paths to transfer
-            stack_name: Stack name
-            dry_run: Whether this is a dry run
+            path_mappings: Optional mapping of source paths to target paths
+        stack_name: Stack name
+        dry_run: Whether this is a dry run
 
         Returns:
             Tuple of (success: bool, transfer_results: dict)
@@ -548,6 +553,7 @@ class StackMigrationExecutor:
                 source_paths=volume_paths,
                 target_path=f"{target_host.appdata_path or '/opt/docker-appdata'}/{stack_name}",
                 stack_name=stack_name,
+                path_mappings=path_mappings,
                 dry_run=dry_run,
             )
 

@@ -1,6 +1,10 @@
 """Stack migration orchestrator."""
 
+import posixpath
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
+
+import yaml
 
 import structlog
 from fastmcp.tools.tool import ToolResult
@@ -356,12 +360,29 @@ class StackMigrationOrchestrator:
         )
 
         transfer_results = await self._transfer_migration_data(
-            source_host, target_host, source_paths, stack_name, migration_steps, migration_data
+            source_host,
+            target_host,
+            source_paths,
+            path_mappings,
+            stack_name,
+            migration_steps,
+            migration_data,
         )
         if isinstance(transfer_results, ToolResult):
             return transfer_results
         if not transfer_results.get("success", True):
             return self._create_error_result("Data transfer failed", migration_data)
+
+        compose_adjustment = await self._ensure_target_ports_available(
+            target_host,
+            compose_content,
+            stack_name,
+            migration_steps,
+            migration_data,
+        )
+        if isinstance(compose_adjustment, ToolResult):
+            return compose_adjustment
+        compose_content = compose_adjustment
 
         deploy_results = await self._deploy_target_stack(
             target_host_id,
@@ -431,27 +452,279 @@ class StackMigrationOrchestrator:
                 source_path = mount.split(":", 1)[0]
                 source_paths.append(source_path)
 
-                if f"/{stack_name}/" in source_path:
-                    relative_part = source_path.split(f"/{stack_name}/", 1)[1]
-                    target_path = f"{target_appdata_path}/{stack_name}/{relative_part}"
-                    path_mappings[source_path] = target_path
-                else:
-                    path_mappings[source_path] = f"{target_appdata_path}/{stack_name}"
+                stack_marker = f"/{stack_name}"
+                target_path = None
+
+                if stack_marker in source_path:
+                    _, suffix = source_path.split(stack_marker, 1)
+                    suffix = suffix.lstrip("/")
+
+                    if suffix.startswith("-") and suffix != "-":
+                        # Preserve sibling naming like stack-name-redis
+                        target_basename = f"{stack_name}{suffix}"
+                        target_path = posixpath.join(target_appdata_path, target_basename)
+                    elif suffix:
+                        target_path = posixpath.join(target_appdata_path, stack_name, suffix)
+                    else:
+                        target_path = posixpath.join(target_appdata_path, stack_name)
+
+                if target_path is None:
+                    source_basename = PurePosixPath(source_path.rstrip("/")).name
+                    target_path = posixpath.join(target_appdata_path, source_basename)
+
+                path_mappings[source_path] = target_path
 
         return path_mappings, source_paths
+
+    async def _ensure_target_ports_available(
+        self,
+        target_host: DockerHost,
+        compose_content: str,
+        stack_name: str,
+        migration_steps: list[str],
+        migration_data: dict[str, Any],
+    ) -> ToolResult | str:
+        """Ensure host ports defined in compose are available on the target host.
+
+        If conflicts are detected, automatically remap to the next available ports.
+        """
+
+        host_ports = self.validation.extract_ports_from_compose(compose_content)
+
+        if not host_ports:
+            migration_steps.append("🔌 No host ports exposed; skipping port reassignment")
+            migration_data["port_check"] = {
+                "host": target_host.hostname,
+                "ports_checked": [],
+                "conflicting_ports": [],
+                "all_ports_available": True,
+                "port_details": {},
+            }
+            return compose_content
+
+        all_available, conflicts, details = await self.validation.check_port_conflicts(
+            target_host, host_ports
+        )
+        migration_data["port_check"] = details
+
+        if all_available:
+            migration_steps.append("🔌 Target host ports available")
+            return compose_content
+
+        conflicts_set = set(conflicts)
+        migration_steps.append("⚠️  Port conflicts detected on target; remapping host ports")
+
+        try:
+            compose_data = yaml.safe_load(compose_content)
+        except yaml.YAMLError as exc:
+            details_msg = f"Failed to parse compose for port adjustment: {exc}"
+            return self._create_error_result(details_msg, migration_data)
+
+        services = compose_data.get("services") or {}
+        adjustments: list[dict[str, Any]] = []
+
+        # Track ports already reserved (existing non-conflicting plus newly assigned)
+        reserved_ports = set(host_ports) - conflicts_set
+
+        for service_name, service_config in services.items():
+            ports_list = service_config.get("ports")
+            if not isinstance(ports_list, list):
+                continue
+
+            updated_ports: list[Any] = []
+
+            for port_entry in ports_list:
+                details_map = self._extract_port_entry_details(port_entry)
+                host_port = details_map.get("host_port")
+
+                if host_port is None or not isinstance(host_port, int):
+                    updated_ports.append(port_entry)
+                    continue
+
+                if host_port in reserved_ports and host_port not in conflicts_set:
+                    updated_ports.append(port_entry)
+                    continue
+
+                # Port conflict detected – find an available replacement
+                try:
+                    new_port = await self.validation.find_available_port(
+                        target_host,
+                        starting_port=host_port + 1,
+                        avoid_ports=reserved_ports,
+                    )
+                except RuntimeError as exc:
+                    error_message = (
+                        f"Unable to resolve port conflict for service '{service_name}' on port {host_port}: {exc}"
+                    )
+                    return self._create_error_result(error_message, migration_data)
+
+                updated_entry = self._rebuild_port_entry(port_entry, details_map, new_port)
+                updated_ports.append(updated_entry)
+                reserved_ports.add(new_port)
+
+                adjustments.append(
+                    {
+                        "service": service_name,
+                        "original_port": host_port,
+                        "new_port": new_port,
+                        "container_port": details_map.get("container_port"),
+                    }
+                )
+
+                # Avoid reusing the conflicting port again within this compose
+                conflicts_set.discard(host_port)
+
+            if updated_ports:
+                service_config["ports"] = updated_ports
+
+        if not adjustments:
+            # Should not happen (conflicts detected but no adjustments). Fail safe.
+            return self._create_error_result(
+                "Port conflicts detected but no adjustments were made", migration_data
+            )
+
+        migration_data["port_adjustments"] = adjustments
+
+        summary = ", ".join(
+            f"{item['service']}: {item['original_port']}→{item['new_port']}"
+            for item in adjustments
+        )
+        migration_steps.append(f"🔁 Adjusted host ports on target ({summary})")
+
+        return yaml.safe_dump(compose_data, sort_keys=False)
+
+    def _extract_port_entry_details(self, port_entry: Any) -> dict[str, Any]:
+        """Normalize different port specifications into a common form."""
+
+        details: dict[str, Any] = {
+            "host_port": None,
+            "container_port": None,
+            "protocol": None,
+            "ip": None,
+            "original_type": type(port_entry),
+        }
+
+        if isinstance(port_entry, str):
+            protocol = None
+            base = port_entry
+            if "/" in port_entry:
+                base, protocol = port_entry.split("/", 1)
+
+            ip_part = None
+            remainder = base
+
+            if remainder.startswith("[") and "]" in remainder:
+                end_idx = remainder.find("]")
+                ip_part = remainder[: end_idx + 1]
+                remainder = remainder[end_idx + 1 :]
+
+            if remainder.startswith(":"):
+                remainder = remainder[1:]
+
+            segments = remainder.split(":") if remainder else []
+
+            if len(segments) == 1:
+                container_port = segments[0]
+                host_port = None
+                ip_value = ip_part
+            else:
+                container_port = segments[-1]
+                host_port = segments[-2] if len(segments) >= 2 else None
+                if len(segments) > 2:
+                    ip_value = ip_part or ":".join(segments[:-2])
+                else:
+                    ip_value = ip_part
+
+            details["protocol"] = protocol
+            details["ip"] = ip_value or None
+            if container_port and str(container_port).isdigit():
+                details["container_port"] = int(container_port)
+            else:
+                details["container_port"] = container_port
+
+            if host_port and str(host_port).isdigit():
+                details["host_port"] = int(host_port)
+
+        elif isinstance(port_entry, dict):
+            details["protocol"] = port_entry.get("protocol")
+            details["container_port"] = port_entry.get("target") or port_entry.get("containerPort")
+
+            for key in ["published", "hostPort", "host_port", "external"]:
+                if key in port_entry and port_entry[key] is not None:
+                    value = port_entry[key]
+                    try:
+                        host_value = int(value) if isinstance(value, int) else int(str(value))
+                    except (TypeError, ValueError):
+                        host_value = None
+
+                    if host_value is not None:
+                        details["host_port"] = host_value
+                        details.setdefault("host_port_field", key)
+                    break
+
+        elif isinstance(port_entry, int):
+            details["container_port"] = port_entry
+
+        return details
+
+    def _rebuild_port_entry(
+        self, port_entry: Any, details_map: dict[str, Any], new_host_port: int
+    ) -> Any:
+        """Rebuild a port entry with an updated host port while preserving format."""
+
+        if isinstance(port_entry, str):
+            container_port = details_map.get("container_port")
+            protocol = details_map.get("protocol")
+            ip_value = details_map.get("ip")
+
+            segments = []
+            if ip_value:
+                segments.append(str(ip_value))
+            segments.append(str(new_host_port))
+            if container_port is not None:
+                segments.append(str(container_port))
+
+            rebuilt = ":".join(segments)
+            if protocol:
+                rebuilt = f"{rebuilt}/{protocol}"
+
+            return rebuilt
+
+        if isinstance(port_entry, dict):
+            updated_entry = dict(port_entry)
+            field = details_map.get("host_port_field")
+            if field:
+                original_value = updated_entry.get(field)
+                updated_entry[field] = (
+                    str(new_host_port)
+                    if isinstance(original_value, str)
+                    else new_host_port
+                )
+            else:
+                updated_entry["published"] = new_host_port
+            return updated_entry
+
+        # For integers or unsupported formats, return original entry unchanged
+        return port_entry
 
     async def _transfer_migration_data(
         self,
         source_host: DockerHost,
         target_host: DockerHost,
         source_paths: list[str],
+        path_mappings: dict[str, str],
         stack_name: str,
         migration_steps: list[str],
         migration_data: dict[str, Any],
     ) -> ToolResult | dict[str, Any]:
         """Transfer data between hosts."""
         transfer_success, transfer_results = await self.executor.transfer_data(
-            source_host, target_host, source_paths, stack_name, False
+            source_host,
+            target_host,
+            source_paths,
+            stack_name,
+            path_mappings=path_mappings,
+            dry_run=False,
         )
         if not transfer_success:
             return self._create_error_result("Data transfer failed", migration_data)

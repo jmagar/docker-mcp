@@ -1,0 +1,33 @@
+# Example configuration for containerized rsync transfers
+# This solves permission issues by running rsync in Docker containers
+# with appropriate capabilities to read all files
+
+# Transfer configuration
+transfer:
+  # Use 'ssh' for standard SSH-based rsync (default)
+  # Use 'containerized' for Docker-based rsync (solves permission issues)
+  method: containerized
+
+  # Docker image for containerized transfers
+  # Default: instrumentisto/rsync-ssh:latest (Alpine-based, 5MB)
+  docker_image: instrumentisto/rsync-ssh:latest
+
+# Host configurations remain the same
+hosts:
+  production:
+    hostname: prod.example.com
+    user: docker
+    identity_file: ~/.ssh/docker_prod_key
+    appdata_path: /opt/docker-data
+    description: Production server with permission-restricted files
+
+  staging:
+    hostname: staging.example.com
+    user: docker
+    identity_file: ~/.ssh/docker_staging_key
+    appdata_path: /opt/docker-data
+    description: Staging server
+
+# Environment variables can also be used:
+# DOCKER_MCP_TRANSFER_METHOD=containerized
+# DOCKER_MCP_RSYNC_IMAGE=instrumentisto/rsync-ssh:latest
