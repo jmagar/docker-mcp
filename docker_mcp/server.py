@@ -844,10 +844,24 @@ class DockerMCPServer:
 
     def _resource_to_template(self, resource: FunctionResource) -> FunctionResourceTemplate:
         """Convert a function-backed resource into a template for URI parameters."""
+        
+        # Extract the raw URI template string before URL encoding transforms it
+        # This preserves template parameters like {host_id} and {stack_name}
+        uri_template = resource.uri
+        if hasattr(resource.uri, '__str__'):
+            # If the URI was originally a template string, get the raw template
+            # For AnyUrl objects, we need to preserve the original template format
+            uri_str = str(resource.uri)
+            # Decode URL-encoded template parameters back to their original form
+            import urllib.parse
+            uri_str = urllib.parse.unquote(uri_str)
+            uri_template = uri_str
+        else:
+            uri_template = str(resource.uri)
 
         return FunctionResourceTemplate.from_function(
             fn=resource.fn,
-            uri_template=str(resource.uri),
+            uri_template=uri_template,
             name=resource.name,
             title=resource.title,
             description=resource.description,
