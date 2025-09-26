@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 import docker
 import structlog
 from fastmcp.resources.resource import FunctionResource
+from fastmcp.tools.tool import ToolResult
 from pydantic import AnyUrl
 
 from docker_mcp.core.error_response import DockerMCPErrorResponse
@@ -60,13 +61,15 @@ class DockerInfoResource(FunctionResource):
                     error_response = DockerMCPErrorResponse.docker_context_error(
                         host_id=host_id,
                         operation="get_client",
-                        cause="Docker client unavailable for host"
+                        cause="Docker client unavailable for host",
                     )
                     # Add resource-specific context
-                    error_response.update({
-                        "resource_uri": f"docker://{host_id}/info",
-                        "resource_type": "docker_info",
-                    })
+                    error_response.update(
+                        {
+                            "resource_uri": f"docker://{host_id}/info",
+                            "resource_type": "docker_info",
+                        }
+                    )
                     return error_response
 
                 # Get Docker system info and version using SDK
@@ -128,204 +131,372 @@ class DockerInfoResource(FunctionResource):
         )
 
 
-class DockerContainersResource(FunctionResource):
-    """MCP Resource for Docker container listings.
+class StackListResource(FunctionResource):
+    """List Docker Compose stacks available on a host.
 
-    URI Pattern: docker://{host_id}/containers
-    Parameters supported:
-    - all_containers: Include stopped containers (default: False)
-    - limit: Maximum containers to return (default: 20)
-    - offset: Pagination offset (default: 0)
+    URI Pattern: stacks://{host_id}
+    Returns a summary of compose projects discovered on the host including
+    services, status, and timestamps. Data comes from the stack service so it
+    reflects the same view exposed through tooling.
     """
 
-    def __init__(self, container_service: "ContainerService"):
-        """Initialize the Docker containers resource.
-
-        Args:
-            container_service: ContainerService for container operations
-        """
-
-        # Create the function with dependency captured in closure
-        async def _get_containers(host_id: str, **kwargs) -> dict[str, Any]:
-            """Get Docker containers for a host.
-
-            Args:
-                host_id: Docker host identifier
-                **kwargs: Additional parameters for filtering and pagination
-
-            Returns:
-                Container listing data as a dictionary
-            """
+    def __init__(self, stack_service: "StackService"):
+        async def _list_stacks(host_id: str) -> dict[str, Any]:
             try:
-                # Extract parameters with defaults
-                all_containers = kwargs.get("all_containers", False)
-                try:
-                    limit = max(0, int(kwargs.get("limit", 20)))
-                except (TypeError, ValueError):
-                    limit = 20
-                try:
-                    offset = max(0, int(kwargs.get("offset", 0)))
-                except (TypeError, ValueError):
-                    offset = 0
+                result = await stack_service.list_stacks(host_id)
+                data: dict[str, Any] = {}
 
-                logger.info(
-                    "Fetching containers",
-                    host_id=host_id,
-                    all_containers=all_containers,
-                    limit=limit,
-                    offset=offset,
-                )
+                if isinstance(result, ToolResult):
+                    data = stack_service._unwrap(result)
+                elif isinstance(result, dict):
+                    data = result
 
-                # Use the container service to get containers
-                result = await container_service.list_containers(
-                    host_id=host_id, all_containers=all_containers, limit=limit, offset=offset
-                )
+                if not isinstance(data, dict):
+                    data = {"success": False, "error": "Unexpected stacks payload"}
 
-                # Convert ToolResult to dict if needed
-                if hasattr(result, "structured_content"):
-                    containers_data = result.structured_content
-                else:
-                    containers_data = result
+                stacks = data.get("stacks", [])
+                summary = data.get("formatted_output")
 
-                # Ensure we have a dict to work with
-                if containers_data is None:
-                    containers_data = {}
-
-                # Add resource metadata
-                containers_data["resource_uri"] = f"docker://{host_id}/containers"
-                containers_data["resource_type"] = "containers"
-                containers_data["parameters"] = {
-                    "all_containers": all_containers,
-                    "limit": limit,
-                    "offset": offset,
+                return {
+                    "success": bool(data.get("success", False) and stacks is not None),
+                    "host_id": host_id,
+                    "resource_uri": f"stacks://{host_id}",
+                    "resource_type": "stack_list",
+                    "stacks": stacks,
+                    "summary": summary,
+                    "total_stacks": len(stacks) if isinstance(stacks, list) else 0,
+                    "timestamp": data.get("timestamp"),
                 }
-
-                logger.info(
-                    "Containers fetched successfully",
-                    host_id=host_id,
-                    total_containers=containers_data.get("pagination", {}).get("total", 0),
-                    returned=containers_data.get("pagination", {}).get("returned", 0),
-                )
-
-                return containers_data
-
-            except Exception as e:
-                logger.error("Failed to get containers", host_id=host_id, error=str(e))
+            except Exception as exc:
+                logger.error("Failed to list stacks", host_id=host_id, error=str(exc))
                 return {
                     "success": False,
-                    "error": f"Failed to get containers: {str(e)}",
+                    "error": f"Failed to list stacks: {exc}",
                     "host_id": host_id,
-                    "resource_uri": f"docker://{host_id}/containers",
-                    "resource_type": "containers",
+                    "resource_uri": f"stacks://{host_id}",
+                    "resource_type": "stack_list",
                 }
 
         super().__init__(
-            fn=_get_containers,
-            uri=AnyUrl("docker://{host_id}/containers"),
-            name="Docker Container Listings",
-            title="List of Docker containers on a host",
-            description="Provides comprehensive container information including status, networks, volumes, and compose project details",
+            fn=_list_stacks,
+            uri=AnyUrl("stacks://{host_id}"),
+            name="Compose Stacks",
+            title="Docker Compose stacks available on a host",
+            description="Lists compose stacks detected on the specified host including services and current status.",
+            mime_type="application/json",
+            tags={"docker", "compose", "stacks"},
+        )
+
+
+class StackDetailsResource(FunctionResource):
+    """Return docker-compose content for a specific stack.
+
+    URI Pattern: stacks://{host_id}/{stack_name}
+    """
+
+    def __init__(self, stack_service: "StackService"):
+        async def _stack_details(host_id: str, stack_name: str) -> dict[str, Any]:
+            try:
+                result = await stack_service.get_stack_compose_file(host_id, stack_name)
+
+                if isinstance(result, ToolResult):
+                    data = result.structured_content or {}
+                elif isinstance(result, dict):
+                    data = result
+                else:
+                    data = {}
+
+                if not isinstance(data, dict):
+                    data = {"success": False, "error": "Unexpected stack detail payload"}
+
+                compose_content = data.get("compose_content", "")
+
+                return {
+                    "success": bool(data.get("success", False) and compose_content),
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                    "resource_uri": f"stacks://{host_id}/{stack_name}",
+                    "resource_type": "stack_details",
+                    "compose_content": compose_content,
+                    "timestamp": data.get("timestamp"),
+                    "error": data.get("error"),
+                }
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch compose content",
+                    host_id=host_id,
+                    stack_name=stack_name,
+                    error=str(exc),
+                )
+                return {
+                    "success": False,
+                    "error": f"Failed to fetch compose content: {exc}",
+                    "host_id": host_id,
+                    "stack_name": stack_name,
+                    "resource_uri": f"stacks://{host_id}/{stack_name}",
+                    "resource_type": "stack_details",
+                }
+
+        super().__init__(
+            fn=_stack_details,
+            uri=AnyUrl("stacks://{host_id}/{stack_name}"),
+            name="Compose Stack Details",
+            title="Docker Compose definition for a stack",
+            description="Returns the docker-compose specification currently deployed for the requested stack.",
+            mime_type="application/json",
+            tags={"docker", "compose", "stacks"},
+        )
+
+
+class ContainerListResource(FunctionResource):
+    """List containers running on a host.
+
+    URI Pattern: containers://{host_id}
+    Optional query parameters:
+      - all (bool): include stopped containers.
+      - limit (int) / offset (int): pagination controls.
+    """
+
+    def __init__(self, container_service: "ContainerService"):
+        async def _list_containers(
+            host_id: str,
+            *,
+            all: bool | str | None = None,
+            limit: int | str | None = None,
+            offset: int | str | None = None,
+        ) -> dict[str, Any]:
+            try:
+                include_all = False
+                if isinstance(all, str):
+                    include_all = all.strip().lower() in {"1", "true", "yes", "on"}
+                elif isinstance(all, bool):
+                    include_all = all
+
+                try:
+                    limit_value = int(limit) if limit is not None else 20
+                except (TypeError, ValueError):
+                    limit_value = 20
+
+                try:
+                    offset_value = int(offset) if offset is not None else 0
+                except (TypeError, ValueError):
+                    offset_value = 0
+
+                result = await container_service.list_containers(
+                    host_id,
+                    all_containers=include_all,
+                    limit=limit_value,
+                    offset=offset_value,
+                )
+
+                if isinstance(result, ToolResult):
+                    data = result.structured_content or {}
+                elif isinstance(result, dict):
+                    data = result
+                else:
+                    data = {}
+
+                if not isinstance(data, dict):
+                    data = {"success": False, "error": "Unexpected container payload"}
+
+                containers = data.get("containers", [])
+                pagination = data.get("pagination", {})
+
+                return {
+                    "success": bool(data.get("success", False)),
+                    "host_id": host_id,
+                    "resource_uri": f"containers://{host_id}",
+                    "resource_type": "container_list",
+                    "containers": containers,
+                    "pagination": pagination,
+                    "summary": data.get("formatted_output"),
+                    "parameters": {
+                        "all": include_all,
+                        "limit": limit_value,
+                        "offset": offset_value,
+                    },
+                }
+            except Exception as exc:
+                logger.error("Failed to list containers", host_id=host_id, error=str(exc))
+                return {
+                    "success": False,
+                    "error": f"Failed to list containers: {exc}",
+                    "host_id": host_id,
+                    "resource_uri": f"containers://{host_id}",
+                    "resource_type": "container_list",
+                }
+
+        super().__init__(
+            fn=_list_containers,
+            uri=AnyUrl("containers://{host_id}"),
+            name="Containers",
+            title="Docker containers present on a host",
+            description="Lists Docker containers for the specified host with optional pagination and filtering.",
             mime_type="application/json",
             tags={"docker", "containers"},
         )
 
 
-class DockerComposeResource(FunctionResource):
-    """MCP Resource for Docker Compose stack information.
+class ContainerDetailsResource(FunctionResource):
+    """Detailed inspection of a specific container.
 
-    URI Pattern: docker://{host_id}/compose
-    Provides information about Docker Compose stacks and projects on a host.
+    URI Pattern: containers://{host_id}/{container_id}
     """
 
-    def __init__(self, stack_service: "StackService"):
-        """Initialize the Docker Compose resource.
+    def __init__(self, container_service: "ContainerService"):
+        def _coerce_bool(value: bool | str | None) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return False
 
-        Args:
-            stack_service: StackService for stack operations
-        """
+        def _coerce_log_lines(value: int | str | bool | None) -> int:
+            if isinstance(value, bool):
+                return 100 if value else 0
+            if isinstance(value, int):
+                return max(0, min(value, 1000))
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in {"", "false", "0", "no", "off"}:
+                    return 0
+                if text in {"true", "yes", "on"}:
+                    return 100
+                try:
+                    parsed = int(text)
+                    return max(0, min(parsed, 1000))
+                except ValueError:
+                    return 0
+            return 0
 
-        # Create the function with dependency captured in closure
-        async def _get_compose_info(host_id: str, **kwargs) -> dict[str, Any]:
-            """Get Docker Compose information for a host.
-
-            Args:
-                host_id: Docker host identifier
-                **kwargs: Additional parameters (currently unused)
-
-            Returns:
-                Compose stack information as a dictionary
-            """
+        async def _container_details(
+            host_id: str,
+            container_id: str,
+            *,
+            logs: int | str | bool | None = None,
+            stats: bool | str | None = None,
+        ) -> dict[str, Any]:
             try:
-                logger.info("Fetching compose info", host_id=host_id)
+                result = await container_service.get_container_info(host_id, container_id)
 
-                # Get stacks information
-                result = await stack_service.list_stacks(host_id)
-
-                # Convert ToolResult to dict if needed
-                if hasattr(result, "structured_content"):
-                    compose_data = result.structured_content
+                if isinstance(result, ToolResult):
+                    data = result.structured_content or {}
+                elif isinstance(result, dict):
+                    data = result
                 else:
-                    compose_data = result
+                    data = {}
 
-                # Ensure we have a dict to work with
-                if compose_data is None:
-                    compose_data = {}
+                if not isinstance(data, dict):
+                    data = {"success": False, "error": "Unexpected container detail payload"}
 
-                # Enhance with additional compose-specific information
-                if compose_data.get("success"):
-                    # Group stacks by compose project
-                    projects = {}
-                    stacks = compose_data.get("stacks", [])
+                info = data.get("info") or data.get("data") or {}
 
-                    for stack in stacks:
-                        project_name = stack.get("project_name", "unknown")
-                        if project_name not in projects:
-                            projects[project_name] = {
-                                "project_name": project_name,
-                                "services": [],
-                                "total_containers": 0,
-                                "running_containers": 0,
-                                "compose_file": stack.get("compose_file", ""),
-                            }
+                log_lines = _coerce_log_lines(logs)
+                include_stats = _coerce_bool(stats)
 
-                        projects[project_name]["services"].append(stack.get("service", ""))
-                        projects[project_name]["total_containers"] += 1
-                        if stack.get("status", "").lower() in ["running", "up"]:
-                            projects[project_name]["running_containers"] += 1
+                logs_payload: dict[str, Any] | None = None
+                logs_error: str | None = None
+                if log_lines > 0 and hasattr(container_service, "logs_service"):
+                    try:
+                        logs_result = await container_service.logs_service.get_container_logs(  # type: ignore[attr-defined]
+                            host_id=host_id,
+                            container_id=container_id,
+                            lines=log_lines,
+                            timestamps=False,
+                        )
+                        if isinstance(logs_result, dict) and logs_result.get("success"):
+                            log_data = logs_result.get("data") or {}
+                            if isinstance(log_data, dict):
+                                logs_payload = {
+                                    "lines": log_data.get("logs", []),
+                                    "truncated": log_data.get("truncated", False),
+                                    "timestamp": log_data.get("timestamp"),
+                                }
+                            else:
+                                logs_error = "Unexpected logs payload"
+                        else:
+                            logs_error = (
+                                logs_result.get("error")
+                                if isinstance(logs_result, dict)
+                                else "Failed to retrieve logs"
+                            )
+                    except Exception as log_exc:  # pragma: no cover - defensive
+                        logger.error(
+                            "Failed to include container logs",
+                            host_id=host_id,
+                            container_id=container_id,
+                            error=str(log_exc),
+                        )
+                        logs_error = str(log_exc)
 
-                    compose_data["compose_projects"] = list(projects.values())
-                    compose_data["total_projects"] = len(projects)
+                stats_payload: dict[str, Any] | None = None
+                stats_error: str | None = None
+                if include_stats:
+                    try:
+                        stats_result = await container_service.container_tools.get_container_stats(  # type: ignore[attr-defined]
+                            host_id, container_id
+                        )
+                        if isinstance(stats_result, dict) and stats_result.get("success"):
+                            stats_payload = stats_result.get("data") or {}
+                        else:
+                            stats_error = (
+                                stats_result.get("error")
+                                if isinstance(stats_result, dict)
+                                else "Failed to retrieve stats"
+                            )
+                    except Exception as stats_exc:  # pragma: no cover - defensive
+                        logger.error(
+                            "Failed to include container stats",
+                            host_id=host_id,
+                            container_id=container_id,
+                            error=str(stats_exc),
+                        )
+                        stats_error = str(stats_exc)
 
-                # Add resource metadata
-                compose_data["resource_uri"] = f"docker://{host_id}/compose"
-                compose_data["resource_type"] = "compose"
-                compose_data["host_id"] = host_id
+                response: dict[str, Any] = {
+                    "success": bool(data.get("success", False)),
+                    "host_id": host_id,
+                    "container_id": container_id,
+                    "resource_uri": f"containers://{host_id}/{container_id}",
+                    "resource_type": "container_details",
+                    "info": info,
+                    "summary": data.get("formatted_output"),
+                    "timestamp": data.get("timestamp"),
+                    "error": data.get("error"),
+                }
 
-                logger.info(
-                    "Compose info fetched successfully",
+                if logs_payload is not None:
+                    response["logs"] = logs_payload
+                if logs_error:
+                    response["logs_error"] = logs_error
+                if stats_payload is not None:
+                    response["stats"] = stats_payload
+                if stats_error:
+                    response["stats_error"] = stats_error
+
+                return response
+            except Exception as exc:
+                logger.error(
+                    "Failed to inspect container",
                     host_id=host_id,
-                    total_stacks=compose_data.get("total_stacks", 0),
-                    total_projects=compose_data.get("total_projects", 0),
+                    container_id=container_id,
+                    error=str(exc),
                 )
-
-                return compose_data
-
-            except Exception as e:
-                logger.error("Failed to get compose info", host_id=host_id, error=str(e))
                 return {
                     "success": False,
-                    "error": f"Failed to get compose info: {str(e)}",
+                    "error": f"Failed to inspect container: {exc}",
                     "host_id": host_id,
-                    "resource_uri": f"docker://{host_id}/compose",
-                    "resource_type": "compose",
+                    "container_id": container_id,
+                    "resource_uri": f"containers://{host_id}/{container_id}",
+                    "resource_type": "container_details",
                 }
 
         super().__init__(
-            fn=_get_compose_info,
-            uri=AnyUrl("docker://{host_id}/compose"),
-            name="Docker Compose Information",
-            title="Docker Compose stacks and projects",
-            description="Provides information about Docker Compose stacks, projects, and their configurations on a host",
+            fn=_container_details,
+            uri=AnyUrl("containers://{host_id}/{container_id}"),
+            name="Container Details",
+            title="Detailed information for a Docker container",
+            description="Inspect a specific container including configuration, state, networks, and volume bindings.",
             mime_type="application/json",
-            tags={"docker", "compose", "stacks"},
+            tags={"docker", "containers"},
         )

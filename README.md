@@ -332,6 +332,13 @@ hosts:
 ```bash
 FASTMCP_PORT=8080  # Change port
 LOG_LEVEL=DEBUG    # More verbose logging
+
+# OAuth Authentication (Optional but Recommended)
+FASTMCP_SERVER_AUTH=fastmcp.auth.GoogleProvider               # Enable Google OAuth
+FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID=your-client-id           # Google OAuth client ID
+FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET=your-client-secret   # Google OAuth client secret
+FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH=/auth/callback       # OAuth callback path
+# Or use any other FastMCP auth provider by specifying its import path
 ```
 
 ### 🚀 Transfer Method
@@ -371,10 +378,19 @@ cd ~/.docker-mcp && docker compose down
 
 - **SSH key authentication only** (no passwords)
 - **Dedicated SSH keys** for Docker Manager (isolated from your personal keys)
+- **OAuth authentication support** (Google, GitHub, or any FastMCP provider)
+- **Identity verification** with `whoami` diagnostic tool
 - **Read-only mounts** for configuration
 - **Rate limiting** to prevent abuse
 - **Non-root container** execution
 - **Automatic security updates** via GitHub Actions
+
+### OAuth Authentication Features
+When OAuth is enabled via `FASTMCP_SERVER_AUTH`:
+- **Dynamic provider loading** - Use Google, GitHub, or custom auth providers
+- **`whoami` tool** - Verify authenticated user identity and claims
+- **Secure token handling** - Built on FastMCP's robust auth framework
+- **Flexible configuration** - Environment-based setup for easy deployment
 
 ## 💻 For Developers
 

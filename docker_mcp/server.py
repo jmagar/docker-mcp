@@ -38,10 +38,12 @@ try:
 
     # All tool_params removed - they were unused
     from .resources import (
-        DockerComposeResource,
-        DockerContainersResource,
+        ContainerDetailsResource,
+        ContainerListResource,
         DockerInfoResource,
         PortMappingResource,
+        StackDetailsResource,
+        StackListResource,
     )
     from .services import ConfigService, ContainerService, HostService, StackService
     from .services.cleanup import CleanupService
@@ -57,10 +59,12 @@ except ImportError:
         TimingMiddleware,
     )
     from docker_mcp.resources import (
-        DockerComposeResource,
-        DockerContainersResource,
+        ContainerDetailsResource,
+        ContainerListResource,
         DockerInfoResource,
         PortMappingResource,
+        StackDetailsResource,
+        StackListResource,
     )
     from docker_mcp.services import ConfigService, ContainerService, HostService, StackService
     from docker_mcp.services.cleanup import CleanupService
@@ -853,18 +857,26 @@ class DockerMCPServer:
             info_resource = DockerInfoResource(self.context_manager, self.host_service)
             self.app.add_resource(info_resource)
 
-            # Docker containers resource - docker://{host_id}/containers
-            containers_resource = DockerContainersResource(self.container_service)
-            self.app.add_resource(containers_resource)
+            # Compose stack listing resource - stacks://{host_id}
+            stack_list_resource = StackListResource(self.stack_service)
+            self.app.add_resource(stack_list_resource)
 
-            # Docker compose resource - docker://{host_id}/compose
-            compose_resource = DockerComposeResource(self.stack_service)
-            self.app.add_resource(compose_resource)
+            # Compose stack detail resource - stacks://{host_id}/{stack_name}
+            stack_detail_resource = StackDetailsResource(self.stack_service)
+            self.app.add_resource(stack_detail_resource)
+
+            # Container listing resource - containers://{host_id}
+            container_list_resource = ContainerListResource(self.container_service)
+            self.app.add_resource(container_list_resource)
+
+            # Container detail resource - containers://{host_id}/{container_id}
+            container_detail_resource = ContainerDetailsResource(self.container_service)
+            self.app.add_resource(container_detail_resource)
 
             self.logger.info(
                 "MCP resources registered successfully",
-                resources_count=4,
-                uri_schemes=["ports://", "docker://"],
+                resources_count=6,
+                uri_schemes=["ports://", "docker://", "stacks://", "containers://"],
             )
 
         except Exception as e:
