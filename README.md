@@ -330,8 +330,10 @@ hosts:
 
 ### Use Environment Variables
 ```bash
-FASTMCP_PORT=8080  # Change port
-LOG_LEVEL=DEBUG    # More verbose logging
+FASTMCP_PORT=8080                                              # Change port
+LOG_LEVEL=DEBUG                                                # More verbose logging
+FASTMCP_DATA_DIR=/var/lib/docker-mcp/data                     # Persist OAuth tokens & runtime data
+DOCKER_MCP_DATA_DIR=/var/lib/docker-mcp/data                  # Alias for tooling expecting DOCKER_MCP_*
 
 # OAuth Authentication (Optional but Recommended)
 FASTMCP_SERVER_AUTH=fastmcp.auth.GoogleProvider               # Enable Google OAuth
@@ -378,6 +380,7 @@ cd ~/.docker-mcp && docker compose down
 
 - **SSH key authentication only** (no passwords)
 - **Dedicated SSH keys** for Docker Manager (isolated from your personal keys)
+- **Persistent data volume** (`FASTMCP_DATA_DIR`) to retain OAuth credentials and runtime state across restarts
 - **OAuth authentication support** (Google, GitHub, or any FastMCP provider)
 - **Identity verification** with `whoami` diagnostic tool
 - **Read-only mounts** for configuration

@@ -444,6 +444,9 @@ download_compose_file() {
         cat > "${DOCKER_MCP_DIR}/.env" << EOF
 FASTMCP_PORT=${desired_port}
 SSH_KEYS_HOST_PATH=${DOCKER_MCP_DIR}/ssh
+FASTMCP_DATA_DIR=${DATA_DIR}
+DOCKER_MCP_DATA_DIR=${DATA_DIR}
+LOG_DIR=${DATA_DIR}/logs
 EOF
         
         # Export for use in other functions
@@ -497,7 +500,11 @@ print_completion() {
     echo "Configuration files:"
     echo "  Hosts config: ${CONFIG_DIR}/hosts.yml"
     echo "  SSH key: ${SSH_KEY_PATH}"
+    echo "  Environment: ${DOCKER_MCP_DIR}/.env"
     echo "  Docker Compose: ${DOCKER_MCP_DIR}/docker-compose.yaml"
+    echo
+    echo "Persistent data directory:"
+    echo "  ${DATA_DIR}"
     echo
     echo "Service is running at:"
     echo "  http://localhost:${FASTMCP_PORT:-8000}"

@@ -25,6 +25,8 @@ services:
       # Server configuration
       FASTMCP_HOST: "${FASTMCP_HOST:-0.0.0.0}"
       FASTMCP_PORT: "${FASTMCP_PORT:-8000}"
+      FASTMCP_DATA_DIR: "${FASTMCP_DATA_DIR:-/app/data}"
+      DOCKER_MCP_DATA_DIR: "${DOCKER_MCP_DATA_DIR:-/app/data}"
       
       # Configuration file path
       DOCKER_HOSTS_CONFIG: "${DOCKER_HOSTS_CONFIG:-/app/config/hosts.yml}"

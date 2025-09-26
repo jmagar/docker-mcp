@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from docker_mcp.services.stack_service import StackService
 
 from fastmcp import FastMCP
+from fastmcp.resources.resource import FunctionResource
+from fastmcp.resources.template import FunctionResourceTemplate
 from fastmcp.tools.tool import ToolResult
 from pydantic import Field
 
@@ -840,6 +842,22 @@ class DockerMCPServer:
                     exc_info=True,
                 )
 
+    def _resource_to_template(self, resource: FunctionResource) -> FunctionResourceTemplate:
+        """Convert a function-backed resource into a template for URI parameters."""
+
+        return FunctionResourceTemplate.from_function(
+            fn=resource.fn,
+            uri_template=str(resource.uri),
+            name=resource.name,
+            title=resource.title,
+            description=resource.description,
+            mime_type=resource.mime_type,
+            tags=resource.tags,
+            enabled=resource.enabled,
+            annotations=resource.annotations,
+            meta=resource.meta,
+        )
+
     def _register_resources(self) -> None:
         """Register MCP resources for data access.
 
@@ -850,32 +868,44 @@ class DockerMCPServer:
             return
         try:
             # Port mapping resource - ports://{host_id}
-            port_resource = PortMappingResource(self.container_service, self)
-            self.app.add_resource(port_resource)
+            port_template = self._resource_to_template(
+                PortMappingResource(self.container_service, self)
+            )
+            self.app.add_template(port_template)
 
             # Docker host info resource - docker://{host_id}/info
-            info_resource = DockerInfoResource(self.context_manager, self.host_service)
-            self.app.add_resource(info_resource)
+            info_template = self._resource_to_template(
+                DockerInfoResource(self.context_manager, self.host_service)
+            )
+            self.app.add_template(info_template)
 
             # Compose stack listing resource - stacks://{host_id}
-            stack_list_resource = StackListResource(self.stack_service)
-            self.app.add_resource(stack_list_resource)
+            stack_list_template = self._resource_to_template(
+                StackListResource(self.stack_service)
+            )
+            self.app.add_template(stack_list_template)
 
             # Compose stack detail resource - stacks://{host_id}/{stack_name}
-            stack_detail_resource = StackDetailsResource(self.stack_service)
-            self.app.add_resource(stack_detail_resource)
+            stack_detail_template = self._resource_to_template(
+                StackDetailsResource(self.stack_service)
+            )
+            self.app.add_template(stack_detail_template)
 
             # Container listing resource - containers://{host_id}
-            container_list_resource = ContainerListResource(self.container_service)
-            self.app.add_resource(container_list_resource)
+            container_list_template = self._resource_to_template(
+                ContainerListResource(self.container_service)
+            )
+            self.app.add_template(container_list_template)
 
             # Container detail resource - containers://{host_id}/{container_id}
-            container_detail_resource = ContainerDetailsResource(self.container_service)
-            self.app.add_resource(container_detail_resource)
+            container_detail_template = self._resource_to_template(
+                ContainerDetailsResource(self.container_service)
+            )
+            self.app.add_template(container_detail_template)
 
             self.logger.info(
-                "MCP resources registered successfully",
-                resources_count=6,
+                "MCP resource templates registered successfully",
+                templates_count=6,
                 uri_schemes=["ports://", "docker://", "stacks://", "containers://"],
             )
 
