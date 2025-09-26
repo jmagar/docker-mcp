@@ -260,7 +260,7 @@ class MigrationManager:
                     else target_path
                 )
 
-                if desired_target_path not in target_dirs_created:
+                if desired_target_path and desired_target_path not in target_dirs_created:
                     await self._ensure_remote_directory(ssh_cmd_target, desired_target_path)
                     target_dirs_created.add(desired_target_path)
 

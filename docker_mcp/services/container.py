@@ -388,12 +388,40 @@ class ContainerService:
 
     def _format_container_info(self, container_info: dict[str, Any], container_id: str) -> list[str]:
         """Format comprehensive container information with ALL details in clean, structured format."""
+        summary_lines = self._format_basic_container_info(container_info, container_id)
+
+        self._add_runtime_info(summary_lines, container_info)
+        self._add_resource_limits(summary_lines, container_info)
+        self._add_network_info(summary_lines, container_info)
+        self._add_port_info(summary_lines, container_info)
+        self._add_volume_info(summary_lines, container_info)
+        self._add_environment_info(summary_lines, container_info)
+        self._add_compose_info(summary_lines, container_info)
+        self._add_labels_info(summary_lines, container_info)
+
+        return summary_lines
+
+    def _format_basic_container_info(self, container_info: dict[str, Any], container_id: str) -> list[str]:
+        """Format basic container information header."""
         name = container_info.get("name", container_id)
         state = container_info.get("state", "unknown")
         image = container_info.get("image", "unknown")
         created = container_info.get("created", "unknown")
 
-        # Enhanced status indicators
+        status_display = self._get_status_display(state)
+
+        return [
+            f"━━━ Container Details: {name} ━━━",
+            f"Container ID: {container_id}",
+            f"Short ID: {container_id[:12]}",
+            f"Status: {status_display}",
+            f"Image: {image}",
+            f"Created: {created}",
+            ""
+        ]
+
+    def _get_status_display(self, state: str) -> str:
+        """Get formatted status display with indicators."""
         status_indicators = {
             "running": "● Running",
             "exited": "○ Exited",
@@ -404,19 +432,10 @@ class ContainerService:
             "dead": "✗ Dead",
             "removing": "⊗ Removing"
         }
-        status_display = status_indicators.get(state, f"? {state.title()}")
+        return status_indicators.get(state, f"? {state.title()}")
 
-        summary_lines = [
-            f"━━━ Container Details: {name} ━━━",
-            f"Container ID: {container_id}",
-            f"Short ID: {container_id[:12]}",
-            f"Status: {status_display}",
-            f"Image: {image}",
-            f"Created: {created}",
-            ""
-        ]
-
-        # Runtime information
+    def _add_runtime_info(self, lines: list[str], container_info: dict[str, Any]) -> None:
+        """Add runtime configuration information."""
         runtime_info = []
         if container_info.get("command"):
             runtime_info.append(f"Command: {container_info['command']}")
@@ -428,109 +447,124 @@ class ContainerService:
             runtime_info.append(f"User: {container_info['user']}")
 
         if runtime_info:
-            summary_lines.extend(["Runtime Configuration:"] + [f"  {info}" for info in runtime_info] + [""])
+            lines.extend(["Runtime Configuration:"] + [f"  {info}" for info in runtime_info] + [""])
 
-        # Resource limits and usage (if available)
+    def _add_resource_limits(self, lines: list[str], container_info: dict[str, Any]) -> None:
+        """Add resource limits information."""
         if container_info.get("memory_limit") or container_info.get("cpu_limit"):
-            summary_lines.append("Resource Limits:")
+            lines.append("Resource Limits:")
             if container_info.get("memory_limit"):
-                summary_lines.append(f"  Memory: {container_info['memory_limit']}")
+                lines.append(f"  Memory: {container_info['memory_limit']}")
             if container_info.get("cpu_limit"):
-                summary_lines.append(f"  CPU: {container_info['cpu_limit']}")
-            summary_lines.append("")
+                lines.append(f"  CPU: {container_info['cpu_limit']}")
+            lines.append("")
 
-        # Network information - show ALL networks without truncation
+    def _add_network_info(self, lines: list[str], container_info: dict[str, Any]) -> None:
+        """Add network information."""
         networks = container_info.get("networks", [])
         if networks:
-            summary_lines.append("Networks:")
+            lines.append("Networks:")
             for network in networks:
                 if isinstance(network, dict):
                     network_name = network.get("name", "unknown")
                     network_ip = network.get("ip", "")
-                    summary_lines.append(f"  • {network_name}" + (f" ({network_ip})" if network_ip else ""))
+                    lines.append(f"  • {network_name}" + (f" ({network_ip})" if network_ip else ""))
                 else:
-                    summary_lines.append(f"  • {network}")
-            summary_lines.append("")
+                    lines.append(f"  • {network}")
+            lines.append("")
 
-        # Port information - show ALL ports with detailed mapping
+    def _add_port_info(self, lines: list[str], container_info: dict[str, Any]) -> None:
+        """Add port mapping information."""
         ports = container_info.get("ports", {})
         if ports:
-            summary_lines.extend(self._format_port_mappings(ports))
+            lines.extend(self._format_port_mappings(ports))
 
-        # Volume information - show ALL volumes without truncation
+    def _add_volume_info(self, lines: list[str], container_info: dict[str, Any]) -> None:
+        """Add volume mount information."""
         volumes = container_info.get("volumes", [])
         mounts = container_info.get("mounts", [])
         all_mounts = volumes + mounts
 
         if all_mounts:
-            summary_lines.append("Volume Mounts:")
+            lines.append("Volume Mounts:")
             for mount in all_mounts:
                 if isinstance(mount, dict):
                     source = mount.get("source", mount.get("Source", ""))
                     target = mount.get("target", mount.get("Destination", ""))
                     mount_type = mount.get("type", mount.get("Type", "bind"))
                     mode = mount.get("mode", mount.get("Mode", "rw"))
-                    summary_lines.append(f"  • {source} → {target} ({mount_type}, {mode})")
+                    lines.append(f"  • {source} → {target} ({mount_type}, {mode})")
                 else:
-                    summary_lines.append(f"  • {mount}")
-            summary_lines.append("")
+                    lines.append(f"  • {mount}")
+            lines.append("")
 
-        # Environment variables (if available and not sensitive)
+    def _add_environment_info(self, lines: list[str], container_info: dict[str, Any]) -> None:
+        """Add environment variables information."""
         env_vars = container_info.get("environment", [])
         if env_vars and len(env_vars) <= 20:  # Only show if reasonable number
-            summary_lines.append("Environment Variables:")
+            lines.append("Environment Variables:")
             for env_var in env_vars[:15]:  # Show up to 15
-                # Skip potentially sensitive variables
-                if any(sensitive in env_var.upper() for sensitive in ["PASSWORD", "SECRET", "TOKEN", "KEY", "PRIVATE"]):
+                if self._is_sensitive_env_var(env_var):
                     var_name = env_var.split("=")[0] if "=" in env_var else env_var
-                    summary_lines.append(f"  • {var_name}=[REDACTED]")
+                    lines.append(f"  • {var_name}=[REDACTED]")
                 else:
-                    summary_lines.append(f"  • {env_var}")
+                    lines.append(f"  • {env_var}")
             if len(env_vars) > 15:
-                summary_lines.append(f"  • ... and {len(env_vars) - 15} more variables")
-            summary_lines.append("")
+                lines.append(f"  • ... and {len(env_vars) - 15} more variables")
+            lines.append("")
 
-        # Compose information
+    def _is_sensitive_env_var(self, env_var: str) -> bool:
+        """Check if environment variable contains sensitive information."""
+        sensitive_keywords = ["PASSWORD", "SECRET", "TOKEN", "KEY", "PRIVATE"]
+        return any(sensitive in env_var.upper() for sensitive in sensitive_keywords)
+
+    def _add_compose_info(self, lines: list[str], container_info: dict[str, Any]) -> None:
+        """Add Docker Compose information."""
         compose_project = container_info.get("compose_project", "")
         if compose_project:
-            summary_lines.append("Docker Compose:")
-            summary_lines.append(f"  • Project: {compose_project}")
+            lines.append("Docker Compose:")
+            lines.append(f"  • Project: {compose_project}")
             compose_file = container_info.get("compose_file", "")
             if compose_file:
-                summary_lines.append(f"  • File: {compose_file}")
+                lines.append(f"  • File: {compose_file}")
             compose_service = container_info.get("compose_service", "")
             if compose_service:
-                summary_lines.append(f"  • Service: {compose_service}")
-            summary_lines.append("")
+                lines.append(f"  • Service: {compose_service}")
+            lines.append("")
 
-        # Labels (if available)
+    def _add_labels_info(self, lines: list[str], container_info: dict[str, Any]) -> None:
+        """Add container labels information."""
         labels = container_info.get("labels", {})
         if labels:
-            summary_lines.append("Labels:")
-            # Show important Docker/Compose labels first
-            important_labels = []
-            other_labels = []
-
-            for key, value in labels.items():
-                if any(prefix in key for prefix in ["com.docker.compose", "traefik", "org.label-schema"]):
-                    important_labels.append((key, value))
-                else:
-                    other_labels.append((key, value))
+            lines.append("Labels:")
+            important_labels, other_labels = self._categorize_labels(labels)
 
             # Show important labels first
             for key, value in important_labels[:10]:
-                summary_lines.append(f"  • {key}: {value}")
+                lines.append(f"  • {key}: {value}")
 
             # Show other labels (limited)
             for key, value in other_labels[:5]:
-                summary_lines.append(f"  • {key}: {value}")
+                lines.append(f"  • {key}: {value}")
 
             total_labels = len(important_labels) + len(other_labels)
             if total_labels > 15:
-                summary_lines.append(f"  • ... and {total_labels - 15} more labels")
-            summary_lines.append("")
+                lines.append(f"  • ... and {total_labels - 15} more labels")
+            lines.append("")
 
-        return summary_lines
+    def _categorize_labels(self, labels: dict[str, Any]) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]]]:
+        """Categorize labels into important and other groups."""
+        important_labels = []
+        other_labels = []
+        important_prefixes = ["com.docker.compose", "traefik", "org.label-schema"]
+
+        for key, value in labels.items():
+            if any(prefix in key for prefix in important_prefixes):
+                important_labels.append((key, value))
+            else:
+                other_labels.append((key, value))
+
+        return important_labels, other_labels
 
     def _format_container_details(
         self, container_info: dict[str, Any], container_id: str
@@ -1070,82 +1104,123 @@ class ContainerService:
             Port availability information
         """
         try:
-            is_valid, error_msg = validate_host(self.config, host_id)
-            if not is_valid:
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "formatted_output": f"❌ Port check failed: {error_msg}",
-                }
+            # Validate host
+            validation_result = self._validate_port_check_host(host_id)
+            if validation_result:
+                return validation_result
 
-            # Get current port usage (always include stopped containers)
-            result = await self.container_tools.list_host_ports(host_id)
+            # Get port usage data
+            port_data = await self._get_port_usage_data(host_id)
+            if "error" in port_data:
+                return {"success": False, "error": port_data["error"]}
 
-            if "error" in result:
-                return {"success": False, "error": result["error"]}
-
-            # Check if the specific port is in use
-            port_mappings = result.get("port_mappings", [])
-
-            conflicts = []
-            for mapping in port_mappings:
-                if mapping.get("host_port") == str(port):
-                    conflicts.append(
-                        {
-                            "container_name": mapping.get("container_name"),
-                            CONTAINER_ID: mapping.get(CONTAINER_ID),
-                            "image": mapping.get("image"),
-                            "protocol": mapping.get("protocol", "tcp"),
-                        }
-                    )
-
+            # Find conflicts
+            conflicts = self._find_port_conflicts(port_data.get("port_mappings", []), port)
             is_available = len(conflicts) == 0
 
-            response: dict[str, Any] = {
-                "success": True,
-                HOST_ID: host_id,
-                "port": port,
-                "available": is_available,
-                "conflicts": conflicts,
-                "message": f"Port {port} is {'available' if is_available else 'in use'}",
-            }
-
-            conflicts_preview = []
-            if conflicts:
-                for conflict in conflicts[:5]:
-                    name = conflict.get("container_name", "unknown")
-                    protocol = conflict.get("protocol", "tcp").upper()
-                    conflicts_preview.append(f"  • {name} ({protocol})")
-                remaining = len(conflicts) - len(conflicts_preview)
-                if remaining > 0:
-                    conflicts_preview.append(f"  • +{remaining} more")
-
-            if is_available:
-                response["formatted_output"] = (
-                    f"Port {port} is available on {host_id}"
-                )
-            else:
-                formatted_lines = [
-                    f"Port {port} is in use on {host_id}",
-                ]
-                if conflicts_preview:
-                    formatted_lines.append("Conflicts:")
-                    formatted_lines.extend(conflicts_preview)
-                response["formatted_output"] = "\n".join(formatted_lines)
+            # Build response
+            response = self._build_port_availability_response(
+                host_id, port, is_available, conflicts
+            )
 
             return response
 
         except Exception as e:
-            self.logger.error(
-                "Failed to check port availability", host_id=host_id, port=port, error=str(e)
-            )
+            return self._handle_port_check_error(host_id, port, e)
+
+    def _validate_port_check_host(self, host_id: str) -> dict[str, Any] | None:
+        """Validate host for port checking."""
+        is_valid, error_msg = validate_host(self.config, host_id)
+        if not is_valid:
             return {
                 "success": False,
-                "error": f"Port check failed: {str(e)}",
-                HOST_ID: host_id,
-                "port": port,
-                "formatted_output": f"❌ Port check failed: {str(e)}",
+                "error": error_msg,
+                "formatted_output": f"❌ Port check failed: {error_msg}",
             }
+        return None
+
+    async def _get_port_usage_data(self, host_id: str) -> dict[str, Any]:
+        """Get current port usage data for the host."""
+        return await self.container_tools.list_host_ports(host_id)
+
+    def _find_port_conflicts(self, port_mappings: list[dict[str, Any]], port: int) -> list[dict[str, Any]]:
+        """Find conflicts for the specified port."""
+        conflicts = []
+        for mapping in port_mappings:
+            if mapping.get("host_port") == str(port):
+                conflicts.append(
+                    {
+                        "container_name": mapping.get("container_name"),
+                        CONTAINER_ID: mapping.get(CONTAINER_ID),
+                        "image": mapping.get("image"),
+                        "protocol": mapping.get("protocol", "tcp"),
+                    }
+                )
+        return conflicts
+
+    def _build_port_availability_response(
+        self, host_id: str, port: int, is_available: bool, conflicts: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Build port availability response."""
+        response: dict[str, Any] = {
+            "success": True,
+            HOST_ID: host_id,
+            "port": port,
+            "available": is_available,
+            "conflicts": conflicts,
+            "message": f"Port {port} is {'available' if is_available else 'in use'}",
+        }
+
+        response["formatted_output"] = self._format_port_availability_output(
+            host_id, port, is_available, conflicts
+        )
+        return response
+
+    def _format_port_availability_output(
+        self, host_id: str, port: int, is_available: bool, conflicts: list[dict[str, Any]]
+    ) -> str:
+        """Format port availability output."""
+        if is_available:
+            return f"Port {port} is available on {host_id}"
+
+        formatted_lines = [f"Port {port} is in use on {host_id}"]
+
+        conflicts_preview = self._format_conflicts_preview(conflicts)
+        if conflicts_preview:
+            formatted_lines.append("Conflicts:")
+            formatted_lines.extend(conflicts_preview)
+
+        return "\n".join(formatted_lines)
+
+    def _format_conflicts_preview(self, conflicts: list[dict[str, Any]]) -> list[str]:
+        """Format conflicts preview for display."""
+        if not conflicts:
+            return []
+
+        conflicts_preview = []
+        for conflict in conflicts[:5]:
+            name = conflict.get("container_name", "unknown")
+            protocol = conflict.get("protocol", "tcp").upper()
+            conflicts_preview.append(f"  • {name} ({protocol})")
+
+        remaining = len(conflicts) - len(conflicts_preview)
+        if remaining > 0:
+            conflicts_preview.append(f"  • +{remaining} more")
+
+        return conflicts_preview
+
+    def _handle_port_check_error(self, host_id: str, port: int, error: Exception) -> dict[str, Any]:
+        """Handle port check errors."""
+        self.logger.error(
+            "Failed to check port availability", host_id=host_id, port=port, error=str(error)
+        )
+        return {
+            "success": False,
+            "error": f"Port check failed: {str(error)}",
+            HOST_ID: host_id,
+            "port": port,
+            "formatted_output": f"❌ Port check failed: {str(error)}",
+        }
 
     async def handle_action(self, action, **params) -> dict[str, Any]:
         """Unified action handler for all container operations.

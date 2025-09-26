@@ -41,7 +41,6 @@ class DockerHostsParams(MCPModel):
     action: HostAction = Field(
         default=HostAction.LIST, description="Action to perform (defaults to list if not provided)"
     )
-    host_id: str = Field(default="", description="Host identifier")
     ssh_host: str = Field(default="", description="SSH hostname or IP address")
     ssh_user: str = Field(default="", description="SSH username")
     ssh_port: int = Field(default=22, ge=1, le=65535, description="SSH port number")
@@ -58,6 +57,7 @@ class DockerHostsParams(MCPModel):
     cleanup_type: Literal["check", "safe", "moderate", "aggressive"] | None = Field(
         default=None, description="Type of cleanup to perform"
     )
+    host_id: str = Field(default="", description="Host identifier")
 
     # Port check parameter (only for ports check sub-action)
     port: int = Field(
@@ -85,7 +85,6 @@ class DockerContainerParams(MCPModel):
     """Parameters for the docker_container consolidated tool."""
 
     action: ContainerAction = Field(..., description="Action to perform")
-    host_id: str = Field(default="", description="Host identifier")
     container_id: str = Field(default="", description="Container identifier")
     image_name: str = Field(default="", description="Image name to pull (for pull action)")
     all_containers: bool = Field(
@@ -97,6 +96,7 @@ class DockerContainerParams(MCPModel):
     lines: int = Field(default=100, ge=1, le=10000, description="Number of log lines to retrieve")
     force: bool = Field(default=False, description="Force the operation")
     timeout: int = Field(default=10, ge=1, le=300, description="Operation timeout in seconds")
+    host_id: str = Field(default="", description="Host identifier")
 
     @field_validator("action", mode="before")
     @classmethod
@@ -109,7 +109,6 @@ class DockerComposeParams(MCPModel):
     """Parameters for the docker_compose consolidated tool."""
 
     action: ComposeAction = Field(..., description="Action to perform")
-    host_id: str = Field(default="", description="Host identifier")
     stack_name: DNSName = Field(
         default="",
         description="Stack name (DNS-compliant: lowercase letters, numbers, hyphens; no underscores)",
@@ -124,21 +123,21 @@ class DockerComposeParams(MCPModel):
         import re
         if not isinstance(v, dict):
             return v
-        
+
         for key, value in v.items():
             # Check for empty keys
             if not key or key.strip() == "":
                 raise ValueError("Environment variable keys cannot be empty")
-            
+
             # Check for None values
             if value is None:
                 raise ValueError(f"Environment variable '{key}' cannot have None value")
-            
+
             # Validate key follows environment variable naming conventions
             # Must be alphanumeric plus underscore, not starting with digit
             if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", key):
                 raise ValueError(f"Environment variable key '{key}' must contain only letters, numbers, and underscores, and cannot start with a digit")
-        
+
         return v
     pull_images: bool = Field(default=True, description="Pull images before deploying")
     recreate: bool = Field(default=False, description="Recreate containers")
@@ -154,6 +153,7 @@ class DockerComposeParams(MCPModel):
         default=False, description="Skip stopping source stack before migration"
     )
     start_target: bool = Field(default=True, description="Start target stack after migration")
+    host_id: str = Field(default="", description="Host identifier")
 
     @field_validator("action", mode="before")
     @classmethod

@@ -160,10 +160,9 @@ class StackTools:
                     services_info: list[dict[str, Any]] = []
                 else:
                     services_info = self._parse_compose_ps(ps_output.stdout)
-                service_names = sorted(
-                    {svc.get("Service") or svc.get("service") or svc.get("Name") for svc in services_info}
-                )
-                service_names = [name for name in service_names if name]
+                raw_service_names = {svc.get("Service") or svc.get("service") or svc.get("Name") for svc in services_info}
+                filtered_service_names = [name for name in raw_service_names if name]
+                service_names = sorted(filtered_service_names)
 
                 service_states = [
                     (svc.get("State") or svc.get("state") or "").lower() for svc in services_info
@@ -178,7 +177,7 @@ class StackTools:
                 stack_info = StackInfo(
                     name=project_name,
                     host_id=host_id,
-                    services=service_names,
+                    services=service_names,  # Now properly typed as list[str]
                     status=aggregate_status,
                     created=self._parse_datetime(project.get("CreatedAt") or project.get("created")),
                     updated=self._parse_datetime(project.get("UpdatedAt") or project.get("updated")),
@@ -549,13 +548,13 @@ class StackTools:
         except json.JSONDecodeError:
             entries: list[dict[str, Any]] = []
             for line in text.splitlines():
-                line = line.strip()
-                if not line:
+                stripped_line = line.strip()
+                if not stripped_line:
                     continue
                 try:
-                    entries.append(json.loads(line))
+                    entries.append(json.loads(stripped_line))
                 except json.JSONDecodeError:
-                    logger.debug("Failed to parse docker compose ls line", line=line)
+                    logger.debug("Failed to parse docker compose ls line", line=stripped_line)
             return entries
 
         return []
@@ -584,13 +583,13 @@ class StackTools:
         except json.JSONDecodeError:
             entries: list[dict[str, Any]] = []
             for line in text.splitlines():
-                line = line.strip()
-                if not line:
+                stripped_line = line.strip()
+                if not stripped_line:
                     continue
                 try:
-                    entries.append(json.loads(line))
+                    entries.append(json.loads(stripped_line))
                 except json.JSONDecodeError:
-                    logger.debug("Failed to parse docker compose ps line", line=line)
+                    logger.debug("Failed to parse docker compose ps line", line=stripped_line)
             return entries
 
         return []

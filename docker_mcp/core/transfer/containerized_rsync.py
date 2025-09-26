@@ -12,10 +12,18 @@ import structlog
 
 from ..config_loader import DockerHost
 from ..exceptions import DockerMCPError
-from ..settings import RSYNC_TIMEOUT, DOCKER_CLI_TIMEOUT, CONTAINER_PULL_TIMEOUT
+from ..settings import CONTAINER_PULL_TIMEOUT, DOCKER_CLI_TIMEOUT, RSYNC_TIMEOUT
 from .base import BaseTransfer
 
 logger = structlog.get_logger()
+
+# Container-specific secure paths - these are safe in isolated ephemeral Docker containers
+# that are automatically destroyed after each operation. The paths are namespaced
+# to avoid conflicts and only exist within the container's isolated filesystem.
+_CONTAINER_SSH_DIR = "/tmp/.ssh"  # noqa: S108
+_CONTAINER_SSH_CONFIG_PATH = f"{_CONTAINER_SSH_DIR}/config"
+_CONTAINER_TARGET_KEY_PATH = "/tmp/target_key"  # noqa: S108
+_CONTAINER_SOURCE_KEY_PATH = "/tmp/source_key"  # noqa: S108
 
 
 class ContainerizedRsyncError(DockerMCPError):
@@ -235,25 +243,25 @@ class ContainerizedRsyncTransfer(BaseTransfer):
         # Set up SSH keys with proper permissions
         if source_host.identity_file is not None:
             commands.extend([
-                "cp /source_key /tmp/source_key",
-                "chmod 600 /tmp/source_key",
+                f"cp /source_key {_CONTAINER_SOURCE_KEY_PATH}",
+                f"chmod 600 {_CONTAINER_SOURCE_KEY_PATH}",
             ])
 
         if target_host.identity_file is not None:
             commands.extend([
-                "cp /target_key /tmp/target_key",
-                "chmod 600 /tmp/target_key",
+                f"cp /target_key {_CONTAINER_TARGET_KEY_PATH}",
+                f"chmod 600 {_CONTAINER_TARGET_KEY_PATH}",
             ])
         else:
             # Copy SSH directory and fix ownership/permissions for container root user
             commands.extend([
-                "cp -r /root/.ssh /tmp/.ssh 2>/dev/null || mkdir -p /tmp/.ssh",
-                "chown -R root:root /tmp/.ssh 2>/dev/null || true",
-                "chmod 700 /tmp/.ssh",
-                "chmod 600 /tmp/.ssh/* 2>/dev/null || true",
+                f"cp -r /root/.ssh {_CONTAINER_SSH_DIR} 2>/dev/null || mkdir -p {_CONTAINER_SSH_DIR}",
+                f"chown -R root:root {_CONTAINER_SSH_DIR} 2>/dev/null || true",
+                f"chmod 700 {_CONTAINER_SSH_DIR}",
+                f"chmod 600 {_CONTAINER_SSH_DIR}/* 2>/dev/null || true",
             ])
             # Use copied SSH config file instead of mounted read-only version
-            target_ssh_opts.extend(["-F", "/tmp/.ssh/config"])
+            target_ssh_opts.extend(["-F", _CONTAINER_SSH_CONFIG_PATH])
 
         # Build rsync command that runs directly in container (simplified architecture)
         target_url = f"{target_host.user}@{target_host.hostname}:{shlex.quote(target_path)}"
@@ -266,7 +274,7 @@ class ContainerizedRsyncTransfer(BaseTransfer):
 
         if target_host.identity_file is not None:
             # Use specific identity file
-            target_ssh_opts.extend(["-i", "/tmp/target_key"])
+            target_ssh_opts.extend(["-i", _CONTAINER_TARGET_KEY_PATH])
             ssh_command = f"ssh {' '.join(target_ssh_opts)}"
             rsync_cmd.insert(-2, "-e")
             rsync_cmd.insert(-2, ssh_command)
@@ -275,7 +283,7 @@ class ContainerizedRsyncTransfer(BaseTransfer):
             commands.append(shlex.join(rsync_cmd))
         else:
             # Find available SSH key and build rsync command dynamically
-            commands.append("if [ -f /tmp/.ssh/id_ed25519 ]; then SSH_KEY=/tmp/.ssh/id_ed25519; elif [ -f /tmp/.ssh/id_rsa ]; then SSH_KEY=/tmp/.ssh/id_rsa; elif [ -f /tmp/.ssh/id_ecdsa ]; then SSH_KEY=/tmp/.ssh/id_ecdsa; else echo 'No SSH key found' && exit 1; fi")
+            commands.append(f"if [ -f {_CONTAINER_SSH_DIR}/id_ed25519 ]; then SSH_KEY={_CONTAINER_SSH_DIR}/id_ed25519; elif [ -f {_CONTAINER_SSH_DIR}/id_rsa ]; then SSH_KEY={_CONTAINER_SSH_DIR}/id_rsa; elif [ -f {_CONTAINER_SSH_DIR}/id_ecdsa ]; then SSH_KEY={_CONTAINER_SSH_DIR}/id_ecdsa; else echo 'No SSH key found' && exit 1; fi")
 
             # Build rsync command with dynamic SSH key
             target_ssh_opts_str = " ".join(target_ssh_opts)

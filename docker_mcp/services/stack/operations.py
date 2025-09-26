@@ -404,70 +404,83 @@ class StackOperations:
         """Format deployment result with service-level progress visualization."""
         lines = []
 
-        # Header with visual separator
+        # Add header section
+        self._add_deploy_header(lines, stack_name, host_id)
+
+        # Add status section
+        self._add_deploy_status(lines, result)
+
+        # Add services section
+        self._add_services_status(lines, result)
+
+        # Add deployment info
+        self._add_deploy_info(lines, result)
+
+        # Add footer
+        lines.append("")
+        lines.append("═" * 60)
+
+        return lines
+
+    def _add_deploy_header(self, lines: list[str], stack_name: str, host_id: str) -> None:
+        """Add deployment header to output lines."""
         lines.append("═" * 60)
         lines.append(f"🚀 Stack Deployment: {stack_name} → {host_id}")
         lines.append("═" * 60)
 
+    def _add_deploy_status(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add deployment status to output lines."""
         if result.get("success"):
             lines.append("✅ Deployment Status: SUCCESS")
         else:
             lines.append("❌ Deployment Status: FAILED")
             if error := result.get("error"):
                 lines.append(f"   Error: {error}")
+        lines.append("")
+
+    def _add_services_status(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add services deployment status to output lines."""
+        services_data = result.get("data", {}).get("services", [])
+        if not services_data:
+            return
+
+        lines.append("📋 Service Deployment Status:")
+        lines.append("─" * 40)
+
+        for service in services_data:
+            name = service.get("Name", "Unknown")
+            status = service.get("Status", "Unknown").lower()
+            indicator, status_text = self._get_service_status_indicator(status)
+            lines.append(f"  {indicator} {name:<25} │ {status_text}")
 
         lines.append("")
 
-        # Service deployment status
-        services_data = result.get("data", {}).get("services", [])
-        if services_data:
-            lines.append("📋 Service Deployment Status:")
-            lines.append("─" * 40)
+    def _get_service_status_indicator(self, status: str) -> tuple[str, str]:
+        """Get status indicator and text for a service."""
+        if "running" in status or "up" in status:
+            if "healthy" in status:
+                return "✅", "Healthy & Running"
+            else:
+                return "🟢", "Running"
+        elif "starting" in status or "restarting" in status:
+            return "🔄", "Starting"
+        elif "unhealthy" in status:
+            return "⚠️ ", "Unhealthy"
+        elif "exited" in status or "stopped" in status:
+            return "🔴", "Stopped"
+        else:
+            return "❓", status.title()
 
-            for service in services_data:
-                name = service.get("Name", "Unknown")
-                status = service.get("Status", "Unknown").lower()
-
-                # Enhanced health indicators
-                if "running" in status or "up" in status:
-                    if "healthy" in status:
-                        indicator = "✅"
-                        status_text = "Healthy & Running"
-                    else:
-                        indicator = "🟢"
-                        status_text = "Running"
-                elif "starting" in status or "restarting" in status:
-                    indicator = "🔄"
-                    status_text = "Starting"
-                elif "unhealthy" in status:
-                    indicator = "⚠️ "
-                    status_text = "Unhealthy"
-                elif "exited" in status or "stopped" in status:
-                    indicator = "🔴"
-                    status_text = "Stopped"
-                else:
-                    indicator = "❓"
-                    status_text = status.title()
-
-                lines.append(f"  {indicator} {name:<25} │ {status_text}")
-
-            lines.append("")
-
-        # Additional deployment info
+    def _add_deploy_info(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add additional deployment information to output lines."""
         if pull_info := result.get("pull_images"):
             lines.append(f"📦 Images: {'Pulled' if pull_info else 'Used cached'}")
 
         if recreate_info := result.get("recreate"):
             lines.append(f"🔄 Recreation: {'Forced' if recreate_info else 'Incremental'}")
 
-        # Show deployment path
         if compose_path := result.get("compose_path"):
             lines.append(f"📁 Deployed to: {compose_path}")
-
-        lines.append("")
-        lines.append("═" * 60)
-
-        return lines
 
     def _format_ps_result(self, result: dict[str, Any], stack_name: str) -> list[str]:
         """Format ps action result with enhanced health status indicators."""
@@ -478,58 +491,71 @@ class StackOperations:
             summary_lines.append("No services reported (stack may be stopped)")
             return summary_lines
 
+        # Add table header
+        self._add_ps_table_header(summary_lines)
+
+        # Process services and collect status counts
+        status_counts = {"healthy": 0, "unhealthy": 0, "starting": 0, "stopped": 0}
+        self._process_services_for_ps(summary_lines, services, status_counts)
+
+        # Add summary
+        self._add_ps_summary(summary_lines, services, status_counts)
+
+        return summary_lines
+
+    def _add_ps_table_header(self, summary_lines: list[str]) -> None:
+        """Add table header for ps result."""
         summary_lines.append("")
         summary_lines.append(f"{'State':<7} {'Service':<25} {'Health':<10} Ports")
         summary_lines.append(
             f"{'-' * 7:<7} {'-' * 25:<25} {'-' * 10:<10} {'-' * 30}"
         )
 
-        status_counts = {"healthy": 0, "unhealthy": 0, "starting": 0, "stopped": 0}
-
+    def _process_services_for_ps(
+        self, summary_lines: list[str], services: list[dict[str, Any]], status_counts: dict[str, int]
+    ) -> None:
+        """Process services and add them to the ps result."""
         for service in services:
             name = service.get("Name", "Unknown")
             status = (service.get("Status") or "").lower()
             ports = (service.get("Ports") or "-").replace("->", "→")
 
-            if "running" in status or "up" in status:
-                if "healthy" in status:
-                    state_icon = "●"
-                    health_label = "healthy"
-                    status_counts["healthy"] += 1
-                elif "unhealthy" in status:
-                    state_icon = "●"
-                    health_label = "unhealthy"
-                    status_counts["unhealthy"] += 1
-                else:
-                    state_icon = "●"
-                    health_label = "running"
-                    status_counts["healthy"] += 1
-            elif "starting" in status or "restarting" in status:
-                state_icon = "◐"
-                health_label = "starting"
-                status_counts["starting"] += 1
-            elif "exited" in status or "stopped" in status:
-                state_icon = "○"
-                health_label = "stopped"
-                status_counts["stopped"] += 1
-            else:
-                state_icon = "?"
-                health_label = "unknown"
-                status_counts["stopped"] += 1
+            state_icon, health_label = self._get_service_state_info(status, status_counts)
 
             summary_lines.append(
                 f"{state_icon:<7} {name[:25]:<25} {health_label:<10} {ports}"
             )
 
+    def _get_service_state_info(self, status: str, status_counts: dict[str, int]) -> tuple[str, str]:
+        """Get service state icon and health label based on status."""
+        if "running" in status or "up" in status:
+            if "healthy" in status:
+                status_counts["healthy"] += 1
+                return "●", "healthy"
+            elif "unhealthy" in status:
+                status_counts["unhealthy"] += 1
+                return "●", "unhealthy"
+            else:
+                status_counts["healthy"] += 1
+                return "●", "running"
+        elif "starting" in status or "restarting" in status:
+            status_counts["starting"] += 1
+            return "◐", "starting"
+        elif "exited" in status or "stopped" in status:
+            status_counts["stopped"] += 1
+            return "○", "stopped"
+        else:
+            status_counts["stopped"] += 1
+            return "?", "unknown"
+
+    def _add_ps_summary(
+        self, summary_lines: list[str], services: list[dict[str, Any]], status_counts: dict[str, int]
+    ) -> None:
+        """Add summary section to ps result."""
         totals: list[str] = []
-        if status_counts["healthy"]:
-            totals.append(f"healthy {status_counts['healthy']}")
-        if status_counts["unhealthy"]:
-            totals.append(f"unhealthy {status_counts['unhealthy']}")
-        if status_counts["starting"]:
-            totals.append(f"starting {status_counts['starting']}")
-        if status_counts["stopped"]:
-            totals.append(f"stopped {status_counts['stopped']}")
+        for status_type, count in status_counts.items():
+            if count > 0:
+                totals.append(f"{status_type} {count}")
 
         summary_lines.append("")
         total_services = len(services)
@@ -537,8 +563,6 @@ class StackOperations:
             summary_lines.append(f"Summary: {total_services} services ({', '.join(totals)})")
         else:
             summary_lines.append(f"Summary: {total_services} services")
-
-        return summary_lines
 
     async def _verify_service_status(self, host_id: str, stack_name: str, service_results: dict) -> None:
         """Verify the status of individual services after deployment."""
@@ -643,6 +667,18 @@ class StackOperations:
                     lines.append(f"     └─ Error: {error}")
 
         # Recovery options with enhanced formatting
+        self._format_recovery_section(lines, service_results)
+
+        lines.append("═" * 60)
+
+        return "\n".join(lines)
+
+    def _format_service_sections(self, lines: list[str], service_results: dict) -> None:
+        """Format successful and failed services sections."""
+        self._format_service_sections(lines, service_results)
+
+    def _format_recovery_section(self, lines: list[str], service_results: dict) -> None:
+        """Format recovery options and warnings section."""
         if service_results.get("recovery_options"):
             lines.append("\n🔧 Recovery Options Available:")
             lines.append("─" * 30)
@@ -654,100 +690,132 @@ class StackOperations:
             lines.append("\n⚠️  Partial deployment detected - manual intervention may be required")
             lines.append("    Consider using recovery options above to resolve issues")
 
-        lines.append("═" * 60)
-
-        return "\n".join(lines)
 
     def _format_migrate_result(self, result: dict[str, Any], stack_name: str, source_host: str, target_host: str) -> list[str]:
         """Format migration result with clear step-by-step progress visualization."""
         lines = []
 
-        # Header with migration flow
+        # Add migration sections
+        self._add_migration_header(lines, stack_name, source_host, target_host)
+        self._add_migration_status(lines, result)
+        self._add_migration_steps(lines, result)
+        self._add_transfer_stats(lines, result)
+        self._add_stack_status(lines, result)
+        self._add_migration_summary(lines, result)
+        self._add_migration_footer(lines, result)
+
+        return lines
+
+    def _add_migration_header(self, lines: list[str], stack_name: str, source_host: str, target_host: str) -> None:
+        """Add migration header with stack name and host flow."""
         lines.append("╔" + "═" * 58 + "╗")
         lines.append(f"║ 🚚 Stack Migration: {stack_name:<35} ║")
         lines.append(f"║ {source_host} ➡️  {target_host:<42} ║")
         lines.append("╚" + "═" * 58 + "╝")
         lines.append("")
 
-        # Overall migration status
+    def _add_migration_status(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add overall migration status."""
         if result.get("overall_success") or result.get("success"):
             lines.append("✅ Migration Status: COMPLETED SUCCESSFULLY")
         else:
             lines.append("❌ Migration Status: FAILED")
             if error := result.get("error"):
                 lines.append(f"   Primary Error: {error}")
-
         lines.append("")
 
-        # Migration steps with detailed progress
+    def _add_migration_steps(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add migration steps progress."""
         steps = result.get("migration_steps", [])
-        if steps:
-            lines.append("📋 Migration Progress:")
-            lines.append("┌" + "─" * 56 + "┐")
+        if not steps:
+            return
 
-            for i, step in enumerate(steps, 1):
-                step_name = step.get("name", f"Step {i}")
-                step_status = step.get("status", "unknown")
-                step_duration = step.get("duration_seconds", 0)
+        lines.append("📋 Migration Progress:")
+        lines.append("┌" + "─" * 56 + "┐")
 
-                if step_status == "completed":
-                    status_icon = "✅"
-                    status_text = f"Completed ({step_duration:.1f}s)"
-                elif step_status == "failed":
-                    status_icon = "❌"
-                    status_text = f"Failed ({step_duration:.1f}s)"
-                    if step_error := step.get("error"):
-                        status_text += f" - {step_error}"
-                elif step_status == "in_progress":
-                    status_icon = "🔄"
-                    status_text = "In Progress..."
-                elif step_status == "skipped":
-                    status_icon = "⏭️"
-                    status_text = "Skipped"
-                else:
-                    status_icon = "⏸️"
-                    status_text = "Pending"
+        for i, step in enumerate(steps, 1):
+            step_name = step.get("name", f"Step {i}")
+            step_status = step.get("status", "unknown")
+            step_duration = step.get("duration_seconds", 0)
 
-                lines.append(f"│ {i:2}. {status_icon} {step_name:<30} │ {status_text[:15]:<15} │")
+            status_icon, status_text = self._get_step_status_info(step_status, step_duration, step)
+            lines.append(f"│ {i:2}. {status_icon} {step_name:<30} │ {status_text[:15]:<15} │")
 
-            lines.append("└" + "─" * 56 + "┘")
-            lines.append("")
+        lines.append("└" + "─" * 56 + "┘")
+        lines.append("")
 
-        # Data transfer statistics
-        if transfer_stats := result.get("transfer_stats", {}):
-            lines.append("📊 Transfer Statistics:")
-            lines.append("─" * 30)
-            if bytes_transferred := transfer_stats.get("bytes_transferred"):
-                lines.append(f"  📦 Data transferred: {self._format_bytes(bytes_transferred)}")
-            if transfer_speed := transfer_stats.get("transfer_speed_mbps"):
-                lines.append(f"  ⚡ Transfer speed: {transfer_speed:.1f} MB/s")
-            if files_count := transfer_stats.get("files_transferred"):
-                lines.append(f"  📁 Files transferred: {files_count}")
-            lines.append("")
+    def _get_step_status_info(self, status: str, duration: float, step: dict[str, Any]) -> tuple[str, str]:
+        """Get step status icon and text."""
+        if status == "completed":
+            return "✅", f"Completed ({duration:.1f}s)"
+        elif status == "failed":
+            status_text = f"Failed ({duration:.1f}s)"
+            if step_error := step.get("error"):
+                status_text += f" - {step_error}"
+            return "❌", status_text
+        elif status == "in_progress":
+            return "🔄", "In Progress..."
+        elif status == "skipped":
+            return "⏭️", "Skipped"
+        else:
+            return "⏸️", "Pending"
 
-        # Source and target status
-        if source_status := result.get("source_stack_status"):
-            lines.append("🔹 Source Stack Status:")
-            lines.append(f"   Status: {source_status.get('status', 'unknown')}")
-            if source_status.get("stopped"):
-                lines.append("   ✅ Successfully stopped for migration")
-            if source_status.get("removed") and result.get("remove_source"):
-                lines.append("   🗑️  Removed after successful migration")
+    def _add_transfer_stats(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add data transfer statistics."""
+        transfer_stats = result.get("transfer_stats", {})
+        if not transfer_stats:
+            return
 
-        if target_status := result.get("target_stack_status"):
-            lines.append("")
-            lines.append("🔸 Target Stack Status:")
-            lines.append(f"   Status: {target_status.get('status', 'unknown')}")
-            if target_services := target_status.get("services", []):
-                lines.append(f"   Services: {len(target_services)} running")
-                for service in target_services[:3]:  # Show first 3 services
-                    service_name = service.get("name", "Unknown")
-                    service_status = service.get("status", "unknown")
-                    lines.append(f"     • {service_name}: {service_status}")
-                if len(target_services) > 3:
-                    lines.append(f"     ... and {len(target_services) - 3} more services")
+        lines.append("📊 Transfer Statistics:")
+        lines.append("─" * 30)
+        if bytes_transferred := transfer_stats.get("bytes_transferred"):
+            lines.append(f"  📦 Data transferred: {self._format_bytes(bytes_transferred)}")
+        if transfer_speed := transfer_stats.get("transfer_speed_mbps"):
+            lines.append(f"  ⚡ Transfer speed: {transfer_speed:.1f} MB/s")
+        if files_count := transfer_stats.get("files_transferred"):
+            lines.append(f"  📁 Files transferred: {files_count}")
+        lines.append("")
 
-        # Migration summary
+    def _add_stack_status(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add source and target stack status."""
+        self._add_source_stack_status(lines, result)
+        self._add_target_stack_status(lines, result)
+
+    def _add_source_stack_status(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add source stack status information."""
+        source_status = result.get("source_stack_status")
+        if not source_status:
+            return
+
+        lines.append("🔹 Source Stack Status:")
+        lines.append(f"   Status: {source_status.get('status', 'unknown')}")
+        if source_status.get("stopped"):
+            lines.append("   ✅ Successfully stopped for migration")
+        if source_status.get("removed") and result.get("remove_source"):
+            lines.append("   🗑️  Removed after successful migration")
+
+    def _add_target_stack_status(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add target stack status information."""
+        target_status = result.get("target_stack_status")
+        if not target_status:
+            return
+
+        lines.append("")
+        lines.append("🔸 Target Stack Status:")
+        lines.append(f"   Status: {target_status.get('status', 'unknown')}")
+
+        target_services = target_status.get("services", [])
+        if target_services:
+            lines.append(f"   Services: {len(target_services)} running")
+            for service in target_services[:3]:  # Show first 3 services
+                service_name = service.get("name", "Unknown")
+                service_status = service.get("status", "unknown")
+                lines.append(f"     • {service_name}: {service_status}")
+            if len(target_services) > 3:
+                lines.append(f"     ... and {len(target_services) - 3} more services")
+
+    def _add_migration_summary(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add migration summary information."""
         lines.append("")
         lines.append("📈 Migration Summary:")
         lines.append("─" * 25)
@@ -760,14 +828,17 @@ class StackOperations:
         else:
             lines.append("  🚀 Mode: Live migration")
 
-        # Recommendations or next steps
-        if recommendations := result.get("recommendations", []):
+        # Recommendations
+        recommendations = result.get("recommendations", [])
+        if recommendations:
             lines.append("")
             lines.append("💡 Recommendations:")
             lines.append("─" * 20)
             for rec in recommendations[:3]:  # Show top 3 recommendations
                 lines.append(f"  • {rec}")
 
+    def _add_migration_footer(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add migration result footer."""
         lines.append("")
         lines.append("╔" + "═" * 58 + "╗")
         if result.get("overall_success") or result.get("success"):
@@ -775,8 +846,6 @@ class StackOperations:
         else:
             lines.append("║ ❌ Migration failed - check logs for details           ║")
         lines.append("╚" + "═" * 58 + "╝")
-
-        return lines
 
     def _format_bytes(self, bytes_count: int) -> str:
         """Format bytes count in human-readable format."""

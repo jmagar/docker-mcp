@@ -39,7 +39,7 @@ def build_ssh_command(host: DockerHost) -> list[str]:
         ['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=10', 'docker@server.com']
     """
     import shlex
-    
+
     ssh_cmd = [
         "ssh",
         "-o", SSH_NO_HOST_CHECK,
@@ -49,23 +49,23 @@ def build_ssh_command(host: DockerHost) -> list[str]:
         "-o", "ServerAliveInterval=30",  # Keep connection alive
         "-o", "BatchMode=yes",  # Fully automated connections (no prompts)
     ]
-    
+
     if host.identity_file:
         ssh_cmd.extend(["-i", host.identity_file])
-    
+
     if host.port != 22:
         ssh_cmd.extend(["-p", str(host.port)])
-    
+
     # Handle hostname with proper quoting and IPv6 support
     hostname = host.hostname
     if ":" in hostname and not (hostname.startswith("[") and hostname.endswith("]")):
         # IPv6 address needs brackets
         hostname = f"[{hostname}]"
-    
+
     # Use proper quoting for hostname
     user_host = f"{host.user}@{shlex.quote(hostname)}"
     ssh_cmd.append(user_host)
-    
+
     return ssh_cmd
 
 

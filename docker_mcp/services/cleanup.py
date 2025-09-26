@@ -6,8 +6,7 @@ Business logic for Docker cleanup and disk usage operations.
 
 import asyncio
 import re
-from datetime import datetime, timezone
-from typing import Any, Literal, cast
+from typing import Any
 
 import structlog
 
@@ -112,7 +111,7 @@ class CleanupService:
                 summary_stdout, summary_stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=60
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 return {"success": False, "error": "Timeout getting docker disk usage summary"}
@@ -134,7 +133,7 @@ class CleanupService:
                 detailed_stdout, detailed_stderr = await asyncio.wait_for(
                     dproc.communicate(), timeout=120
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 dproc.kill()
                 await dproc.wait()
                 detailed_stdout = b""  # fall back to no details
@@ -302,46 +301,64 @@ class CleanupService:
         lines = [f"Cleanup ({cleanup_type}) on {host_id}"]
 
         if cleanup_type == "check":
-            reclaimable = payload.get("total_reclaimable", "0B")
-            percentage = payload.get("reclaimable_percentage", 0)
-            lines.append(f"Reclaimable: {reclaimable} ({percentage}%)")
-
-            summary = payload.get("summary", {})
-            for resource, details in summary.items():
-                if not isinstance(details, dict):
-                    continue
-                parts: list[str] = []
-                if "stopped" in details:
-                    parts.append(f"stopped {details.get('stopped')}")
-                if "unused" in details:
-                    parts.append(f"unused {details.get('unused')}")
-                if "reclaimable_space" in details:
-                    parts.append(f"reclaim {details.get('reclaimable_space')}")
-                if "size" in details:
-                    parts.append(f"size {details.get('size')}")
-                if parts:
-                    lines.append(f"{resource.title()}: {', '.join(parts)}")
-
-            recommendations = payload.get("recommendations", [])
-            if recommendations:
-                lines.append("")
-                lines.append("Recommendations:")
-                for recommendation in recommendations:
-                    lines.append(f"  • {recommendation}")
+            self._format_check_output(lines, payload)
         else:
-            results = payload.get("results", [])
-            for entry in results:
-                resource = entry.get("resource_type", "resource")
-                if entry.get("success"):
-                    lines.append(
-                        f"• {resource}: reclaimed {entry.get('space_reclaimed', '0B')}"
-                    )
-                else:
-                    lines.append(
-                        f"• {resource}: failed ({entry.get('error', 'unknown error')})"
-                    )
+            self._format_execution_output(lines, payload)
 
         return "\n".join(lines)
+
+    def _format_check_output(self, lines: list[str], payload: dict[str, Any]) -> None:
+        """Format output for check cleanup type."""
+        reclaimable = payload.get("total_reclaimable", "0B")
+        percentage = payload.get("reclaimable_percentage", 0)
+        lines.append(f"Reclaimable: {reclaimable} ({percentage}%)")
+
+        summary = payload.get("summary", {})
+        for resource, details in summary.items():
+            if not isinstance(details, dict):
+                continue
+
+            resource_line = self._format_resource_details(resource, details)
+            if resource_line:
+                lines.append(resource_line)
+
+        self._add_recommendations(lines, payload.get("recommendations", []))
+
+    def _format_resource_details(self, resource: str, details: dict[str, Any]) -> str:
+        """Format resource details for display."""
+        parts: list[str] = []
+        if "stopped" in details:
+            parts.append(f"stopped {details.get('stopped')}")
+        if "unused" in details:
+            parts.append(f"unused {details.get('unused')}")
+        if "reclaimable_space" in details:
+            parts.append(f"reclaim {details.get('reclaimable_space')}")
+        if "size" in details:
+            parts.append(f"size {details.get('size')}")
+
+        return f"{resource.title()}: {', '.join(parts)}" if parts else ""
+
+    def _add_recommendations(self, lines: list[str], recommendations: list[str]) -> None:
+        """Add recommendations to output lines."""
+        if recommendations:
+            lines.append("")
+            lines.append("Recommendations:")
+            for recommendation in recommendations:
+                lines.append(f"  • {recommendation}")
+
+    def _format_execution_output(self, lines: list[str], payload: dict[str, Any]) -> None:
+        """Format output for execution cleanup types."""
+        results = payload.get("results", [])
+        for entry in results:
+            resource = entry.get("resource_type", "resource")
+            if entry.get("success"):
+                lines.append(
+                    f"• {resource}: reclaimed {entry.get('space_reclaimed', '0B')}"
+                )
+            else:
+                lines.append(
+                    f"• {resource}: failed ({entry.get('error', 'unknown error')})"
+                )
 
     async def _run_cleanup_command(self, cmd: list[str], resource_type: str) -> dict[str, Any]:
         """Run a cleanup command and parse results."""
@@ -352,7 +369,7 @@ class CleanupService:
         )  # nosec B603
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return {
@@ -640,11 +657,11 @@ class CleanupService:
             tag = parts[1]
             # Size is typically the last column, but could be in position 4
             size_str = parts[-1] if len(parts) >= 5 else parts[4]
-            
+
             # Ensure we have a valid size string
             if not size_str or size_str in ["<none>", "<missing>"]:
                 size_str = "0B"
-                
+
             size_bytes = self._parse_docker_size(size_str)
 
             # Handle repository name formatting

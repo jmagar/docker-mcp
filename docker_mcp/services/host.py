@@ -460,7 +460,7 @@ class HostService:
                 docker_version = None
                 docker_daemon_accessible = "docker_daemon_ok" in output
                 docker_version_available = "docker_daemon_error" not in output
-                
+
                 # Extract Docker version if available
                 lines = output.split("\n")
                 for line in lines:
@@ -502,7 +502,7 @@ class HostService:
                 return result
             else:
                 # Enhanced SSH error handling with specific guidance
-                detailed_error = self._analyze_ssh_error(error_output, process.returncode, host)
+                detailed_error = self._analyze_ssh_error(error_output, process.returncode or 0, host)
                 error_message = detailed_error["error"]
                 result = {
                     "success": False,
@@ -1171,7 +1171,7 @@ class HostService:
     def _analyze_ssh_error(self, error_output: str, return_code: int, host: DockerHost) -> dict[str, Any]:
         """Analyze SSH error output and provide specific troubleshooting guidance."""
         error_lower = error_output.lower()
-        
+
         # Authentication failures
         if "permission denied" in error_lower or "authentication failed" in error_lower:
             if "publickey" in error_lower:
@@ -1188,7 +1188,7 @@ class HostService:
             else:
                 return {
                     "error": "SSH authentication failed",
-                    "error_type": "general_authentication_failure", 
+                    "error_type": "general_authentication_failure",
                     "guidance": [
                         "Check username and password/key credentials",
                         "Verify user account exists on remote host",
@@ -1196,7 +1196,7 @@ class HostService:
                         f"Test connection manually: ssh {host.user}@{host.hostname}"
                     ]
                 }
-        
+
         # Connection refused
         elif "connection refused" in error_lower:
             return {
@@ -1209,7 +1209,7 @@ class HostService:
                     "Ensure host is reachable: ping " + host.hostname
                 ]
             }
-        
+
         # Host key verification
         elif "host key verification failed" in error_lower or "known_hosts" in error_lower:
             return {
@@ -1222,7 +1222,7 @@ class HostService:
                     "Verify you're connecting to the correct host"
                 ]
             }
-        
+
         # Network timeouts
         elif "timeout" in error_lower or "timed out" in error_lower:
             return {
@@ -1235,7 +1235,7 @@ class HostService:
                     f"Try increasing timeout or using different port than {host.port}"
                 ]
             }
-        
+
         # Name resolution
         elif "not known" in error_lower or "name resolution" in error_lower:
             return {
@@ -1248,7 +1248,7 @@ class HostService:
                     "Check /etc/hosts file for local hostname entries"
                 ]
             }
-        
+
         # Key file issues
         elif "no such file" in error_lower and "identity" in error_lower:
             return {
@@ -1261,7 +1261,7 @@ class HostService:
                     "Check file path is absolute and correct"
                 ]
             }
-        
+
         # Generic SSH errors
         else:
             return {
@@ -2045,14 +2045,14 @@ class HostService:
             # Try to get additional context from other sources
             lines.append("")
             lines.append("📝 Removal Summary:")
-            lines.append(f"   • Configuration entries cleaned")
-            lines.append(f"   • Docker context removed (if exists)")
-            lines.append(f"   • Hot-reload triggered")
+            lines.append("   • Configuration entries cleaned")
+            lines.append("   • Docker context removed (if exists)")
+            lines.append("   • Hot-reload triggered")
 
         lines.append("")
         lines.append("💡 Next Steps:")
-        lines.append(f"   • Run 'docker_hosts list' to verify removal")
-        lines.append(f"   • Add new host with 'docker_hosts add' if needed")
+        lines.append("   • Run 'docker_hosts list' to verify removal")
+        lines.append("   • Add new host with 'docker_hosts add' if needed")
 
         lines.append("─" * 50)
 
@@ -2082,20 +2082,32 @@ class HostService:
     def _format_discover_single_output(
         self, host_id: str, discovery: dict[str, Any]
     ) -> str:
-        compose_paths = discovery.get("compose_discovery", {}).get("paths", [])
-        appdata_paths = discovery.get("appdata_discovery", {}).get("paths", [])
-        recommendations = discovery.get("recommendations", [])
+        lines = self._build_discovery_header(host_id, discovery)
+        self._add_compose_paths(lines, discovery)
+        self._add_appdata_paths(lines, discovery)
+        self._add_recommendations(lines, discovery)
+        self._add_helpful_guidance(lines, discovery)
+        return "\n".join(lines).strip()
 
-        lines = [
+    def _build_discovery_header(self, host_id: str, discovery: dict[str, Any]) -> list[str]:
+        """Build discovery output header."""
+        compose_count = len(discovery.get("compose_discovery", {}).get("paths", []))
+        appdata_count = len(discovery.get("appdata_discovery", {}).get("paths", []))
+        recommendations_count = len(discovery.get("recommendations", []))
+
+        return [
             f"Host Discovery on {host_id}",
             (
-                f"Compose paths: {len(compose_paths)} | "
-                f"Appdata paths: {len(appdata_paths)} | "
-                f"Recommendations: {len(recommendations)}"
+                f"Compose paths: {compose_count} | "
+                f"Appdata paths: {appdata_count} | "
+                f"Recommendations: {recommendations_count}"
             ),
             "",
         ]
 
+    def _add_compose_paths(self, lines: list[str], discovery: dict[str, Any]) -> None:
+        """Add compose paths to discovery output."""
+        compose_paths = discovery.get("compose_discovery", {}).get("paths", [])
         if compose_paths:
             lines.append("Compose paths:")
             for path in compose_paths:
@@ -2103,9 +2115,11 @@ class HostService:
                     lines.append(f"  {wrapped}")
         else:
             lines.append("Compose paths: none detected")
-
         lines.append("")
 
+    def _add_appdata_paths(self, lines: list[str], discovery: dict[str, Any]) -> None:
+        """Add appdata paths to discovery output."""
+        appdata_paths = discovery.get("appdata_discovery", {}).get("paths", [])
         if appdata_paths:
             lines.append("Appdata paths:")
             for path in appdata_paths:
@@ -2114,24 +2128,29 @@ class HostService:
         else:
             lines.append("Appdata paths: none detected")
 
+    def _add_recommendations(self, lines: list[str], discovery: dict[str, Any]) -> None:
+        """Add recommendations to discovery output."""
+        recommendations = discovery.get("recommendations", [])
         if recommendations:
             lines.append("")
             lines.append("Recommendations:")
             for recommendation in recommendations:
-                message = (
-                    recommendation.get("message")
-                    if isinstance(recommendation, dict)
-                    else str(recommendation)
-                )
+                message = self._extract_recommendation_message(recommendation)
                 for wrapped in self._wrap_value(message, 72):
                     lines.append(f"  • {wrapped}")
 
+    def _extract_recommendation_message(self, recommendation: Any) -> str:
+        """Extract message from recommendation object."""
+        if isinstance(recommendation, dict):
+            return recommendation.get("message", str(recommendation))
+        return str(recommendation)
+
+    def _add_helpful_guidance(self, lines: list[str], discovery: dict[str, Any]) -> None:
+        """Add helpful guidance to discovery output."""
         if discovery.get("helpful_guidance"):
             lines.append("")
             for wrapped in self._wrap_value(discovery["helpful_guidance"], 72):
                 lines.append(wrapped)
-
-        return "\n".join(lines).strip()
 
     def _format_discover_all_output(self, result: dict[str, Any]) -> str:
         discoveries = result.get("discoveries", {})
@@ -2208,48 +2227,73 @@ class HostService:
         lines = [f"Cleanup ({cleanup_type}) on {host_id}"]
 
         if cleanup_type == "check":
-            reclaimable = result.get("total_reclaimable", "0B")
-            percentage = result.get("reclaimable_percentage", 0)
-            lines.append(f"Reclaimable: {reclaimable} ({percentage}%)")
-
-            summary = result.get("summary", {})
-            for resource, details in summary.items():
-                if not isinstance(details, dict):
-                    continue
-                parts = []
-                if "stopped" in details:
-                    parts.append(f"stopped {details.get('stopped')}")
-                if "unused" in details:
-                    parts.append(f"unused {details.get('unused')}")
-                if "reclaimable_space" in details:
-                    parts.append(f"reclaim {details.get('reclaimable_space')}")
-                if "size" in details:
-                    parts.append(f"size {details.get('size')}")
-                if parts:
-                    lines.append(f"{resource.title()}: {', '.join(parts)}")
-            if result.get("recommendations"):
-                lines.append("")
-                lines.append("Recommendations:")
-                for recommendation in result["recommendations"]:
-                    lines.append(f"  • {recommendation}")
+            self._add_cleanup_check_output(lines, result)
         else:
-            results = result.get("results", [])
-            for entry in results:
-                resource = entry.get("resource_type", "resource")
-                if entry.get("success"):
-                    lines.append(
-                        f"• {resource}: reclaimed {entry.get('space_reclaimed', '0B')}"
-                    )
-                else:
-                    lines.append(
-                        f"• {resource}: failed ({entry.get('error', 'unknown error')})"
-                    )
+            self._add_cleanup_execution_output(lines, result)
 
+        self._add_cleanup_message(lines, result)
+        return "\n".join(lines)
+
+    def _add_cleanup_check_output(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add check cleanup output."""
+        reclaimable = result.get("total_reclaimable", "0B")
+        percentage = result.get("reclaimable_percentage", 0)
+        lines.append(f"Reclaimable: {reclaimable} ({percentage}%)")
+
+        self._add_cleanup_summary_details(lines, result.get("summary", {}))
+        self._add_cleanup_recommendations(lines, result.get("recommendations", []))
+
+    def _add_cleanup_summary_details(self, lines: list[str], summary: dict[str, Any]) -> None:
+        """Add cleanup summary details."""
+        for resource, details in summary.items():
+            if not isinstance(details, dict):
+                continue
+
+            resource_line = self._format_cleanup_resource_details(resource, details)
+            if resource_line:
+                lines.append(resource_line)
+
+    def _format_cleanup_resource_details(self, resource: str, details: dict[str, Any]) -> str:
+        """Format cleanup resource details."""
+        parts = []
+        if "stopped" in details:
+            parts.append(f"stopped {details.get('stopped')}")
+        if "unused" in details:
+            parts.append(f"unused {details.get('unused')}")
+        if "reclaimable_space" in details:
+            parts.append(f"reclaim {details.get('reclaimable_space')}")
+        if "size" in details:
+            parts.append(f"size {details.get('size')}")
+
+        return f"{resource.title()}: {', '.join(parts)}" if parts else ""
+
+    def _add_cleanup_recommendations(self, lines: list[str], recommendations: list[str]) -> None:
+        """Add cleanup recommendations."""
+        if recommendations:
+            lines.append("")
+            lines.append("Recommendations:")
+            for recommendation in recommendations:
+                lines.append(f"  • {recommendation}")
+
+    def _add_cleanup_execution_output(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add execution cleanup output."""
+        results = result.get("results", [])
+        for entry in results:
+            resource = entry.get("resource_type", "resource")
+            if entry.get("success"):
+                lines.append(
+                    f"• {resource}: reclaimed {entry.get('space_reclaimed', '0B')}"
+                )
+            else:
+                lines.append(
+                    f"• {resource}: failed ({entry.get('error', 'unknown error')})"
+                )
+
+    def _add_cleanup_message(self, lines: list[str], result: dict[str, Any]) -> None:
+        """Add cleanup message if present."""
         if result.get("message"):
             lines.append("")
             lines.append(result["message"])
-
-        return "\n".join(lines)
 
     async def _test_ssh_connection(
         self, hostname: str, user: str, port: int = 22, identity_file: str | None = None

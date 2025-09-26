@@ -471,67 +471,11 @@ class DockerMCPServer:
         if self.app is None:
             return
         try:
-            import inspect
-
             app_ref = self.app
 
             def _list_tools_sync():
-                getter = getattr(app_ref, "get_tools", None)
-                if getter is None:
-                    # Some FastMCP versions might already have list_tools
-                    getter = getattr(app_ref, "list_tools", None)
-                if getter is None:
-                    return []
-                result = getter()
-                if inspect.iscoroutine(result):
-                    import asyncio
-                    from concurrent.futures import ThreadPoolExecutor
-
-                    try:
-                        # If no loop is currently running in this thread, run directly
-                        asyncio.get_running_loop()
-                    except RuntimeError:
-                        result = asyncio.run(result)
-                    else:
-                        # When a loop is already active (pytest-asyncio, etc.), execute the
-                        # coroutine in a helper thread to avoid re-entry issues.
-                        with ThreadPoolExecutor(max_workers=1) as executor:
-                            future = executor.submit(asyncio.run, result)
-                            result = future.result()
-
-                if result is None:
-                    return []
-
-                if isinstance(result, dict):
-                    tools_iterable = result.values()
-                else:
-                    tools_iterable = result or []
-
-                from types import SimpleNamespace
-                from copy import deepcopy
-
-                tools_list = list(tools_iterable)
-
-                compat_tools = []
-                for tool in tools_list:
-                    input_schema = getattr(tool, "input_schema", None)
-                    if input_schema is None:
-                        input_schema = getattr(tool, "parameters", None)
-
-                    if isinstance(input_schema, (dict, list)):
-                        schema_copy = deepcopy(input_schema)
-                    else:
-                        schema_copy = input_schema
-
-                    compat_tools.append(
-                        SimpleNamespace(
-                            name=getattr(tool, "name", ""),
-                            description=getattr(tool, "description", ""),
-                            inputSchema=schema_copy,
-                            raw_tool=tool,
-                        )
-                    )
-                return compat_tools
+                """Synchronous wrapper for list_tools."""
+                return self._get_tools_from_app(app_ref)
 
             # Attach wrapper only if list_tools is absent
             if not hasattr(self.app, "list_tools"):
@@ -539,6 +483,88 @@ class DockerMCPServer:
         except Exception as e:
             # Log the exception but continue
             self.logger.debug("Failed to set up test compatibility wrapper", error=str(e))
+
+    def _get_tools_from_app(self, app_ref) -> list:
+        """Extract tools from FastMCP app with proper async handling."""
+        getter = self._get_tool_getter(app_ref)
+        if getter is None:
+            return []
+
+        result = getter()
+        result = self._handle_async_result(result)
+
+        if result is None:
+            return []
+
+        tools_iterable = self._extract_tools_iterable(result)
+        return self._build_compatibility_tools(tools_iterable)
+
+    def _get_tool_getter(self, app_ref):
+        """Get the appropriate tool getter method from the app."""
+        getter = getattr(app_ref, "get_tools", None)
+        if getter is None:
+            # Some FastMCP versions might already have list_tools
+            getter = getattr(app_ref, "list_tools", None)
+        return getter
+
+    def _handle_async_result(self, result):
+        """Handle async coroutine results properly."""
+        import inspect
+
+        if not inspect.iscoroutine(result):
+            return result
+
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        try:
+            # If no loop is currently running in this thread, run directly
+            asyncio.get_running_loop()
+        except RuntimeError:
+            result = asyncio.run(result)
+        else:
+            # When a loop is already active (pytest-asyncio, etc.), execute the
+            # coroutine in a helper thread to avoid re-entry issues.
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, result)
+                result = future.result()
+
+        return result
+
+    def _extract_tools_iterable(self, result):
+        """Extract tools from result object."""
+        if isinstance(result, dict):
+            return result.values()
+        return result or []
+
+    def _build_compatibility_tools(self, tools_iterable) -> list:
+        """Build compatibility tool objects."""
+        from copy import deepcopy
+        from types import SimpleNamespace
+
+        tools_list = list(tools_iterable)
+        compat_tools = []
+
+        for tool in tools_list:
+            input_schema = getattr(tool, "input_schema", None)
+            if input_schema is None:
+                input_schema = getattr(tool, "parameters", None)
+
+            if isinstance(input_schema, dict | list):
+                schema_copy = deepcopy(input_schema)
+            else:
+                schema_copy = input_schema
+
+            compat_tools.append(
+                SimpleNamespace(
+                    name=getattr(tool, "name", ""),
+                    description=getattr(tool, "description", ""),
+                    inputSchema=schema_copy,
+                    raw_tool=tool,
+                )
+            )
+
+        return compat_tools
 
     def _configure_middleware(self) -> None:
         """Configure FastMCP middleware stack."""
@@ -804,7 +830,6 @@ class DockerMCPServer:
             str | HostAction | None,
             Field(default=None, description="Action to perform (defaults to list if not provided)"),
         ] = None,
-        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
         ssh_host: Annotated[str, Field(default="", description="SSH hostname or IP address")] = "",
         ssh_user: Annotated[str, Field(default="", description="SSH username")] = "",
         ssh_port: Annotated[
@@ -835,6 +860,7 @@ class DockerMCPServer:
         port: Annotated[
             int, Field(default=0, ge=0, le=65535, description="Port number to check availability")
         ] = 0,
+        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
     ) -> ToolResult | dict[str, Any]:
         """Simplified Docker hosts management tool.
 
@@ -843,7 +869,7 @@ class DockerMCPServer:
           - Required: none
 
         • add: Add a new Docker host (auto-runs test_connection and discover)
-          - Required: host_id, ssh_host, ssh_user
+          - Required: ssh_host, ssh_user, host_id
           - Optional: ssh_port (default: 22), ssh_key_path, description, tags, enabled (default: true)
 
         • ports: List or check port usage on a host
@@ -855,7 +881,7 @@ class DockerMCPServer:
           - Optional: ssh_config_path, selected_hosts
 
         • cleanup: Docker system cleanup
-          - Required: host_id, cleanup_type
+          - Required: cleanup_type, host_id
           - Valid cleanup_type: "check" | "safe" | "moderate" | "aggressive"
 
         • test_connection: Test host connectivity (also runs discover)
@@ -887,7 +913,6 @@ class DockerMCPServer:
 
             params = DockerHostsParams(
                 action=action_enum,
-                host_id=host_id,
                 ssh_host=ssh_host,
                 ssh_user=ssh_user,
                 ssh_port=ssh_port,
@@ -901,6 +926,7 @@ class DockerMCPServer:
                 cleanup_type=cleanup_type,
                 ssh_config_path=ssh_config_path if ssh_config_path else None,
                 selected_hosts=selected_hosts if selected_hosts else None,
+                host_id=host_id,
             )
             # Use validated enum from parameter model
             action = params.action
@@ -919,8 +945,8 @@ class DockerMCPServer:
         # Check if service returned formatted output and convert to ToolResult
         # This preserves the token-efficient formatting created by ContainerService
         if isinstance(service_result, dict) and "formatted_output" in service_result:
-            from mcp.types import TextContent
             from fastmcp.tools.tool import ToolResult
+            from mcp.types import TextContent
 
             formatted_text = service_result.get("formatted_output", "")
             if formatted_text:
@@ -935,7 +961,6 @@ class DockerMCPServer:
     async def docker_container(
         self,
         action: Annotated[str | ContainerAction, Field(description="Action to perform")],
-        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
         container_id: Annotated[str, Field(default="", description="Container identifier")] = "",
         image_name: Annotated[str, Field(default="", description="Image name for pull action")] = "",
         all_containers: Annotated[
@@ -953,6 +978,7 @@ class DockerMCPServer:
         timeout: Annotated[
             int, Field(default=10, ge=1, le=300, description="Operation timeout in seconds")
         ] = 10,
+        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
     ) -> ToolResult | dict[str, Any]:
         """Consolidated Docker container management tool.
 
@@ -962,30 +988,30 @@ class DockerMCPServer:
           - Optional: all_containers, limit, offset
 
         • info: Get container information
-          - Required: host_id, container_id
+          - Required: container_id, host_id
 
         • start: Start a container
-          - Required: host_id, container_id
+          - Required: container_id, host_id
           - Optional: force, timeout
 
         • stop: Stop a container
-          - Required: host_id, container_id
+          - Required: container_id, host_id
           - Optional: force, timeout
 
         • restart: Restart a container
-          - Required: host_id, container_id
+          - Required: container_id, host_id
           - Optional: force, timeout
 
         • remove: Remove a container
-          - Required: host_id, container_id
+          - Required: container_id, host_id
           - Optional: force
 
         • logs: Get container logs
-          - Required: host_id, container_id
+          - Required: container_id, host_id
           - Optional: follow, lines
 
         • pull: Pull a container image
-          - Required: host_id, image_name
+          - Required: image_name, host_id
         """
         # Parse and validate parameters using the parameter model
         try:
@@ -997,7 +1023,6 @@ class DockerMCPServer:
 
             params = DockerContainerParams(
                 action=action_enum,
-                host_id=host_id,
                 container_id=container_id,
                 image_name=image_name,
                 all_containers=all_containers,
@@ -1007,6 +1032,7 @@ class DockerMCPServer:
                 lines=lines,
                 force=force,
                 timeout=timeout,
+                host_id=host_id,
             )
             # Use validated enum from parameter model
             action = params.action
@@ -1025,7 +1051,6 @@ class DockerMCPServer:
     async def docker_compose(
         self,
         action: Annotated[str | ComposeAction, Field(description="Action to perform")],
-        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
         stack_name: Annotated[str, Field(default="", description="Stack name")] = "",
         compose_content: Annotated[
             str, Field(default="", description="Docker Compose file content")
@@ -1060,6 +1085,7 @@ class DockerMCPServer:
         start_target: Annotated[
             bool, Field(default=True, description="Start target stack after migration")
         ] = True,
+        host_id: Annotated[str, Field(default="", description="Host identifier")] = "",
     ) -> ToolResult | dict[str, Any]:
         """Consolidated Docker Compose stack management tool.
 
@@ -1068,29 +1094,29 @@ class DockerMCPServer:
           - Required: host_id
 
         • view: View the compose file for a stack
-          - Required: host_id, stack_name
+          - Required: stack_name, host_id
 
         • deploy: Deploy a stack
-          - Required: host_id, stack_name, compose_content
+          - Required: stack_name, compose_content, host_id
           - Optional: environment, pull_images, recreate
 
         • up/down/restart/build/pull: Manage stack lifecycle
-          - Required: host_id, stack_name
+          - Required: stack_name, host_id
           - Optional: options
 
         • ps: List services in a stack
-          - Required: host_id, stack_name
+          - Required: stack_name, host_id
           - Optional: options
 
         • discover: Discover compose paths on a host
           - Required: host_id
 
         • logs: Get stack logs
-          - Required: host_id, stack_name
+          - Required: stack_name, host_id
           - Optional: follow, lines
 
         • migrate: Migrate stack between hosts
-          - Required: host_id, target_host_id, stack_name
+          - Required: stack_name, target_host_id, host_id
           - Optional: remove_source, skip_stop_source, start_target, dry_run
         """
         # Parse and validate parameters using the parameter model
@@ -1103,7 +1129,6 @@ class DockerMCPServer:
 
             params = DockerComposeParams(
                 action=action_enum,
-                host_id=host_id,
                 stack_name=stack_name,
                 compose_content=compose_content,
                 environment=environment or {},
@@ -1117,6 +1142,7 @@ class DockerMCPServer:
                 remove_source=remove_source,
                 skip_stop_source=skip_stop_source,
                 start_target=start_target,
+                host_id=host_id,
             )
             # Use validated enum from parameter model
             action = params.action
@@ -1366,8 +1392,13 @@ def parse_args() -> argparse.Namespace:
         from dotenv import load_dotenv
 
         load_dotenv()
-    except Exception:  # nosec S110
+    except ImportError:
+        # dotenv is optional - continue without it if not available
         pass
+    except Exception as e:
+        # Log unexpected errors but continue - environment loading shouldn't block startup
+        import logging
+        logging.getLogger("docker_mcp").debug("Failed to load .env file: %s", str(e))
 
     default_host = os.getenv("FASTMCP_HOST", "127.0.0.1")  # nosec B104 - Use 0.0.0.0 for container deployment
     default_port = int(os.getenv("FASTMCP_PORT", "8000"))

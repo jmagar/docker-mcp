@@ -50,7 +50,22 @@ class MigrationVerifier:
         Returns:
             Dictionary containing complete source inventory
         """
-        inventory: dict[str, Any] = {
+        inventory = self._create_inventory_template()
+
+        # Validate all paths exist before processing
+        await self._validate_source_paths(ssh_cmd, volume_paths)
+
+        # Process each path to build complete inventory
+        for path in volume_paths:
+            path_inventory = await self._process_single_path(ssh_cmd, path)
+            self._add_path_to_inventory(inventory, path, path_inventory)
+
+        self._log_inventory_summary(inventory)
+        return inventory
+
+    def _create_inventory_template(self) -> dict[str, Any]:
+        """Create the initial inventory structure."""
+        return {
             "total_files": 0,
             "total_dirs": 0,
             "total_size": 0,
@@ -59,99 +74,125 @@ class MigrationVerifier:
             "timestamp": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
-        # Validate source paths exist before gathering inventory
+    async def _validate_source_paths(self, ssh_cmd: list[str], volume_paths: list[str]) -> None:
+        """Validate that all source paths exist before gathering inventory."""
         for path in volume_paths:
             path_exists_cmd = ssh_cmd + [f"test -e {shlex.quote(path)} && echo 'EXISTS' || echo 'NOT_FOUND'"]
             result = await self._run_remote(path_exists_cmd, "path_existence_check", timeout=30)
-            
+
             if result.returncode != 0 or "NOT_FOUND" in result.stdout:
                 raise ValueError(f"Source path does not exist: {path}")
-                
+
             if "EXISTS" not in result.stdout:
                 raise ValueError(f"Unable to verify source path existence: {path}")
 
-        for path in volume_paths:
-            path_inventory: dict[str, Any] = {}
+    async def _process_single_path(self, ssh_cmd: list[str], path: str) -> dict[str, Any]:
+        """Process a single path to gather its complete inventory."""
+        path_inventory: dict[str, Any] = {}
 
-            # Get file count
-            file_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f 2>/dev/null | wc -l"]
-            result = await self._run_remote(file_count_cmd, "file_count", timeout=60)
-            path_inventory["file_count"] = (
-                int(result.stdout.strip()) if result.returncode == 0 else 0
-            )
+        # Gather basic metrics
+        path_inventory.update(await self._gather_path_metrics(ssh_cmd, path))
 
-            # Get directory count
-            dir_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type d 2>/dev/null | wc -l"]
-            result = await self._run_remote(dir_count_cmd, "dir_count", timeout=60)
-            path_inventory["dir_count"] = (
-                int(result.stdout.strip()) if result.returncode == 0 else 0
-            )
+        # Get file listing
+        path_inventory["file_list"] = await self._get_file_listing(ssh_cmd, path)
 
-            # Get total size in bytes
-            size_cmd = ssh_cmd + [f"du -sb {shlex.quote(path)} 2>/dev/null | cut -f1"]
-            result = await self._run_remote(size_cmd, "size_check", timeout=60)
-            path_inventory["total_size"] = (
-                int(result.stdout.strip()) if result.returncode == 0 else 0
-            )
+        # Process critical files with checksums
+        critical_files, algorithm = await self._process_critical_files(ssh_cmd, path)
+        path_inventory["critical_files"] = critical_files
+        path_inventory["checksum_algorithm"] = algorithm
 
-            # Get file listing for comparison
-            file_list_cmd = ssh_cmd + [
-                f"find {shlex.quote(path)} -type f -printf '%P\\n' 2>/dev/null | sort"
-            ]
-            result = await self._run_remote(file_list_cmd, "file_listing", timeout=60)
-            path_inventory["file_list"] = (
-                result.stdout.strip().split("\n") if result.returncode == 0 else []
-            )
+        return path_inventory
 
-            # Find and checksum critical files (databases, configs) plus additional integrity verification
-            # Use SHA256 for better integrity verification, fallback to MD5 for compatibility
-            critical_files: dict[str, Any] = {}
-            
-            # First try SHA256 for better integrity verification
-            sha256_cmd = ssh_cmd + [
-                f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' -o -name '*.json' -o -name '*.xml' -o -name '*.yml' -o -name '*.yaml' \\) "
-                f"-exec sha256sum {{}} + 2>/dev/null"
-            ]
-            result = await self._run_remote(sha256_cmd, "critical_files_sha256", timeout=300)
-            
-            checksum_algorithm = "sha256"
-            if result.returncode != 0 or not result.stdout.strip():
-                # Fallback to MD5 for maximum compatibility across hosts
-                md5_cmd = ssh_cmd + [
-                    f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' -o -name '*.json' -o -name '*.xml' -o -name '*.yml' -o -name '*.yaml' \\) "
-                    f"-exec md5sum {{}} + 2>/dev/null"
-                ]
-                result = await self._run_remote(md5_cmd, "critical_files_md5", timeout=300)
-                checksum_algorithm = "md5"
+    async def _gather_path_metrics(self, ssh_cmd: list[str], path: str) -> dict[str, Any]:
+        """Gather basic metrics (file count, dir count, size) for a path."""
+        metrics = {}
 
-            if result.returncode == 0 and result.stdout.strip():
-                for line in result.stdout.strip().split("\n"):
-                    if line:
-                        parts = line.strip().split(None, 1)
-                        if len(parts) == 2:
-                            checksum, filepath = parts
-                            # Store relative path (handle path normalization properly)
-                            path_normalized = path.rstrip("/")
-                            if filepath.startswith(path_normalized + "/"):
-                                rel_path = filepath[len(path_normalized) + 1 :]
-                            else:
-                                rel_path = filepath
-                            critical_files[rel_path] = {
-                                "checksum": checksum,
-                                "algorithm": checksum_algorithm,
-                                "full_path": filepath
-                            }
+        # Get file count
+        file_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type f 2>/dev/null | wc -l"]
+        result = await self._run_remote(file_count_cmd, "file_count", timeout=60)
+        metrics["file_count"] = int(result.stdout.strip()) if result.returncode == 0 else 0
 
-            path_inventory["critical_files"] = critical_files
-            path_inventory["checksum_algorithm"] = checksum_algorithm
+        # Get directory count
+        dir_count_cmd = ssh_cmd + [f"find {shlex.quote(path)} -type d 2>/dev/null | wc -l"]
+        result = await self._run_remote(dir_count_cmd, "dir_count", timeout=60)
+        metrics["dir_count"] = int(result.stdout.strip()) if result.returncode == 0 else 0
 
-            # Add to inventory
-            inventory["paths"][path] = path_inventory
-            inventory["total_files"] += path_inventory["file_count"]
-            inventory["total_dirs"] += path_inventory["dir_count"]
-            inventory["total_size"] += path_inventory["total_size"]
-            inventory["critical_files"].update(critical_files)
+        # Get total size in bytes
+        size_cmd = ssh_cmd + [f"du -sb {shlex.quote(path)} 2>/dev/null | cut -f1"]
+        result = await self._run_remote(size_cmd, "size_check", timeout=60)
+        metrics["total_size"] = int(result.stdout.strip()) if result.returncode == 0 else 0
 
+        return metrics
+
+    async def _get_file_listing(self, ssh_cmd: list[str], path: str) -> list[str]:
+        """Get sorted file listing for a path."""
+        file_list_cmd = ssh_cmd + [
+            f"find {shlex.quote(path)} -type f -printf '%P\\n' 2>/dev/null | sort"
+        ]
+        result = await self._run_remote(file_list_cmd, "file_listing", timeout=60)
+        return result.stdout.strip().split("\n") if result.returncode == 0 else []
+
+    async def _process_critical_files(self, ssh_cmd: list[str], path: str) -> tuple[dict[str, Any], str]:
+        """Find and checksum critical files, with SHA256 preferred over MD5."""
+        critical_files: dict[str, Any] = {}
+
+        # Try SHA256 first for better integrity verification
+        algorithm, result = await self._try_checksum_algorithm(ssh_cmd, path, "sha256")
+
+        # Fallback to MD5 if SHA256 fails
+        if result.returncode != 0 or not result.stdout.strip():
+            algorithm, result = await self._try_checksum_algorithm(ssh_cmd, path, "md5")
+
+        # Parse checksum results
+        if result.returncode == 0 and result.stdout.strip():
+            critical_files = self._parse_checksum_output(result.stdout, path)
+            # Update algorithm in each critical file entry
+            for file_info in critical_files.values():
+                file_info["algorithm"] = algorithm
+
+        return critical_files, algorithm
+
+    async def _try_checksum_algorithm(self, ssh_cmd: list[str], path: str, algorithm: str) -> tuple[str, Any]:
+        """Try to run checksum command with specified algorithm."""
+        checksum_cmd = f"{algorithm}sum" if algorithm == "sha256" else "md5sum"
+        cmd = ssh_cmd + [
+            f"find {shlex.quote(path)} -type f \\( -name '*.db' -o -name '*.sqlite*' -o -name 'config.*' -o -name '*.conf' -o -name '*.json' -o -name '*.xml' -o -name '*.yml' -o -name '*.yaml' \\) -exec {checksum_cmd} {{}} + 2>/dev/null"
+        ]
+        result = await self._run_remote(cmd, f"critical_files_{algorithm}", timeout=300)
+        return algorithm, result
+
+    def _parse_checksum_output(self, stdout: str, base_path: str) -> dict[str, Any]:
+        """Parse checksum command output into critical files dictionary."""
+        critical_files: dict[str, Any] = {}
+        path_normalized = base_path.rstrip("/")
+
+        for line in stdout.strip().split("\n"):
+            if line:
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2:
+                    checksum, filepath = parts
+                    # Store relative path (handle path normalization properly)
+                    if filepath.startswith(path_normalized + "/"):
+                        rel_path = filepath[len(path_normalized) + 1 :]
+                    else:
+                        rel_path = filepath
+                    critical_files[rel_path] = {
+                        "checksum": checksum,
+                        "algorithm": "",  # Will be updated by caller
+                        "full_path": filepath
+                    }
+        return critical_files
+
+    def _add_path_to_inventory(self, inventory: dict[str, Any], path: str, path_inventory: dict[str, Any]) -> None:
+        """Add a single path's inventory to the overall inventory."""
+        inventory["paths"][path] = path_inventory
+        inventory["total_files"] += path_inventory["file_count"]
+        inventory["total_dirs"] += path_inventory["dir_count"]
+        inventory["total_size"] += path_inventory["total_size"]
+        inventory["critical_files"].update(path_inventory["critical_files"])
+
+    def _log_inventory_summary(self, inventory: dict[str, Any]) -> None:
+        """Log summary of created inventory."""
         self.logger.info(
             "Created source inventory",
             total_files=inventory["total_files"],
@@ -159,8 +200,6 @@ class MigrationVerifier:
             total_size=inventory["total_size"],
             critical_files=len(inventory["critical_files"]),
         )
-
-        return inventory
 
     async def verify_migration_completeness(
         self,
@@ -178,7 +217,27 @@ class MigrationVerifier:
         Returns:
             Dictionary containing verification results
         """
-        verification: dict[str, Any] = {
+        verification = self._create_migration_verification_template(source_inventory)
+
+        # Gather target metrics and file listing
+        await self._gather_target_metrics(ssh_cmd, target_path, verification)
+
+        # Compare source and target to find discrepancies
+        await self._compare_file_listings(ssh_cmd, target_path, source_inventory, verification)
+        self._calculate_match_percentages(source_inventory, verification)
+
+        # Verify critical files with checksums
+        await self._verify_critical_files(ssh_cmd, target_path, source_inventory, verification)
+
+        # Analyze results and collect issues
+        self._analyze_verification_results(source_inventory, verification)
+
+        self._log_verification_summary(verification)
+        return verification
+
+    def _create_migration_verification_template(self, source_inventory: dict[str, Any]) -> dict[str, Any]:
+        """Create the initial verification result structure."""
+        return {
             "data_transfer": {
                 "success": True,
                 "files_expected": source_inventory["total_files"],
@@ -195,26 +254,25 @@ class MigrationVerifier:
             "issues": [],
         }
 
-        # Use provided target path
-        # Get target inventory using same methods as source
+    async def _gather_target_metrics(self, ssh_cmd: list[str], target_path: str, verification: dict[str, Any]) -> None:
+        """Gather basic metrics from the target path."""
         # File count
         file_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type f 2>/dev/null | wc -l"]
         result = await self._run_remote(file_count_cmd, "file_count", timeout=300)
-        target_files = int(result.stdout.strip()) if result.returncode == 0 else 0
-        verification["data_transfer"]["files_found"] = target_files
+        verification["data_transfer"]["files_found"] = int(result.stdout.strip()) if result.returncode == 0 else 0
 
         # Directory count
         dir_count_cmd = ssh_cmd + [f"find {shlex.quote(target_path)} -type d 2>/dev/null | wc -l"]
         result = await self._run_remote(dir_count_cmd, "dir_count", timeout=300)
-        target_dirs = int(result.stdout.strip()) if result.returncode == 0 else 0
-        verification["data_transfer"]["dirs_found"] = target_dirs
+        verification["data_transfer"]["dirs_found"] = int(result.stdout.strip()) if result.returncode == 0 else 0
 
         # Total size
         size_cmd = ssh_cmd + [f"du -sb {shlex.quote(target_path)} 2>/dev/null | cut -f1"]
         result = await self._run_remote(size_cmd, "size_check", timeout=300)
-        target_size = int(result.stdout.strip()) if result.returncode == 0 else 0
-        verification["data_transfer"]["size_found"] = target_size
+        verification["data_transfer"]["size_found"] = int(result.stdout.strip()) if result.returncode == 0 else 0
 
+    async def _compare_file_listings(self, ssh_cmd: list[str], target_path: str, source_inventory: dict[str, Any], verification: dict[str, Any]) -> None:
+        """Compare source and target file listings to find missing files."""
         # Get target file listing
         file_list_cmd = ssh_cmd + [
             f"find {shlex.quote(target_path)} -type f -printf '%P\\n' 2>/dev/null | sort"
@@ -226,16 +284,21 @@ class MigrationVerifier:
             else []
         )
 
-        # Compare file listings to find missing files
+        # Build source file set from all paths
         source_files = set()
         for path_data in source_inventory["paths"].values():
             source_files.update(path_data.get("file_list", []))
 
+        # Find missing files
         target_file_set = set(target_file_list)
         missing_files = source_files - target_file_set
         verification["data_transfer"]["missing_files"] = sorted(missing_files)
 
-        # Calculate match percentages
+    def _calculate_match_percentages(self, source_inventory: dict[str, Any], verification: dict[str, Any]) -> None:
+        """Calculate file and size match percentages."""
+        target_files = verification["data_transfer"]["files_found"]
+        target_size = verification["data_transfer"]["size_found"]
+
         if source_inventory["total_files"] > 0:
             verification["data_transfer"]["file_match_percentage"] = (
                 target_files / source_inventory["total_files"] * 100
@@ -246,58 +309,72 @@ class MigrationVerifier:
                 target_size / source_inventory["total_size"] * 100
             )
 
-        # Verify critical files checksums with enhanced integrity verification
+    async def _verify_critical_files(self, ssh_cmd: list[str], target_path: str, source_inventory: dict[str, Any], verification: dict[str, Any]) -> None:
+        """Verify critical files using checksums."""
         critical_files_verified: dict[str, Any] = {}
+
         for rel_path, file_info in source_inventory["critical_files"].items():
-            target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
-            qfile = shlex.quote(target_file_path)
-            
-            # Handle both old (string) and new (dict) checksum formats for backward compatibility
-            if isinstance(file_info, str):
-                source_checksum = file_info
-                algorithm = "md5"  # Default for legacy format
-            else:
-                source_checksum = file_info["checksum"]
-                algorithm = file_info["algorithm"]
-            
-            # Use the same algorithm that was used for source checksums
-            if algorithm == "sha256":
-                checksum_cmd = ssh_cmd + [f"sha256sum {qfile} 2>/dev/null | cut -d' ' -f1"]
-            else:
-                checksum_cmd = ssh_cmd + [f"md5sum {qfile} 2>/dev/null | cut -d' ' -f1"]
-
-            result = await self._run_remote(checksum_cmd, f"checksum_{algorithm}", timeout=300)
-
-            if result.returncode == 0 and result.stdout.strip():
-                target_checksum = result.stdout.strip()
-                critical_files_verified[rel_path] = {
-                    "verified": source_checksum == target_checksum,
-                    "source_checksum": source_checksum,
-                    "target_checksum": target_checksum,
-                    "algorithm": algorithm,
-                }
-            else:
-                critical_files_verified[rel_path] = {
-                    "verified": False,
-                    "source_checksum": source_checksum,
-                    "target_checksum": None,
-                    "algorithm": algorithm,
-                    "error": "File not found or inaccessible",
-                }
+            verification_result = await self._verify_single_critical_file(
+                ssh_cmd, target_path, rel_path, file_info
+            )
+            critical_files_verified[rel_path] = verification_result
 
         verification["data_transfer"]["critical_files_verified"] = critical_files_verified
 
-        # Determine overall success and collect issues
-        issues: list[str] = []
+    async def _verify_single_critical_file(self, ssh_cmd: list[str], target_path: str, rel_path: str, file_info: dict[str, Any] | str) -> dict[str, Any]:
+        """Verify a single critical file's checksum."""
+        target_file_path = f"{target_path.rstrip('/')}/{rel_path.lstrip('/')}"
+        qfile = shlex.quote(target_file_path)
 
-        # File count mismatch
+        # Handle both old (string) and new (dict) checksum formats for backward compatibility
+        if isinstance(file_info, str):
+            source_checksum = file_info
+            algorithm = "md5"  # Default for legacy format
+        else:
+            source_checksum = file_info["checksum"]
+            algorithm = file_info["algorithm"]
+
+        # Use the same algorithm that was used for source checksums
+        if algorithm == "sha256":
+            checksum_cmd = ssh_cmd + [f"sha256sum {qfile} 2>/dev/null | cut -d' ' -f1"]
+        else:
+            checksum_cmd = ssh_cmd + [f"md5sum {qfile} 2>/dev/null | cut -d' ' -f1"]
+
+        result = await self._run_remote(checksum_cmd, f"checksum_{algorithm}", timeout=300)
+
+        if result.returncode == 0 and result.stdout.strip():
+            target_checksum = result.stdout.strip()
+            return {
+                "verified": source_checksum == target_checksum,
+                "source_checksum": source_checksum,
+                "target_checksum": target_checksum,
+                "algorithm": algorithm,
+            }
+        else:
+            return {
+                "verified": False,
+                "source_checksum": source_checksum,
+                "target_checksum": None,
+                "algorithm": algorithm,
+                "error": "File not found or inaccessible",
+            }
+
+    def _analyze_verification_results(self, source_inventory: dict[str, Any], verification: dict[str, Any]) -> None:
+        """Analyze verification results and collect issues."""
+        issues: list[str] = []
+        data_transfer = verification["data_transfer"]
+        critical_files_verified = data_transfer["critical_files_verified"]
+
+        # Check file count mismatch
+        target_files = data_transfer["files_found"]
         if target_files != source_inventory["total_files"]:
             diff = target_files - source_inventory["total_files"]
             issues.append(
-                f"File count mismatch: {diff:+d} files ({verification['data_transfer']['file_match_percentage']:.1f}% match)"
+                f"File count mismatch: {diff:+d} files ({data_transfer['file_match_percentage']:.1f}% match)"
             )
 
-        # Size mismatch (allow 1% variance for filesystem overhead)
+        # Check size mismatch (allow 1% variance for filesystem overhead)
+        target_size = data_transfer["size_found"]
         size_variance = (
             abs(target_size - source_inventory["total_size"]) / source_inventory["total_size"] * 100
             if source_inventory["total_size"] > 0
@@ -305,32 +382,38 @@ class MigrationVerifier:
         )
         if size_variance > 1.0:
             issues.append(
-                f"Size mismatch: {target_size - source_inventory['total_size']:+d} bytes ({verification['data_transfer']['size_match_percentage']:.1f}% match)"
+                f"Size mismatch: {target_size - source_inventory['total_size']:+d} bytes ({data_transfer['size_match_percentage']:.1f}% match)"
             )
 
-        # Missing files
+        # Check missing files
+        missing_files = data_transfer["missing_files"]
         if missing_files:
             issues.append(f"{len(missing_files)} files missing from target")
 
-        # Critical file verification failures
+        # Check critical file verification failures
         failed_critical = [f for f, v in critical_files_verified.items() if not v["verified"]]
         if failed_critical:
             issues.append(f"{len(failed_critical)} critical files failed verification")
 
+        # Update verification results
         verification["issues"] = issues
         verification["data_transfer"]["success"] = len(issues) == 0
         verification["success"] = len(issues) == 0  # Top-level success flag
 
+    def _log_verification_summary(self, verification: dict[str, Any]) -> None:
+        """Log verification summary."""
+        data_transfer = verification["data_transfer"]
+        critical_files_verified = data_transfer["critical_files_verified"]
+        failed_critical = [f for f, v in critical_files_verified.items() if not v["verified"]]
+
         self.logger.info(
             "Migration completeness verification",
             success=verification["success"],
-            files_match=f"{verification['data_transfer']['file_match_percentage']:.1f}%",
-            size_match=f"{verification['data_transfer']['size_match_percentage']:.1f}%",
+            files_match=f"{data_transfer['file_match_percentage']:.1f}%",
+            size_match=f"{data_transfer['size_match_percentage']:.1f}%",
             critical_files_ok=len(critical_files_verified) - len(failed_critical),
-            issues=len(issues),
+            issues=len(verification["issues"]),
         )
-
-        return verification
 
     async def _inspect_container(
         self, ssh_cmd: list[str], stack_name: str

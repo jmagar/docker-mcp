@@ -107,44 +107,44 @@ class LogTools:
 
     def _sanitize_log_content(self, log_content: list[str]) -> list[str]:
         """Sanitize log content to remove sensitive information.
-        
+
         Args:
             log_content: List of log lines to sanitize
-            
+
         Returns:
             List of sanitized log lines
         """
         if not log_content:
             return log_content
-            
-        sanitized_logs = []
+
+        sanitized_logs: list[str] = []
         redaction_count = 0
-        
+
         for line in log_content:
             if not line or not isinstance(line, str):
                 sanitized_logs.append(line)
                 continue
-                
+
             sanitized_line = line
             line_redactions = []
-            
+
             # Apply each sanitization pattern
             for pattern_info in self.sanitization_patterns:
                 pattern = pattern_info["pattern"]
                 replacement = pattern_info["replacement"]
                 description = pattern_info["description"]
-                
+
                 # Count matches before replacement
                 matches = pattern.findall(sanitized_line)
                 if matches:
                     line_redactions.append(f"{len(matches)} {description}")
                     redaction_count += len(matches)
-                    
+
                 # Apply sanitization
                 sanitized_line = pattern.sub(replacement, sanitized_line)
-            
+
             sanitized_logs.append(sanitized_line)
-            
+
             # Log redaction details (without the actual sensitive data)
             if line_redactions:
                 logger.debug(
@@ -153,18 +153,18 @@ class LogTools:
                     original_length=len(line),
                     sanitized_length=len(sanitized_line)
                 )
-        
+
         if redaction_count > 0:
             # Count lines that were actually modified
-            modified_lines = sum(1 for i, (original, sanitized) in enumerate(zip(log_content, sanitized_logs)) if original != sanitized)
-            
+            modified_lines = sum(1 for i, (original, sanitized) in enumerate(zip(log_content, sanitized_logs, strict=False)) if original != sanitized)
+
             logger.info(
                 "Log content sanitized",
                 total_redactions=redaction_count,
                 total_lines=len(log_content),
                 modified_lines=modified_lines
             )
-        
+
         return sanitized_logs
 
     def _build_error_response(
@@ -307,7 +307,7 @@ class LogTools:
                 host_id=host_id,
                 container_id=container_id,
                 lines_returned=len(sanitized_logs),
-                sanitization_applied=len(sanitized_logs) != len(logs_data) or any(s != o for s, o in zip(sanitized_logs, logs_data)),
+                sanitization_applied=len(sanitized_logs) != len(logs_data) or any(s != o for s, o in zip(sanitized_logs, logs_data, strict=False)),
             )
 
             return create_success_response(
@@ -471,7 +471,7 @@ class LogTools:
                 host_id=host_id,
                 service_name=service_name,
                 lines_returned=len(sanitized_logs),
-                sanitization_applied=len(sanitized_logs) != len(logs_data) or any(s != o for s, o in zip(sanitized_logs, logs_data)),
+                sanitization_applied=len(sanitized_logs) != len(logs_data) or any(s != o for s, o in zip(sanitized_logs, logs_data, strict=False)),
             )
 
             return create_success_response(

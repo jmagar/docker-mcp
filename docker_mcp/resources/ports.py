@@ -5,7 +5,7 @@ It serves as a clean, cacheable alternative to the ports action in the docker_ho
 """
 
 import ipaddress
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 if TYPE_CHECKING:
     from docker_mcp.server import DockerMCPServer
@@ -42,7 +42,7 @@ def _validate_and_normalize_protocol(protocol: str | None) -> ProtocolLiteral | 
             f"Invalid protocol '{protocol}'. Must be one of: {', '.join(allowed_protocols)}"
         )
 
-    return cast(ProtocolLiteral, protocol_lower)  # type: ignore[return-value]
+    return cast(ProtocolLiteral, protocol_lower)
 
 
 def _validate_host_ip(host_ip: str | None) -> str:
@@ -59,16 +59,19 @@ def _validate_host_ip(host_ip: str | None) -> str:
     """
     if host_ip in (None, ""):
         # None or empty string means all interfaces (equivalent to 0.0.0.0)
-        return "0.0.0.0"
-    
-    if host_ip == "0.0.0.0":
+        return "0.0.0.0"  # noqa: S104 # Docker port mapping requires all-interface binding
+
+    if host_ip == "0.0.0.0":  # noqa: S104 # Docker port mapping requires all-interface binding
         # Valid all-interfaces binding
         return host_ip
-    
+
     try:
         # Validate as IP address (IPv4 or IPv6)
-        ip_obj = ipaddress.ip_address(host_ip)
-        return str(ip_obj)
+        if host_ip is not None:
+            ip_obj = ipaddress.ip_address(host_ip)
+            return str(ip_obj)
+        else:
+            return "0.0.0.0"  # noqa: S104
     except ValueError as e:
         raise ValueError(f"Invalid IP address '{host_ip}': {str(e)}") from e
 
@@ -87,18 +90,18 @@ def _validate_host_port(host_port: str | None) -> int:
     """
     if host_port is None:
         raise ValueError("HostPort cannot be None")
-    
+
     if host_port == "":
         raise ValueError("HostPort cannot be empty")
-    
+
     try:
         port_int = int(host_port)
     except ValueError as e:
         raise ValueError(f"HostPort must be numeric, got '{host_port}'") from e
-    
+
     if not (1 <= port_int <= 65535):
         raise ValueError(f"HostPort must be between 1 and 65535, got {port_int}")
-    
+
     return port_int
 
 
@@ -116,24 +119,24 @@ def _validate_port_binding(bind: dict[str, Any] | None) -> dict[str, Any]:
     """
     if bind is None:
         raise ValueError("Port binding cannot be None")
-    
+
     if not isinstance(bind, dict):
         raise ValueError(f"Port binding must be a dictionary, got {type(bind)}")
-    
+
     # Validate HostIp if present
     host_ip = bind.get("HostIp")
     try:
         validated_ip = _validate_host_ip(host_ip)
     except ValueError as e:
         raise ValueError(f"Invalid HostIp in port binding: {str(e)}") from e
-    
+
     # Validate HostPort if present
     host_port = bind.get("HostPort")
     try:
         validated_port = _validate_host_port(host_port)
     except ValueError as e:
         raise ValueError(f"Invalid HostPort in port binding: {str(e)}") from e
-    
+
     # Return validated binding
     return {
         "HostIp": validated_ip,

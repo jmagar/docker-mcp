@@ -146,8 +146,8 @@ class StackNetwork:
                             ssh_e += ["-i", target_host.identity_file]
                         remote = f"{target_host.user}@{target_host.hostname}:/tmp/speed_test_recv"
                         remote_cmd = shlex.join([
-                            "rsync", "/tmp/speed_test", remote, "-e", shlex.join(ssh_e)
-                        ])  # nosec S108
+                            "rsync", "/tmp/speed_test", remote, "-e", shlex.join(ssh_e)  # noqa: S108
+                        ])
                         rsync_test_cmd = source_ssh_cmd[:-1] + [remote_cmd]
 
                         result = await asyncio.to_thread(
@@ -405,8 +405,8 @@ class StackNetwork:
                 ssh_e += ["-i", target_host.identity_file]
             remote = f"{target_host.user}@{target_host.hostname}:/tmp/bandwidth_test_recv"
             remote_cmd = shlex.join([
-                "rsync", "/tmp/bandwidth_test", remote, "-e", shlex.join(ssh_e)
-            ])  # nosec S108
+                "rsync", "/tmp/bandwidth_test", remote, "-e", shlex.join(ssh_e)  # noqa: S108
+            ])
             transfer_cmd = source_ssh_cmd + [remote_cmd]
 
             transfer_result = await asyncio.to_thread(
