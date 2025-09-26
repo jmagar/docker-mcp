@@ -6,6 +6,7 @@ across multiple remote hosts via SSH connections.
 """
 
 import argparse
+import importlib
 import os
 import sys
 import tempfile
@@ -361,10 +362,13 @@ class DockerMCPServer:
         # Create FastMCP server (attach Google OAuth if configured)
         auth_provider = self._build_auth_provider()
         if auth_provider is not None:
+            provider_name = auth_provider.__class__.__name__
             self.app = FastMCP("Docker Context Manager", auth=auth_provider)
-            self.logger.info("Authentication provider enabled", provider="GoogleProvider")
+            self.logger.info("Authentication provider enabled", provider=provider_name)
+            self._register_auth_diagnostic_tools()
         else:
             self.app = FastMCP("Docker Context Manager")
+            self.logger.info("Authentication provider disabled")
 
         # Set up test compatibility wrapper
         self._setup_test_compatibility()
@@ -387,49 +391,8 @@ class DockerMCPServer:
             logging="dual output (console + files)",
         )
 
-        # OAuth diagnostic tools disabled (OAuth authentication is disabled)
-        self.logger.info("OAuth diagnostic tools disabled (whoami, get_user_info)")
-
-        # Add diagnostic auth-protected tools (DISABLED - OAuth not enabled)
-        # Uncomment the following block when OAuth is re-enabled:
-        #
-        # try:
-        #     from fastmcp.server.dependencies import get_access_token
-        #
-        #     @self.app.tool
-        #     async def whoami() -> dict[str, Any]:
-        #         """Return identity claims for the authenticated user."""
-        #         token = get_access_token()
-        #         if token is None:
-        #             return {}
-        #         # token.claims should contain standard OIDC-style claims
-        #         return {
-        #             "iss": token.claims.get("iss"),
-        #             "sub": token.claims.get("sub"),
-        #             "email": token.claims.get("email"),
-        #             "name": token.claims.get("name"),
-        #             "picture": token.claims.get("picture"),
-        #         }
-        #
-        #     @self.app.tool
-        #     async def get_user_info() -> dict[str, Any]:
-        #         """Return simplified user info for authenticated Google user."""
-        #         token = get_access_token()
-        #         if token is None:
-        #             return {}
-        #         return {
-        #             "google_id": token.claims.get("sub"),
-        #             "email": token.claims.get("email"),
-        #             "name": token.claims.get("name"),
-        #             "picture": token.claims.get("picture"),
-        #         }
-        # except Exception:
-        #     # If dependencies are unavailable (e.g., auth not enabled), skip these helpers
-        #     # Log at debug level to avoid noisy errors when auth isn't configured
-        #     self.logger.debug(
-        #         "Auth helpers unavailable; skipping whoami/get_user_info tools",
-        #         exc_info=True,
-        #     )
+        if auth_provider is None:
+            self.logger.info("OAuth diagnostic tools unavailable (authentication disabled)")
 
         # Register consolidated tools (3 tools replace 13 individual tools)
         self.app.tool(
@@ -606,14 +569,92 @@ class DockerMCPServer:
             )
         )
 
-    def _build_auth_provider(self) -> Any | None:
-        """Build Google OAuth provider from environment if configured.
+    def _register_auth_diagnostic_tools(self) -> None:
+        """Register small diagnostic tools when OAuth authentication is active."""
+        if self.app is None:
+            return
 
-        Returns a provider instance or None if auth should be disabled.
-        """
-        # OAuth authentication disabled for now
-        self.logger.info("OAuth authentication disabled")
-        return None
+        try:
+            from fastmcp.server.dependencies import get_access_token
+        except Exception:
+            self.logger.debug(
+                "Auth dependencies unavailable; skipping whoami/get_user_info tools",
+                exc_info=True,
+            )
+            return
+
+        @self.app.tool
+        async def whoami() -> dict[str, Any]:
+            """Return identity claims for the authenticated user."""
+            token = get_access_token()
+            if token is None:
+                return {}
+            return {
+                "iss": token.claims.get("iss"),
+                "sub": token.claims.get("sub"),
+                "email": token.claims.get("email"),
+                "name": token.claims.get("name"),
+                "picture": token.claims.get("picture"),
+            }
+
+        self.logger.info("OAuth diagnostic tools enabled", tools=["whoami"])
+
+    def _build_auth_provider(self) -> Any | None:
+        """Build OAuth provider from environment if configured."""
+        provider_path = os.getenv("FASTMCP_SERVER_AUTH", "").strip()
+        if not provider_path:
+            self.logger.info("OAuth authentication disabled")
+            return None
+
+        try:
+            module_path, class_name = provider_path.rsplit(".", 1)
+        except ValueError:
+            self.logger.error(
+                "Invalid FASTMCP_SERVER_AUTH value", provider=provider_path
+            )
+            return None
+
+        try:
+            module = importlib.import_module(module_path)
+        except Exception as exc:
+            self.logger.error(
+                "Failed to import auth provider module",
+                provider=provider_path,
+                error=str(exc),
+            )
+            return None
+
+        provider_cls = getattr(module, class_name, None)
+        if provider_cls is None:
+            self.logger.error(
+                "Auth provider class not found", provider=provider_path
+            )
+            return None
+
+        try:
+            if provider_path.endswith("GoogleProvider"):
+                base_url = self._get_auth_base_url()
+                redirect_path = os.getenv(
+                    "FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH", "/auth/callback"
+                )
+                required_scopes = self._parse_auth_scopes()
+                timeout = self._parse_auth_timeout()
+                kwargs = self._build_provider_kwargs(
+                    base_url, redirect_path, required_scopes, timeout
+                )
+                provider = provider_cls(**kwargs)
+                self._configure_allowed_redirects(provider)
+            else:
+                provider = provider_cls()
+        except Exception as exc:
+            self.logger.error(
+                "Failed to initialize auth provider",
+                provider=provider_path,
+                error=str(exc),
+            )
+            return None
+
+        return provider
 
     def _get_auth_base_url(self) -> str:
         """Get the base URL for auth callbacks."""
@@ -776,8 +817,17 @@ class DockerMCPServer:
 
         if allowed_redirects:
             try:
+                if allowed_redirects.startswith("["):
+                    import json
+
+                    parsed_patterns = json.loads(allowed_redirects)
+                    if not isinstance(parsed_patterns, list):
+                        raise ValueError("Expected list for redirect patterns")
+                    patterns = [str(p).strip() for p in parsed_patterns if str(p).strip()]
+                else:
+                    patterns = [p.strip() for p in allowed_redirects.split(",") if p.strip()]
+
                 # property exists in FastMCP 2.12.x
-                patterns = [p.strip() for p in allowed_redirects.split(",") if p.strip()]
                 provider.allowed_client_redirect_uris = patterns
             except Exception:
                 # Older FastMCP versions may not support this; log and continue
