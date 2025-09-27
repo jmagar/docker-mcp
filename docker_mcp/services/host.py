@@ -16,6 +16,7 @@ else:
     DockerContextManager = "DockerContextManager"
 
 import structlog
+from mcp.types import TextContent
 
 from ..constants import APPDATA_PATH, COMPOSE_PATH, DOCKER_COMPOSE_WORKING_DIR, HOST_ID
 from ..core.config_loader import DockerHost, DockerMCPConfig, load_config, save_config
@@ -1518,7 +1519,9 @@ class HostService:
             # Extract the formatted content and include it in the response
             formatted_content = ""
             if hasattr(result, 'content') and result.content:
-                formatted_content = result.content[0].text if result.content[0].text else ""
+                first_content = result.content[0]
+                if isinstance(first_content, TextContent) and first_content.text:
+                    formatted_content = first_content.text
 
             # Get the structured content
             structured_data = cast(dict[str, Any], result.structured_content)
