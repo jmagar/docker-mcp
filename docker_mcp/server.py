@@ -348,7 +348,7 @@ class DockerMCPServer:
 
         # No legacy log tools; logs handled via LogsService
 
-        # Initialize hot reload manager (always enabled)
+        # Initialize hot reload manager with race condition fix
         self.hot_reload_manager = HotReloadManager()
         self.hot_reload_manager.setup_hot_reload(self._config_path, self)
 
@@ -607,9 +607,24 @@ class DockerMCPServer:
 
     def _build_auth_provider(self) -> Any | None:
         """Build OAuth provider from environment if configured."""
+        enable_flag = os.getenv("FASTMCP_ENABLE_OAUTH", "").strip().lower()
         provider_path = os.getenv("FASTMCP_SERVER_AUTH", "").strip()
+
+        flag_is_enabled = enable_flag in {"1", "true", "yes", "on"}
+        if not flag_is_enabled:
+            if provider_path:
+                self.logger.info(
+                    "Skipping OAuth provider because FASTMCP_ENABLE_OAUTH is not enabled",
+                    requested_provider=provider_path,
+                )
+            else:
+                self.logger.info("OAuth authentication disabled")
+            return None
+
         if not provider_path:
-            self.logger.info("OAuth authentication disabled")
+            self.logger.info(
+                "FASTMCP_ENABLE_OAUTH set but no provider configured; OAuth disabled"
+            )
             return None
 
         try:
@@ -844,7 +859,7 @@ class DockerMCPServer:
 
     def _resource_to_template(self, resource: FunctionResource) -> FunctionResourceTemplate:
         """Convert a function-backed resource into a template for URI parameters."""
-        
+
         # Extract the raw URI template string before URL encoding transforms it
         # This preserves template parameters like {host_id} and {stack_name}
         uri_template = resource.uri
@@ -1644,21 +1659,61 @@ def _load_and_configure(args, logger) -> tuple[DockerMCPConfig | None, str]:
 
 
 def _setup_hot_reload(server: "DockerMCPServer", logger) -> None:
-    """Setup hot reload in background thread."""
+    """Setup hot reload in background thread with robust error handling."""
     import asyncio
     import threading
+    import time
 
     async def start_hot_reload():
-        await server.start_hot_reload()
+        # Wait longer to ensure FastMCP is completely initialized
+        await asyncio.sleep(5.0)
+
+        # Attempt hot reload with extensive error handling
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Pre-verify FastMCP modules are available
+                import fastmcp
+                import fastmcp.settings
+
+                # Verify the specific attribute exists before proceeding
+                if not hasattr(fastmcp.settings, 'mask_error_details'):
+                    logger.warning(
+                        f"FastMCP settings module missing mask_error_details (attempt {attempt + 1}/{max_retries})"
+                    )
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2.0 ** attempt)  # Exponential backoff
+                        continue
+                    else:
+                        logger.error("Hot reload disabled due to FastMCP module incompatibility")
+                        return
+
+                logger.debug("FastMCP modules verified successfully in hot reload thread")
+                await server.start_hot_reload()
+                return
+
+            except Exception as e:
+                logger.warning(
+                    f"Hot reload initialization attempt {attempt + 1}/{max_retries} failed",
+                    error=str(e)
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2.0 ** attempt)  # Exponential backoff
+                else:
+                    logger.error("Hot reload disabled after multiple failures", error=str(e))
+                    return
 
     def run_hot_reload():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(start_hot_reload())
-        # Keep the loop running to handle file changes
-        loop.run_forever()
+        try:
+            loop.run_until_complete(start_hot_reload())
+            # Keep the loop running to handle file changes
+            loop.run_forever()
+        except Exception as e:
+            logger.error("Hot reload thread crashed", error=str(e))
 
-    hot_reload_thread = threading.Thread(target=run_hot_reload, daemon=True)
+    hot_reload_thread = threading.Thread(target=run_hot_reload, daemon=True, name="HotReloadThread")
     hot_reload_thread.start()
     logger.info("Hot reload enabled for configuration changes")
 

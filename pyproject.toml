@@ -5,7 +5,7 @@ description = "Docker Manager MCP - AI-powered Docker management across multiple
 authors = [
     {name = "Docker MCP Team"}
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "fastmcp>=2.12.2",
     "docker>=7.1.0",
@@ -52,7 +52,7 @@ build-backend = "hatchling.build"
 # Ruff configuration
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 cache-dir = ".cache/ruff"
 
 [tool.ruff.lint]
@@ -96,7 +96,7 @@ cache-dir = ".cache/uv"
 
 # MyPy configuration
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = false
 warn_return_any = false
 warn_unused_configs = true

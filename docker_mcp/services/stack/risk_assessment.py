@@ -118,12 +118,12 @@ class StackRiskAssessment:
             risks["recommendations"].append(
                 "Ensure all database connections are closed before migration"
             )
-            risks["critical_files"].extend(db_files[:5])  # Show first 5
+            risks["critical_files"].extend(db_files)
             if risks["overall_risk"] == "LOW":
                 risks["overall_risk"] = "MEDIUM"
 
         if config_files:
-            risks["critical_files"].extend(config_files[:5])  # Show first 5
+            risks["critical_files"].extend(config_files)
 
         if len(critical_files) > 20:
             risks["risk_factors"].append("MANY_CRITICAL_FILES")

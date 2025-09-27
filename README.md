@@ -336,7 +336,8 @@ FASTMCP_DATA_DIR=/var/lib/docker-mcp/data                     # Persist OAuth to
 DOCKER_MCP_DATA_DIR=/var/lib/docker-mcp/data                  # Alias for tooling expecting DOCKER_MCP_*
 
 # OAuth Authentication (Optional but Recommended)
-FASTMCP_SERVER_AUTH=fastmcp.auth.GoogleProvider               # Enable Google OAuth
+FASTMCP_ENABLE_OAUTH=true                                     # Enable OAuth support (defaults to off)
+FASTMCP_SERVER_AUTH=fastmcp.auth.GoogleProvider               # Select Google OAuth provider
 FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID=your-client-id           # Google OAuth client ID
 FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET=your-client-secret   # Google OAuth client secret
 FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH=/auth/callback       # OAuth callback path
@@ -389,7 +390,7 @@ cd ~/.docker-mcp && docker compose down
 - **Automatic security updates** via GitHub Actions
 
 ### OAuth Authentication Features
-When OAuth is enabled via `FASTMCP_SERVER_AUTH`:
+When OAuth is enabled (set `FASTMCP_ENABLE_OAUTH=true` and provide `FASTMCP_SERVER_AUTH`):
 - **Dynamic provider loading** - Use Google, GitHub, or custom auth providers
 - **`whoami` tool** - Verify authenticated user identity and claims
 - **Secure token handling** - Built on FastMCP's robust auth framework

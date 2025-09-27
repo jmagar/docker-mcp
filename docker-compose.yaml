@@ -1,13 +1,18 @@
 services:
   docker-mcp:
-    image: ghcr.io/jmagar/docker-mcp:latest
-    pull_policy: always
+    # image: docker-mcp-debug:latest
+    build: .  # Rebuild with the hot reload fix
+    # image: ghcr.io/jmagar/docker-mcp:latest
+    # pull_policy: always
     container_name: docker-mcp
     restart: unless-stopped
     
     ports:
       - "${FASTMCP_PORT:-8000}:${FASTMCP_PORT:-8000}"
-    
+
+    env_file:
+      - .env
+
     volumes:
       # Docker MCP SSH keys only - mounted read-only for security
       - ${SSH_KEYS_HOST_PATH:-~/.docker-mcp/ssh}:/home/dockermcp/.ssh:ro
@@ -22,31 +27,14 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     
     environment:
-      # Server configuration
-      FASTMCP_HOST: "${FASTMCP_HOST:-0.0.0.0}"
-      FASTMCP_PORT: "${FASTMCP_PORT:-8000}"
-      FASTMCP_DATA_DIR: "${FASTMCP_DATA_DIR:-/app/data}"
-      DOCKER_MCP_DATA_DIR: "${DOCKER_MCP_DATA_DIR:-/app/data}"
-      
-      # Configuration file path
-      DOCKER_HOSTS_CONFIG: "${DOCKER_HOSTS_CONFIG:-/app/config/hosts.yml}"
-      
-      # Logging configuration
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      LOG_DIR: "${LOG_DIR:-/app/data/logs}"
-      LOG_FILE_SIZE_MB: "${LOG_FILE_SIZE_MB:-10}"
-      
-      # SSH configuration (container path)
+      # Override paths for container context
+      DOCKER_HOSTS_CONFIG: "/app/config/hosts.yml"
       SSH_CONFIG_PATH: "/home/dockermcp/.ssh/config"
-      SSH_DEBUG: "${SSH_DEBUG:-0}"
-      
-      # Development settings
-      DEVELOPMENT_MODE: "${DEVELOPMENT_MODE:-false}"
-      HOT_RELOAD: "${HOT_RELOAD:-true}"
-      
-      # Rate limiting
-      RATE_LIMIT_PER_SECOND: "${RATE_LIMIT_PER_SECOND:-50.0}"
-      SLOW_REQUEST_THRESHOLD_MS: "${SLOW_REQUEST_THRESHOLD_MS:-5000.0}"
+      LOG_DIR: "/app/data/logs"
+      FASTMCP_DATA_DIR: "/app/data"
+      DOCKER_MCP_DATA_DIR: "/app/data"
+      # Enable colored output in Docker logs
+      FORCE_COLOR: "true"
     
     # Health check (using internal endpoint check)
     healthcheck:

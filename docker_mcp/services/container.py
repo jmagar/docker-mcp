@@ -122,17 +122,32 @@ class ContainerService:
             if "error" in container_result:
                 # Try to provide helpful suggestions
                 suggestion = ""
-                if "not found" in container_result["error"].lower():
+                error_lower = container_result["error"].lower()
+                if "not found" in error_lower:
                     # Get list of available containers to suggest alternatives
-                    containers_result = await self.container_tools.list_containers(host_id, all_containers=True, limit=10, offset=0)
+                    containers_result = await self.container_tools.list_containers(
+                        host_id,
+                        all_containers=True,
+                        limit=1000,
+                        offset=0,
+                    )
                     if containers_result.get("success") and containers_result.get("containers"):
-                        container_names = [c.get("name", "") for c in containers_result["containers"]]
+                        container_names = [
+                            c.get("name", "") for c in containers_result["containers"]
+                        ]
                         # Find similar names
-                        similar_names = [name for name in container_names if container_id.lower() in name.lower() or name.lower() in container_id.lower()]
+                        similar_names = [
+                            name
+                            for name in container_names
+                            if container_id.lower() in name.lower()
+                            or name.lower() in container_id.lower()
+                        ]
                         if similar_names:
-                            suggestion = f"Did you mean one of: {', '.join(similar_names[:3])}?"
-                        else:
-                            suggestion = f"Available containers: {', '.join(container_names[:5])}"
+                            suggestion = f"Did you mean one of: {', '.join(similar_names)}?"
+                        elif container_names:
+                            suggestion = (
+                                f"Available containers: {', '.join(container_names)}"
+                            )
 
                 return {
                     "exists": False,
@@ -235,14 +250,17 @@ class ContainerService:
                 f"Docker Containers on {host_id}",
                 f"Showing {pagination['returned']} of {pagination['total']} containers",
                 "",
+                "  Container                               Ports                             Project                State",
+                "  ---------------------------------------- -------------------------------- ---------------------- ----------------",
             ]
 
             for container in containers:
-                summary_lines.extend(self._format_container_summary(container))
+                summary_lines.append(self._format_container_summary(container))
 
             if pagination["has_next"]:
+                summary_lines.append("")
                 summary_lines.append(
-                    f"\nNext page: Use offset={pagination['offset'] + pagination['limit']}"
+                    f"Next page: Use offset={pagination['offset'] + pagination['limit']}"
                 )
 
             formatted_text = "\n".join(summary_lines)
@@ -270,8 +288,8 @@ class ContainerService:
                 },
             )
 
-    def _format_container_summary(self, container: dict[str, Any]) -> list[str]:
-        """Format container information for display - enhanced detailed format with full information."""
+    def _format_container_summary(self, container: dict[str, Any]) -> str:
+        """Format container information for display in a single table row."""
         # Enhanced status indicators with more states
         state = container.get("state", "unknown")
         status_indicators = {
@@ -289,41 +307,30 @@ class ContainerService:
         # Show ALL ports without truncation
         ports = container.get("ports", [])
         if ports:
-            # Extract all port mappings without data loss
             port_mappings: list[str] = []
             for port in ports:
                 if ":" in port and "→" in port:
-                    # Extract host port from format like "0.0.0.0:8080→80/tcp"
                     host_part = port.split(":", 1)[1].split("→", 1)[0]
                     container_part = port.split("→", 1)[1] if "→" in port else ""
-                    port_mappings.append(f"{host_part}→{container_part}" if container_part else host_part)
+                    port_mappings.append(
+                        f"{host_part}→{container_part}" if container_part else host_part
+                    )
                 else:
-                    # Handle other port formats
                     port_mappings.append(port)
-            ports_display = ", ".join(port_mappings)
+            ports_display = ", ".join(port_mappings) if port_mappings else ", ".join(ports)
         else:
             ports_display = "-"
 
-        # Show full names without truncation
-        name = container["name"]
+        name = container.get("name", "-")
         project = container.get("compose_project") or "-"
+        state_display = container.get("state", "-")
 
-        # Add network information if available
-        networks = container.get("networks", [])
-        networks_display = ", ".join(networks) if networks else "-"
-
-        # Enhanced multi-line format for better structure and readability
-        container_info = [
-            f"{status_indicator} {name}",
-            f"    Project: {project}",
-            f"    Ports: {ports_display}",
-        ]
-
-        # Add networks only if available to avoid clutter
-        if networks:
-            container_info.append(f"    Networks: {networks_display}")
-
-        return container_info
+        return (
+            f"{status_indicator} {name:<38}"
+            f" {ports_display:<32}"
+            f" {project:<22}"
+            f" {state_display}"
+        )
 
     async def get_container_info(self, host_id: str, container_id: str) -> ToolResult:
         """Get detailed information about a specific container."""
@@ -501,16 +508,14 @@ class ContainerService:
     def _add_environment_info(self, lines: list[str], container_info: dict[str, Any]) -> None:
         """Add environment variables information."""
         env_vars = container_info.get("environment", [])
-        if env_vars and len(env_vars) <= 20:  # Only show if reasonable number
+        if env_vars:
             lines.append("Environment Variables:")
-            for env_var in env_vars[:15]:  # Show up to 15
+            for env_var in env_vars:
                 if self._is_sensitive_env_var(env_var):
                     var_name = env_var.split("=")[0] if "=" in env_var else env_var
                     lines.append(f"  • {var_name}=[REDACTED]")
                 else:
                     lines.append(f"  • {env_var}")
-            if len(env_vars) > 15:
-                lines.append(f"  • ... and {len(env_vars) - 15} more variables")
             lines.append("")
 
     def _is_sensitive_env_var(self, env_var: str) -> bool:
@@ -539,17 +544,12 @@ class ContainerService:
             lines.append("Labels:")
             important_labels, other_labels = self._categorize_labels(labels)
 
-            # Show important labels first
-            for key, value in important_labels[:10]:
+            for key, value in important_labels:
                 lines.append(f"  • {key}: {value}")
 
-            # Show other labels (limited)
-            for key, value in other_labels[:5]:
+            for key, value in other_labels:
                 lines.append(f"  • {key}: {value}")
 
-            total_labels = len(important_labels) + len(other_labels)
-            if total_labels > 15:
-                lines.append(f"  • ... and {total_labels - 15} more labels")
             lines.append("")
 
     def _categorize_labels(self, labels: dict[str, Any]) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]]]:
@@ -612,7 +612,7 @@ class ContainerService:
         if layers and layers > 0:
             formatted_lines.append(f"  → Layers: {layers}")
         if digest:
-            formatted_lines.append(f"  → Digest: {digest[:16]}...")
+            formatted_lines.append(f"  → Digest: {digest}")
 
         formatted_lines.append("  ✓ Ready for use")
 
@@ -1093,7 +1093,7 @@ class ContainerService:
 
         return lines
 
-    async def check_port_availability(self, host_id: str, port: int) -> dict[str, Any]:
+    async def check_port_availability(self, host_id: str, port: int) -> ToolResult:
         """Check if a specific port is available on a host.
 
         Args:
@@ -1106,13 +1106,15 @@ class ContainerService:
         try:
             # Validate host
             validation_result = self._validate_port_check_host(host_id)
-            if validation_result:
+            if validation_result is not None:
                 return validation_result
 
             # Get port usage data
             port_data = await self._get_port_usage_data(host_id)
             if "error" in port_data:
-                return {"success": False, "error": port_data["error"]}
+                return self._build_port_check_error_toolresult(
+                    host_id, port, port_data["error"]
+                )
 
             # Find conflicts
             conflicts = self._find_port_conflicts(port_data.get("port_mappings", []), port)
@@ -1123,20 +1125,29 @@ class ContainerService:
                 host_id, port, is_available, conflicts
             )
 
-            return response
+            formatted_output = response.get("formatted_output", "")
+
+            return ToolResult(
+                content=[TextContent(type="text", text=formatted_output)],
+                structured_content=response,
+            )
 
         except Exception as e:
             return self._handle_port_check_error(host_id, port, e)
 
-    def _validate_port_check_host(self, host_id: str) -> dict[str, Any] | None:
+    def _validate_port_check_host(self, host_id: str) -> ToolResult | None:
         """Validate host for port checking."""
         is_valid, error_msg = validate_host(self.config, host_id)
         if not is_valid:
-            return {
-                "success": False,
-                "error": error_msg,
-                "formatted_output": f"❌ Port check failed: {error_msg}",
-            }
+            formatted_output = f"❌ Port check failed: {error_msg}"
+            return ToolResult(
+                content=[TextContent(type="text", text=formatted_output)],
+                structured_content={
+                    "success": False,
+                    "error": error_msg,
+                    "formatted_output": formatted_output,
+                },
+            )
         return None
 
     async def _get_port_usage_data(self, host_id: str) -> dict[str, Any]:
@@ -1198,29 +1209,34 @@ class ContainerService:
             return []
 
         conflicts_preview = []
-        for conflict in conflicts[:5]:
+        for conflict in conflicts:
             name = conflict.get("container_name", "unknown")
             protocol = conflict.get("protocol", "tcp").upper()
             conflicts_preview.append(f"  • {name} ({protocol})")
 
-        remaining = len(conflicts) - len(conflicts_preview)
-        if remaining > 0:
-            conflicts_preview.append(f"  • +{remaining} more")
-
         return conflicts_preview
 
-    def _handle_port_check_error(self, host_id: str, port: int, error: Exception) -> dict[str, Any]:
+    def _build_port_check_error_toolresult(
+        self, host_id: str, port: int, error_message: str
+    ) -> ToolResult:
+        formatted_output = f"❌ Port check failed: {error_message}"
+        return ToolResult(
+            content=[TextContent(type="text", text=formatted_output)],
+            structured_content={
+                "success": False,
+                "error": error_message,
+                HOST_ID: host_id,
+                "port": port,
+                "formatted_output": formatted_output,
+            },
+        )
+
+    def _handle_port_check_error(self, host_id: str, port: int, error: Exception) -> ToolResult:
         """Handle port check errors."""
         self.logger.error(
             "Failed to check port availability", host_id=host_id, port=port, error=str(error)
         )
-        return {
-            "success": False,
-            "error": f"Port check failed: {str(error)}",
-            HOST_ID: host_id,
-            "port": port,
-            "formatted_output": f"❌ Port check failed: {str(error)}",
-        }
+        return self._build_port_check_error_toolresult(host_id, port, str(error))
 
     async def handle_action(self, action, **params) -> dict[str, Any]:
         """Unified action handler for all container operations.

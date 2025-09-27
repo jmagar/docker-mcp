@@ -203,6 +203,7 @@ Example `.env` file:
 
 ```bash
 # Use the Google provider
+FASTMCP_ENABLE_OAUTH=true
 FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.google.GoogleProvider
 
 # Google OAuth credentials

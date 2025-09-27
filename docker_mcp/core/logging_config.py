@@ -87,11 +87,15 @@ def setup_logging(
     # Configure structlog to use standard library logging
     from structlog.stdlib import BoundLogger, LoggerFactory, ProcessorFormatter
 
-    renderer = (
-        structlog.dev.ConsoleRenderer()
-        if sys.stdout.isatty()
-        else structlog.processors.JSONRenderer()
-    )
+    # Check if we're in a TTY or if we want colors in Docker
+    force_colors = os.getenv("FORCE_COLOR", "").lower() in ("1", "true", "yes")
+    is_tty = sys.stdout.isatty()
+
+    # Use colored console renderer if TTY or force colors is enabled
+    if is_tty or force_colors:
+        renderer = structlog.dev.ConsoleRenderer(colors=True)
+    else:
+        renderer = structlog.processors.JSONRenderer()
     # Integrate with stdlib handlers so file and console both receive events
     structlog.configure(
         processors=[

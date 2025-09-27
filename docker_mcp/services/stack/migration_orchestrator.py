@@ -326,7 +326,7 @@ class StackMigrationOrchestrator:
         migration_steps.append(f"📊 Risk level: {risks['overall_risk']} (score: {risk_score}/100)")
 
         if risks["warnings"]:
-            for warning in risks["warnings"][:3]:
+            for warning in risks["warnings"]:
                 migration_steps.append(f"⚠️  {warning}")
 
         migration_data["risk_assessment"] = risks

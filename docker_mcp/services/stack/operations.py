@@ -298,11 +298,13 @@ class StackOperations:
         if output := result.get("output"):
             message_lines.append("")
             message_lines.append("📄 Command Output:")
-            message_lines.append("┌" + "─" * 48 + "┐")
-            for line in output.split("\n")[-10:]:  # Show last 10 lines
-                if line.strip():
-                    message_lines.append(f"│ {line[:46]:<46} │")
-            message_lines.append("└" + "─" * 48 + "┘")
+            output_lines = output.split("\n")
+            max_width = max((len(line) for line in output_lines), default=0)
+            border = "┌" + "─" * (max_width + 2) + "┐"
+            message_lines.append(border)
+            for line in output_lines:
+                message_lines.append(f"│ {line:<{max_width}} │")
+            message_lines.append("└" + "─" * (max_width + 2) + "┘")
 
         message_lines.append("")
 
@@ -385,14 +387,12 @@ class StackOperations:
             services = stack.get("services", [])
 
             if services:
-                services_display = f"[{len(services)}] {', '.join(services[:2])}"
-                if len(services) > 2:
-                    services_display += "..."
+                services_display = f"[{len(services)}] {', '.join(services)}"
             else:
                 services_display = "[0]"
 
-            stack_name = stack.get("name", "unknown")[:25]
-            status = stack.get("status", "unknown")[:10]
+            stack_name = stack.get("name", "unknown")
+            status = stack.get("status", "unknown")
 
             summary_lines.append(
                 f"{status_indicator} {stack_name:<25} {status:<10} {services_display}"
@@ -523,7 +523,7 @@ class StackOperations:
             state_icon, health_label = self._get_service_state_info(status, status_counts)
 
             summary_lines.append(
-                f"{state_icon:<7} {name[:25]:<25} {health_label:<10} {ports}"
+                f"{state_icon:<7} {name:<25} {health_label:<10} {ports}"
             )
 
     def _get_service_state_info(self, status: str, status_counts: dict[str, int]) -> tuple[str, str]:
@@ -731,17 +731,16 @@ class StackOperations:
             return
 
         lines.append("📋 Migration Progress:")
-        lines.append("┌" + "─" * 56 + "┐")
 
         for i, step in enumerate(steps, 1):
             step_name = step.get("name", f"Step {i}")
             step_status = step.get("status", "unknown")
             step_duration = step.get("duration_seconds", 0)
 
-            status_icon, status_text = self._get_step_status_info(step_status, step_duration, step)
-            lines.append(f"│ {i:2}. {status_icon} {step_name:<30} │ {status_text[:15]:<15} │")
-
-        lines.append("└" + "─" * 56 + "┘")
+            status_icon, status_text = self._get_step_status_info(
+                step_status, step_duration, step
+            )
+            lines.append(f"  {i}. {status_icon} {step_name} :: {status_text}")
         lines.append("")
 
     def _get_step_status_info(self, status: str, duration: float, step: dict[str, Any]) -> tuple[str, str]:
@@ -807,12 +806,10 @@ class StackOperations:
         target_services = target_status.get("services", [])
         if target_services:
             lines.append(f"   Services: {len(target_services)} running")
-            for service in target_services[:3]:  # Show first 3 services
+            for service in target_services:
                 service_name = service.get("name", "Unknown")
                 service_status = service.get("status", "unknown")
                 lines.append(f"     • {service_name}: {service_status}")
-            if len(target_services) > 3:
-                lines.append(f"     ... and {len(target_services) - 3} more services")
 
     def _add_migration_summary(self, lines: list[str], result: dict[str, Any]) -> None:
         """Add migration summary information."""
@@ -834,7 +831,7 @@ class StackOperations:
             lines.append("")
             lines.append("💡 Recommendations:")
             lines.append("─" * 20)
-            for rec in recommendations[:3]:  # Show top 3 recommendations
+            for rec in recommendations:
                 lines.append(f"  • {rec}")
 
     def _add_migration_footer(self, lines: list[str], result: dict[str, Any]) -> None:

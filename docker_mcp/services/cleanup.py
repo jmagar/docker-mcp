@@ -14,8 +14,6 @@ from ..core.config_loader import DockerHost, DockerMCPConfig
 from ..utils import build_ssh_command, format_size, validate_host
 
 # Constants
-TOP_CANDIDATES = 10
-TOP_CONSUMERS = 10
 
 # Docker container parsing constants
 CONTAINER_SIZE_COLUMN_INDEX = 5  # Column after SIZE in docker ps output
@@ -667,7 +665,7 @@ class CleanupService:
             # Handle repository name formatting
             name = f"{repo}:{tag}" if tag not in ["<none>", "<missing>"] else repo
             if name == "<none>:<none>":
-                name = f"<none>@{parts[2][:12]}" if len(parts) > 2 else "<none>"
+                name = f"<none>@{parts[2]}" if len(parts) > 2 else "<none>"
 
             images.append(
                 {
@@ -736,16 +734,18 @@ class CleanupService:
         images.sort(key=lambda x: x["size_bytes"], reverse=True)
         volumes.sort(key=lambda x: x["size_bytes"], reverse=True)
 
-        result["top_images"] = images[:TOP_CONSUMERS]  # Top largest images
-        result["top_volumes"] = volumes[:TOP_CONSUMERS]  # Top largest volumes
+        result["top_images"] = images  # Include all images for transparency
+        result["top_volumes"] = volumes  # Include all volumes for transparency
         result["container_stats"]["total_size"] = format_size(
             result["container_stats"]["total_size_bytes"]
         )
 
-        # Sort cleanup candidates by size and limit to top candidates
+        # Sort cleanup candidates by size (no truncation)
         result["cleanup_candidates"] = sorted(
-            result["cleanup_candidates"], key=lambda x: x.get("size_bytes", 0), reverse=True
-        )[:TOP_CANDIDATES]
+            result["cleanup_candidates"],
+            key=lambda x: x.get("size_bytes", 0),
+            reverse=True,
+        )
 
     def _analyze_cleanup_potential(self, df_output: str) -> dict[str, str]:
         """Analyze potential cleanup from docker system df output."""
@@ -968,7 +968,7 @@ class CleanupService:
                 stopped_containers = containers_stdout.decode().strip().split("\n")
                 details["stopped_containers"] = {
                     "count": len(stopped_containers),
-                    "names": stopped_containers[:5],  # Show first 5
+                    "names": stopped_containers,
                 }
 
             # Get unused networks (custom networks with no containers)
@@ -992,7 +992,7 @@ class CleanupService:
                 unused_networks = networks_stdout.decode().strip().split("\n")
                 details["unused_networks"] = {
                     "count": len(unused_networks),
-                    "names": unused_networks[:5],  # Show first 5
+                    "names": unused_networks,
                 }
 
             # Get dangling images
