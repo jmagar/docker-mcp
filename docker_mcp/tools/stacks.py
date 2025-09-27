@@ -635,7 +635,14 @@ class StackTools:
             options = options or {}
 
             # Get compose file information
-            compose_info = await self._get_compose_file_info(host_id, stack_name)
+            compose_info = await self._get_compose_file_info(
+                host_id,
+                stack_name,
+                compose_path_override=options.get("compose_path")
+                or options.get("compose_base_path"),
+                compose_file_override=options.get("compose_file_path")
+                or options.get("compose_file"),
+            )
 
             # Always use SSH execution for consistency with deploy_stack
             # This ensures we can access compose files on remote hosts and maintains
@@ -962,13 +969,32 @@ class StackTools:
                 "timestamp": datetime.now().isoformat(),
             }
 
-    async def _get_compose_file_info(self, host_id: str, stack_name: str) -> dict[str, Any]:
+    async def _get_compose_file_info(
+        self,
+        host_id: str,
+        stack_name: str,
+        compose_path_override: str | None = None,
+        compose_file_override: str | None = None,
+    ) -> dict[str, Any]:
         """Get compose file information for a stack."""
-        compose_file_exists = await self.compose_manager.compose_file_exists(host_id, stack_name)
+        if compose_file_override:
+            file_exists = await self.compose_manager.remote_file_exists(
+                host_id, compose_file_override
+            )
+            compose_filename = Path(compose_file_override).name
+            return {
+                "exists": file_exists,
+                "path": compose_file_override,
+                "base_cmd": f"compose --project-name {stack_name} -f {compose_filename}",
+            }
+
+        compose_file_exists = await self.compose_manager.compose_file_exists(
+            host_id, stack_name, compose_path_override
+        )
 
         if compose_file_exists:
             compose_file_path = await self.compose_manager.get_compose_file_path(
-                host_id, stack_name
+                host_id, stack_name, compose_path_override
             )
             # Use just the filename since we cd into the project directory
             compose_filename = Path(compose_file_path).name
@@ -977,12 +1003,12 @@ class StackTools:
                 "path": compose_file_path,
                 "base_cmd": f"compose --project-name {stack_name} -f {compose_filename}",
             }
-        else:
-            return {
-                "exists": False,
-                "path": None,
-                "base_cmd": f"compose --project-name {stack_name}",
-            }
+
+        return {
+            "exists": False,
+            "path": None,
+            "base_cmd": f"compose --project-name {stack_name}",
+        }
 
     def _build_error_response(
         self, host_id: str, stack_name: str, action: str, error: str

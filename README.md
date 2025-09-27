@@ -156,6 +156,8 @@ Consolidated Docker Compose stack management tool.
 • **up/down/restart/build/pull**: Manage stack lifecycle
   - Required: host_id, stack_name
   - Optional: options
+    - `compose_path` / `compose_base_path`: override the default compose directory
+    - `compose_file_path` / `compose_file`: point directly at a compose file outside the default tree
 
 • **ps**: Show stack services (status and ports)
   - Required: host_id, stack_name
@@ -179,6 +181,7 @@ Consolidated Docker Compose stack management tool.
 "Bring up the wordpress stack on production-1"
 "Take down the old-app stack on staging"
 "Restart the plex stack on media-server"
+"Restart plex on media-server using compose file at /srv/custom/plex.yml"
 "Build the development stack on staging"
 "Discover compose files on production-1"
 "Show logs from the wordpress stack on production-1"

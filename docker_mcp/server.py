@@ -856,7 +856,6 @@ class DockerMCPServer:
 
         # Extract the raw URI template string before URL encoding transforms it
         # This preserves template parameters like {host_id} and {stack_name}
-        uri_template = resource.uri
         if hasattr(resource.uri, "__str__"):
             # If the URI was originally a template string, get the raw template
             # For AnyUrl objects, we need to preserve the original template format

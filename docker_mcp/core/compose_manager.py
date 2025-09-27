@@ -518,7 +518,12 @@ class ComposeManager:
             )
             return False
 
-    async def get_compose_file_path(self, host_id: str, stack_name: str) -> str:
+    async def get_compose_file_path(
+        self,
+        host_id: str,
+        stack_name: str,
+        base_directory: str | None = None,
+    ) -> str:
         """Get the actual path for a stack's compose file, checking multiple extensions.
 
         Checks for compose files in order of preference:
@@ -534,7 +539,14 @@ class ComposeManager:
         Returns:
             Path to existing compose file, or default path if none exist
         """
-        compose_base_dir = await self.get_compose_path(host_id)
+        if base_directory:
+            logger.debug(
+                "Using override compose base directory",
+                host_id=host_id,
+                stack_name=stack_name,
+                compose_base_dir=base_directory,
+            )
+        compose_base_dir = base_directory or await self.get_compose_path(host_id)
 
         # Check for common compose file names in order of preference
         possible_files = [
@@ -565,7 +577,12 @@ class ComposeManager:
         )
         return default_path
 
-    async def compose_file_exists(self, host_id: str, stack_name: str) -> bool:
+    async def compose_file_exists(
+        self,
+        host_id: str,
+        stack_name: str,
+        base_directory: str | None = None,
+    ) -> bool:
         """Check if a compose file exists for a stack.
 
         Args:
@@ -584,7 +601,9 @@ class ComposeManager:
             if not host_config:
                 return False
 
-            compose_file_path = await self.get_compose_file_path(host_id, stack_name)
+            compose_file_path = await self.get_compose_file_path(
+                host_id, stack_name, base_directory
+            )
 
             # Build SSH command using the helper and append test command
             ssh_cmd = build_ssh_command(host_config)
@@ -608,6 +627,20 @@ class ComposeManager:
                 "Error checking compose file existence",
                 host_id=host_id,
                 stack_name=stack_name,
+                error=str(e),
+            )
+            return False
+
+    async def remote_file_exists(self, host_id: str, file_path: str) -> bool:
+        """Check if a specific file exists on the remote host."""
+
+        try:
+            return await self._file_exists_via_ssh(host_id, file_path)
+        except Exception as e:
+            logger.debug(
+                "Error checking remote file existence",
+                host_id=host_id,
+                file_path=file_path,
                 error=str(e),
             )
             return False
