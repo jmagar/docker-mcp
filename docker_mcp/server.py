@@ -622,17 +622,13 @@ class DockerMCPServer:
             return None
 
         if not provider_path:
-            self.logger.info(
-                "FASTMCP_ENABLE_OAUTH set but no provider configured; OAuth disabled"
-            )
+            self.logger.info("FASTMCP_ENABLE_OAUTH set but no provider configured; OAuth disabled")
             return None
 
         try:
             module_path, class_name = provider_path.rsplit(".", 1)
         except ValueError:
-            self.logger.error(
-                "Invalid FASTMCP_SERVER_AUTH value", provider=provider_path
-            )
+            self.logger.error("Invalid FASTMCP_SERVER_AUTH value", provider=provider_path)
             return None
 
         try:
@@ -647,9 +643,7 @@ class DockerMCPServer:
 
         provider_cls = getattr(module, class_name, None)
         if provider_cls is None:
-            self.logger.error(
-                "Auth provider class not found", provider=provider_path
-            )
+            self.logger.error("Auth provider class not found", provider=provider_path)
             return None
 
         try:
@@ -863,12 +857,13 @@ class DockerMCPServer:
         # Extract the raw URI template string before URL encoding transforms it
         # This preserves template parameters like {host_id} and {stack_name}
         uri_template = resource.uri
-        if hasattr(resource.uri, '__str__'):
+        if hasattr(resource.uri, "__str__"):
             # If the URI was originally a template string, get the raw template
             # For AnyUrl objects, we need to preserve the original template format
             uri_str = str(resource.uri)
             # Decode URL-encoded template parameters back to their original form
             import urllib.parse
+
             uri_str = urllib.parse.unquote(uri_str)
             uri_template = uri_str
         else:
@@ -909,9 +904,7 @@ class DockerMCPServer:
             self.app.add_template(info_template)
 
             # Compose stack listing resource - stacks://{host_id}
-            stack_list_template = self._resource_to_template(
-                StackListResource(self.stack_service)
-            )
+            stack_list_template = self._resource_to_template(StackListResource(self.stack_service))
             self.app.add_template(stack_list_template)
 
             # Compose stack detail resource - stacks://{host_id}/{stack_name}
@@ -1073,7 +1066,7 @@ class DockerMCPServer:
             if formatted_text:
                 return ToolResult(
                     content=[TextContent(type="text", text=formatted_text)],
-                    structured_content=service_result
+                    structured_content=service_result,
                 )
 
         # Return service result as-is (dict for unformatted actions)
@@ -1083,7 +1076,9 @@ class DockerMCPServer:
         self,
         action: Annotated[str | ContainerAction, Field(description="Action to perform")],
         container_id: Annotated[str, Field(default="", description="Container identifier")] = "",
-        image_name: Annotated[str, Field(default="", description="Image name for pull action")] = "",
+        image_name: Annotated[
+            str, Field(default="", description="Image name for pull action")
+        ] = "",
         all_containers: Annotated[
             bool, Field(default=False, description="Include all containers, not just running")
         ] = False,
@@ -1519,6 +1514,7 @@ def parse_args() -> argparse.Namespace:
     except Exception as e:
         # Log unexpected errors but continue - environment loading shouldn't block startup
         import logging
+
         logging.getLogger("docker_mcp").debug("Failed to load .env file: %s", str(e))
 
     default_host = os.getenv("FASTMCP_HOST", "127.0.0.1")  # nosec B104 - Use 0.0.0.0 for container deployment
@@ -1662,7 +1658,6 @@ def _setup_hot_reload(server: "DockerMCPServer", logger) -> None:
     """Setup hot reload in background thread with robust error handling."""
     import asyncio
     import threading
-    import time
 
     async def start_hot_reload():
         # Wait longer to ensure FastMCP is completely initialized
@@ -1677,12 +1672,12 @@ def _setup_hot_reload(server: "DockerMCPServer", logger) -> None:
                 import fastmcp.settings
 
                 # Verify the specific attribute exists before proceeding
-                if not hasattr(fastmcp.settings, 'mask_error_details'):
+                if not hasattr(fastmcp.settings, "mask_error_details"):
                     logger.warning(
                         f"FastMCP settings module missing mask_error_details (attempt {attempt + 1}/{max_retries})"
                     )
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(2.0 ** attempt)  # Exponential backoff
+                        await asyncio.sleep(2.0**attempt)  # Exponential backoff
                         continue
                     else:
                         logger.error("Hot reload disabled due to FastMCP module incompatibility")
@@ -1695,10 +1690,10 @@ def _setup_hot_reload(server: "DockerMCPServer", logger) -> None:
             except Exception as e:
                 logger.warning(
                     f"Hot reload initialization attempt {attempt + 1}/{max_retries} failed",
-                    error=str(e)
+                    error=str(e),
                 )
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2.0 ** attempt)  # Exponential backoff
+                    await asyncio.sleep(2.0**attempt)  # Exponential backoff
                 else:
                     logger.error("Hot reload disabled after multiple failures", error=str(e))
                     return
@@ -1734,10 +1729,10 @@ def _run_server(server: "DockerMCPServer", logger) -> None:
 # Module-level app instance for FastMCP configuration file support
 _app_instance = None
 
+
 def create_app():
     """Create and return FastMCP app instance for configuration file usage."""
     import argparse
-    from pathlib import Path
 
     # Create minimal args for config loading
     args = argparse.Namespace(
@@ -1747,7 +1742,7 @@ def create_app():
         hot_reload=False,
         log_file_size="10MB",
         log_file_count=5,
-        log_dir=None
+        log_dir=None,
     )
 
     # Setup minimal logging for app creation
@@ -1765,18 +1760,21 @@ def create_app():
 
     return server.app
 
+
 def get_app():
     """Get the FastMCP app instance, creating it if necessary."""
-    global _app_instance
+    global _app_instance  # noqa: PLW0603
     if _app_instance is None:
         _app_instance = create_app()
     return _app_instance
+
 
 # Direct access for FastMCP (creates app on first access)
 def __getattr__(name):
     if name == "app":
         return get_app()
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
 
 if __name__ == "__main__":
     main()

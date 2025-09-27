@@ -24,6 +24,144 @@ from docker_mcp.core.error_response import DockerMCPErrorResponse
 logger = structlog.get_logger()
 
 
+# Helper functions for parameter coercion
+def _coerce_bool(value: bool | str | None) -> bool:
+    """Coerce various types to boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _coerce_int(
+    value: int | str | None, default: int, min_val: int = 0, max_val: int | None = None
+) -> int:
+    """Coerce various types to integer with bounds."""
+    if value is None:
+        return default
+    try:
+        if isinstance(value, int):
+            result = value
+        else:
+            result = int(str(value).strip())
+
+        result = max(min_val, result)
+        if max_val is not None:
+            result = min(result, max_val)
+        return result
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_log_lines(value: int | str | bool | None) -> int:
+    """Coerce various types to log line count."""
+    if isinstance(value, bool):
+        return 100 if value else 0
+    if isinstance(value, int):
+        return max(0, min(value, 1000))
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "false", "0", "no", "off"}:
+            return 0
+        if text in {"true", "yes", "on"}:
+            return 100
+        try:
+            parsed = int(text)
+            return max(0, min(parsed, 1000))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _extract_container_data(result: Any) -> dict[str, Any]:
+    """Extract and validate container data from service result."""
+    if isinstance(result, ToolResult):
+        data = result.structured_content or {}
+    elif isinstance(result, dict):
+        data = result
+    else:
+        data = {}
+
+    if not isinstance(data, dict):
+        data = {"success": False, "error": "Unexpected container payload"}
+
+    return data
+
+
+async def _fetch_container_logs(
+    container_service: Any, host_id: str, container_id: str, log_lines: int
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch container logs if requested."""
+    if log_lines <= 0 or not hasattr(container_service, "logs_service"):
+        return None, None
+
+    try:
+        logs_result = await container_service.logs_service.get_container_logs(
+            host_id=host_id,
+            container_id=container_id,
+            lines=log_lines,
+            timestamps=False,
+        )
+
+        if isinstance(logs_result, dict) and logs_result.get("success"):
+            log_data = logs_result.get("data") or {}
+            if isinstance(log_data, dict):
+                return {
+                    "lines": log_data.get("logs", []),
+                    "truncated": log_data.get("truncated", False),
+                    "timestamp": log_data.get("timestamp"),
+                }, None
+            else:
+                return None, "Unexpected logs payload"
+        else:
+            error_msg = (
+                logs_result.get("error")
+                if isinstance(logs_result, dict)
+                else "Failed to retrieve logs"
+            )
+            return None, error_msg
+    except Exception as log_exc:
+        logger.error(
+            "Failed to include container logs",
+            host_id=host_id,
+            container_id=container_id,
+            error=str(log_exc),
+        )
+        return None, str(log_exc)
+
+
+async def _fetch_container_stats(
+    container_service: Any, host_id: str, container_id: str, include_stats: bool
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch container stats if requested."""
+    if not include_stats:
+        return None, None
+
+    try:
+        stats_result = await container_service.container_tools.get_container_stats(
+            host_id, container_id
+        )
+
+        if isinstance(stats_result, dict) and stats_result.get("success"):
+            return stats_result.get("data") or {}, None
+        else:
+            error_msg = (
+                stats_result.get("error")
+                if isinstance(stats_result, dict)
+                else "Failed to retrieve stats"
+            )
+            return None, error_msg
+    except Exception as stats_exc:
+        logger.error(
+            "Failed to include container stats",
+            host_id=host_id,
+            container_id=container_id,
+            error=str(stats_exc),
+        )
+        return None, str(stats_exc)
+
+
 class DockerInfoResource(FunctionResource):
     """MCP Resource for Docker host information.
 
@@ -261,27 +399,17 @@ class ContainerListResource(FunctionResource):
         async def _list_containers(
             host_id: str,
             *,
-            all: bool | str | None = None,
+            all_containers: bool | str | None = None,
             limit: int | str | None = None,
             offset: int | str | None = None,
         ) -> dict[str, Any]:
             try:
-                include_all = False
-                if isinstance(all, str):
-                    include_all = all.strip().lower() in {"1", "true", "yes", "on"}
-                elif isinstance(all, bool):
-                    include_all = all
+                # Use helper functions for parameter coercion
+                include_all = _coerce_bool(all_containers)
+                limit_value = _coerce_int(limit, default=20, min_val=1, max_val=1000)
+                offset_value = _coerce_int(offset, default=0, min_val=0)
 
-                try:
-                    limit_value = int(limit) if limit is not None else 20
-                except (TypeError, ValueError):
-                    limit_value = 20
-
-                try:
-                    offset_value = int(offset) if offset is not None else 0
-                except (TypeError, ValueError):
-                    offset_value = 0
-
+                # Call the service
                 result = await container_service.list_containers(
                     host_id,
                     all_containers=include_all,
@@ -289,19 +417,12 @@ class ContainerListResource(FunctionResource):
                     offset=offset_value,
                 )
 
-                if isinstance(result, ToolResult):
-                    data = result.structured_content or {}
-                elif isinstance(result, dict):
-                    data = result
-                else:
-                    data = {}
-
-                if not isinstance(data, dict):
-                    data = {"success": False, "error": "Unexpected container payload"}
-
+                # Extract and validate data
+                data = _extract_container_data(result)
                 containers = data.get("containers", [])
                 pagination = data.get("pagination", {})
 
+                # Build response
                 return {
                     "success": bool(data.get("success", False)),
                     "host_id": host_id,
@@ -344,31 +465,6 @@ class ContainerDetailsResource(FunctionResource):
     """
 
     def __init__(self, container_service: "ContainerService"):
-        def _coerce_bool(value: bool | str | None) -> bool:
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return value.strip().lower() in {"1", "true", "yes", "on"}
-            return False
-
-        def _coerce_log_lines(value: int | str | bool | None) -> int:
-            if isinstance(value, bool):
-                return 100 if value else 0
-            if isinstance(value, int):
-                return max(0, min(value, 1000))
-            if isinstance(value, str):
-                text = value.strip().lower()
-                if text in {"", "false", "0", "no", "off"}:
-                    return 0
-                if text in {"true", "yes", "on"}:
-                    return 100
-                try:
-                    parsed = int(text)
-                    return max(0, min(parsed, 1000))
-                except ValueError:
-                    return 0
-            return 0
-
         async def _container_details(
             host_id: str,
             container_id: str,
@@ -377,82 +473,26 @@ class ContainerDetailsResource(FunctionResource):
             stats: bool | str | None = None,
         ) -> dict[str, Any]:
             try:
+                # Get container info
                 result = await container_service.get_container_info(host_id, container_id)
-
-                if isinstance(result, ToolResult):
-                    data = result.structured_content or {}
-                elif isinstance(result, dict):
-                    data = result
-                else:
-                    data = {}
-
-                if not isinstance(data, dict):
-                    data = {"success": False, "error": "Unexpected container detail payload"}
-
+                data = _extract_container_data(result)
                 info = data.get("info") or data.get("data") or {}
 
+                # Coerce parameters
                 log_lines = _coerce_log_lines(logs)
                 include_stats = _coerce_bool(stats)
 
-                logs_payload: dict[str, Any] | None = None
-                logs_error: str | None = None
-                if log_lines > 0 and hasattr(container_service, "logs_service"):
-                    try:
-                        logs_result = await container_service.logs_service.get_container_logs(  # type: ignore[attr-defined]
-                            host_id=host_id,
-                            container_id=container_id,
-                            lines=log_lines,
-                            timestamps=False,
-                        )
-                        if isinstance(logs_result, dict) and logs_result.get("success"):
-                            log_data = logs_result.get("data") or {}
-                            if isinstance(log_data, dict):
-                                logs_payload = {
-                                    "lines": log_data.get("logs", []),
-                                    "truncated": log_data.get("truncated", False),
-                                    "timestamp": log_data.get("timestamp"),
-                                }
-                            else:
-                                logs_error = "Unexpected logs payload"
-                        else:
-                            logs_error = (
-                                logs_result.get("error")
-                                if isinstance(logs_result, dict)
-                                else "Failed to retrieve logs"
-                            )
-                    except Exception as log_exc:  # pragma: no cover - defensive
-                        logger.error(
-                            "Failed to include container logs",
-                            host_id=host_id,
-                            container_id=container_id,
-                            error=str(log_exc),
-                        )
-                        logs_error = str(log_exc)
+                # Fetch logs if requested
+                logs_payload, logs_error = await _fetch_container_logs(
+                    container_service, host_id, container_id, log_lines
+                )
 
-                stats_payload: dict[str, Any] | None = None
-                stats_error: str | None = None
-                if include_stats:
-                    try:
-                        stats_result = await container_service.container_tools.get_container_stats(  # type: ignore[attr-defined]
-                            host_id, container_id
-                        )
-                        if isinstance(stats_result, dict) and stats_result.get("success"):
-                            stats_payload = stats_result.get("data") or {}
-                        else:
-                            stats_error = (
-                                stats_result.get("error")
-                                if isinstance(stats_result, dict)
-                                else "Failed to retrieve stats"
-                            )
-                    except Exception as stats_exc:  # pragma: no cover - defensive
-                        logger.error(
-                            "Failed to include container stats",
-                            host_id=host_id,
-                            container_id=container_id,
-                            error=str(stats_exc),
-                        )
-                        stats_error = str(stats_exc)
+                # Fetch stats if requested
+                stats_payload, stats_error = await _fetch_container_stats(
+                    container_service, host_id, container_id, include_stats
+                )
 
+                # Build base response
                 response: dict[str, Any] = {
                     "success": bool(data.get("success", False)),
                     "host_id": host_id,
@@ -465,6 +505,7 @@ class ContainerDetailsResource(FunctionResource):
                     "error": data.get("error"),
                 }
 
+                # Add optional fields
                 if logs_payload is not None:
                     response["logs"] = logs_payload
                 if logs_error:
@@ -475,6 +516,7 @@ class ContainerDetailsResource(FunctionResource):
                     response["stats_error"] = stats_error
 
                 return response
+
             except Exception as exc:
                 logger.error(
                     "Failed to inspect container",
