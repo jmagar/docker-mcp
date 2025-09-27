@@ -1731,5 +1731,52 @@ def _run_server(server: "DockerMCPServer", logger) -> None:
 
 # Note: FastMCP dev mode not used - we run our own server with hot reload
 
+# Module-level app instance for FastMCP configuration file support
+_app_instance = None
+
+def create_app():
+    """Create and return FastMCP app instance for configuration file usage."""
+    import argparse
+    from pathlib import Path
+
+    # Create minimal args for config loading
+    args = argparse.Namespace(
+        config=os.getenv("DOCKER_HOSTS_CONFIG", "config/hosts.yml"),
+        validate_only=False,
+        log_level=os.getenv("LOG_LEVEL", "INFO"),
+        hot_reload=False,
+        log_file_size="10MB",
+        log_file_count=5,
+        log_dir=None
+    )
+
+    # Setup minimal logging for app creation
+    log_dir = _setup_log_directory()
+    logger = _setup_logging_system(args, log_dir)
+
+    # Load configuration
+    config, _ = _load_and_configure(args, logger)
+    if config is None:
+        raise RuntimeError("Failed to load configuration")
+
+    # Create server instance and initialize app
+    server = DockerMCPServer(config)
+    server._initialize_app()
+
+    return server.app
+
+def get_app():
+    """Get the FastMCP app instance, creating it if necessary."""
+    global _app_instance
+    if _app_instance is None:
+        _app_instance = create_app()
+    return _app_instance
+
+# Direct access for FastMCP (creates app on first access)
+def __getattr__(name):
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
 if __name__ == "__main__":
     main()

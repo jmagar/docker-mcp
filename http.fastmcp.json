@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schemas.fastmcp.com/config/latest.json",
+  "name": "docker-mcp-http",
+  "description": "Docker Context Manager - HTTP Transport Configuration",
+  "source": {
+    "type": "uv",
+    "path": ".",
+    "app": "docker_mcp.server:app"
+  },
+  "env": {
+    "DOCKER_HOSTS_CONFIG": "${DOCKER_HOSTS_CONFIG:-config/hosts.yml}",
+    "LOG_LEVEL": "${LOG_LEVEL:-INFO}",
+    "LOG_DIR": "${LOG_DIR:-}",
+    "SSH_CONFIG_PATH": "${SSH_CONFIG_PATH:-}",
+    "SSH_DEBUG": "${SSH_DEBUG:-0}",
+    "RATE_LIMIT_PER_SECOND": "${RATE_LIMIT_PER_SECOND:-50.0}",
+    "SLOW_REQUEST_THRESHOLD_MS": "${SLOW_REQUEST_THRESHOLD_MS:-5000.0}",
+    "SSH_KEYS_HOST_PATH": "${SSH_KEYS_HOST_PATH:-~/.docker-mcp/ssh}",
+    "FASTMCP_HOST": "${FASTMCP_HOST:-0.0.0.0}",
+    "FASTMCP_PORT": "${FASTMCP_PORT:-8011}",
+    "FASTMCP_ENABLE_OAUTH": "${FASTMCP_ENABLE_OAUTH:-false}",
+    "FASTMCP_SERVER_AUTH": "${FASTMCP_SERVER_AUTH:-}",
+    "FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID": "${FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID:-}",
+    "FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET": "${FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET:-}",
+    "FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL": "${FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL:-http://localhost:8011}",
+    "FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH": "${FASTMCP_SERVER_AUTH_GOOGLE_REDIRECT_PATH:-/auth/callback}",
+    "FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES": "${FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES:-openid,https://www.googleapis.com/auth/userinfo.email}",
+    "FASTMCP_SERVER_AUTH_GOOGLE_ALLOWED_CLIENT_REDIRECT_URIS": "${FASTMCP_SERVER_AUTH_GOOGLE_ALLOWED_CLIENT_REDIRECT_URIS:-[\"http://localhost:*\",\"http://127.0.0.1:*\"]}"
+  },
+  "transport": {
+    "type": "http",
+    "host": "${FASTMCP_HOST:-0.0.0.0}",
+    "port": "${FASTMCP_PORT:-8011}"
+  },
+  "args": []
+}
